@@ -6,7 +6,7 @@
 
 - `openscience dev web` proxies `https://app.syntheticsciences.ai`, so local UI/CSS changes will not show there.
 - For local UI changes, run the backend and app dev servers separately.
-- Backend (from `backend/cli`): `bun run --conditions=browser ./src/index.ts serve --port 4096`
+- Backend (from `backend/cli`): `bun run --conditions=browser ./src/autofold-server.ts --port 4096`
 - App (from `frontend/workspace`): `bun dev -- --port 4444`
 - Open `http://localhost:4444` to verify UI changes (it targets the backend at `http://localhost:4096`).
 

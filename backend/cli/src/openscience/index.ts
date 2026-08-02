@@ -1,16 +1,17 @@
 import path from "path"
 import os from "os"
 import fs from "fs/promises"
-import { existsSync, readFileSync, writeFileSync, chmodSync } from "fs"
+import { existsSync } from "fs"
 import { randomUUID, createHash } from "crypto"
 import { Global } from "../global"
 import { Log } from "../util/log"
 import { Lock } from "../util/lock"
 import { Env } from "../env"
 import { Auth } from "../auth"
-import { isSyncedEnvAllowed, BYOK_LLM_ENV_KEYS, managedOpenRouterBaseURL } from "./synced-env-policy"
+import { isSyncedEnvAllowed, managedOpenRouterBaseURL } from "./synced-env-policy"
 import { resolveAtlasPackageDir } from "./atlas-package"
 import { DEFAULT_MANAGED_API_BASE, MANAGED_API_BASE } from "../endpoints"
+import { RuntimePolicy } from "../security/runtime-policy"
 
 const log = Log.create({ service: "openscience" })
 
@@ -43,24 +44,6 @@ if (API_BASE !== DEFAULT_API_BASE) {
 // staging frontend or the old auth.syntheticsciences.ai surface).
 const VERIFICATION_PAGE = process.env.SYNSC_AUTH_URL?.replace(/\/+$/, "") || "https://app.syntheticsciences.ai/cli"
 
-const syncedSecretValues = new Map<string, string>()
-
-// User-owned (BYOK) secret values — api keys from auth.json and provider env
-// vars the user set in their own shell. Cached synchronously so redactSecrets()
-// (a hot path in bash output streaming) can mask them without an async read.
-const byokSecretValues = new Set<string>()
-const TOKEN_SECRET_PATTERNS = [
-  /\b(?:thk_|sk-|sk_|gsk_|hf_|nvapi-|ghp_|gho_|ghu_|ghs_|github_pat_|xox[baprs]-)[A-Za-z0-9._-]{8,}\b/g,
-  /\bAKIA[0-9A-Z]{16}\b/g,
-]
-const QUOTED_SECRET =
-  /(\b(?:[A-Z][A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD)|api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|authorization)\b\s*[:=]\s*)(["'])(.*?)\2/gi
-const BARE_SECRET =
-  /(\b(?:[A-Z][A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD)|api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|authorization)\b\s*[:=]\s*)((?!Bearer\b)[^\s"'[,;}\]]{4,})/gi
-const BEARER_SECRET = /(\bBearer\s+)[A-Za-z0-9._~+/-]{4,}=*/gi
-const SECRET_FIELD =
-  /(^|[_-])(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|credential|authorization)($|[_-])|^(apiKey|accessToken|refreshToken|authToken|clientSecret|secretKey)$/i
-
 function isManagedAtlasKey(value: string): boolean {
   return value.startsWith("thk_")
 }
@@ -73,71 +56,6 @@ function getSyncedConfigDir(): string {
   const xdg = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config")
   return path.join(xdg, "openscience")
 }
-
-// Seed the synced-secret set from the on-disk snapshot at import. preload-env.ts
-// replays synced-env.json into process.env at boot but never seeded this set, so
-// on a fresh process where no in-process sync runs (the common steady state, when
-// the dashboard version is unchanged) the set stayed empty — and a disk-replayed
-// synced secret that isn't a thk_ value was neither stripped from subprocess env
-// nor masked by redactSecrets(). Synchronous + best-effort so the hot sync paths
-// (redactSecrets) have the values available without an async read.
-;(() => {
-  try {
-    const raw = readFileSync(path.join(getSyncedConfigDir(), "synced-env.json"), "utf-8")
-    const parsed: unknown = JSON.parse(raw)
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      for (const [key, value] of Object.entries(parsed)) {
-        if (typeof value === "string" && value) syncedSecretValues.set(key, value)
-      }
-    }
-  } catch {
-    /* no snapshot on disk — nothing to seed */
-  }
-})()
-
-/** Env vars that are safe to pass to subprocesses */
-const SAFE_ENV_PREFIXES = ["PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_", "TMPDIR", "XDG_", "EDITOR", "VISUAL"]
-const KERNEL_RUNTIME_KEYS = new Set([
-  "TMP",
-  "TEMP",
-  "PYTHONPATH",
-  "PYTHONHOME",
-  "VIRTUAL_ENV",
-  "CONDA_PREFIX",
-  "CONDA_DEFAULT_ENV",
-  "R_HOME",
-  "R_LIBS",
-  "R_LIBS_USER",
-  "LD_LIBRARY_PATH",
-  "DYLD_LIBRARY_PATH",
-  "SYSTEMROOT",
-  "WINDIR",
-  "PATHEXT",
-  "COMSPEC",
-])
-const SAFE_SYNCED_KEYS = new Set([
-  ...BYOK_LLM_ENV_KEYS,
-  // ML services
-  "TINKER_API_KEY",
-  "TINKER_BASE_URL",
-  "HF_TOKEN",
-  "HUGGING_FACE_HUB_TOKEN",
-  "WANDB_API_KEY",
-  "MODAL_TOKEN_ID",
-  "MODAL_TOKEN_SECRET",
-  "LAMBDA_API_KEY",
-  "LAMBDA_LABS_API_KEY",
-  "RUNPOD_API_KEY",
-  "PRIME_INTELLECT_API_KEY",
-  "TENSORPOOL_API_KEY",
-  "VAST_API_KEY",
-  "LANGSMITH_API_KEY",
-  "LANGCHAIN_API_KEY",
-  "LANGSMITH_TRACING",
-  "PINECONE_API_KEY",
-  // Misc CLI runtime markers
-  "OPENSCIENCE_RUNTIME",
-])
 
 /**
  * Persistent CLI auth session.
@@ -233,70 +151,6 @@ export class InsufficientCreditsError extends Error {
     super(message)
     this.name = "InsufficientCreditsError"
   }
-}
-
-// ── Bundled atlas CLI resolution ─────────────────────────────────────────
-// The @synsci/atlas package ships as a dependency; its `atlas` binary lives in
-// node_modules. The agent shells out to native `atlas` commands (the research
-// prompts drive the map + managed-compute path through it), so the
-// binary must be on the subprocess PATH without requiring a separate global
-// install. We resolve the package, prefer the npm-generated `.bin/atlas` shim,
-// and otherwise synthesize a tiny launcher in the openscience data dir that runs the
-// package's declared bin entry via node. Result is cached; every step is
-// best-effort and never throws — if atlas can't be found the agent's
-// `atlas doctor` gate degrades gracefully.
-let atlasBinDirCache: string | null | undefined
-
-/** Resolve (and cache) the directory that should be prepended to a subprocess
- *  PATH so `atlas` resolves to the bundled CLI. Returns null when the package
- *  can't be located (e.g. a standalone compiled binary with no node_modules) —
- *  callers treat that as "atlas unavailable" and continue. */
-function ensureAtlasBinDir(): string | null {
-  if (atlasBinDirCache !== undefined) return atlasBinDirCache
-  atlasBinDirCache = null
-  const pkgDir = resolveAtlasPackageDir()
-  if (!pkgDir) return atlasBinDirCache
-  // Prefer the npm-generated .bin shim — cross-platform + already executable.
-  try {
-    const nmBin = path.join(pkgDir, "..", "..", ".bin")
-    if (existsSync(path.join(nmBin, "atlas")) || existsSync(path.join(nmBin, "atlas.cmd"))) {
-      atlasBinDirCache = nmBin
-      return atlasBinDirCache
-    }
-  } catch {}
-  // Fallback: synthesize a launcher that runs the package's bin entry via node.
-  try {
-    const pkg = JSON.parse(readFileSync(path.join(pkgDir, "package.json"), "utf8")) as {
-      bin?: string | Record<string, string>
-    }
-    const rel = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.atlas
-    if (!rel) return atlasBinDirCache
-    const entry = path.join(pkgDir, rel)
-    if (!existsSync(entry)) return atlasBinDirCache
-    const launcher = path.join(Global.Path.bin, "atlas")
-    const script = `#!/bin/sh\nexec node ${JSON.stringify(entry)} "$@"\n`
-    let current = ""
-    try {
-      current = readFileSync(launcher, "utf8")
-    } catch {}
-    if (current !== script) writeFileSync(launcher, script, { mode: 0o755 })
-    chmodSync(launcher, 0o755)
-    atlasBinDirCache = Global.Path.bin
-  } catch {}
-  return atlasBinDirCache
-}
-
-/** Prepend the bundled atlas CLI's directory to a subprocess PATH so the agent
- *  can run native `atlas` commands without a separate global install. No-op
- *  when the CLI can't be located or is already on PATH. */
-function withAtlasOnPath(env: Record<string, string>): Record<string, string> {
-  const dir = ensureAtlasBinDir()
-  if (!dir) return env
-  const sep = process.platform === "win32" ? ";" : ":"
-  const key = Object.keys(env).find((k) => k.toUpperCase() === "PATH") ?? "PATH"
-  const parts = (env[key] ?? "").split(sep).filter(Boolean)
-  if (parts.includes(dir)) return env
-  return { ...env, [key]: [dir, ...parts].join(sep) }
 }
 
 export namespace OpenScience {
@@ -566,14 +420,14 @@ export namespace OpenScience {
     // sync persisted (disk snapshot, replayed by preload-env.ts at boot) —
     // a fresh `logout` process has only the latter.
     const synced = await readSyncedSnapshot()
-    for (const [key, value] of syncedSecretValues.entries()) synced.set(key, value)
+    for (const [key, value] of RuntimePolicy.syncedSecretEntries()) synced.set(key, value)
     for (const name of ["synced-env.json", "openscience-synced.json"]) {
       try {
         await fs.unlink(path.join(getSyncedConfigDir(), name))
       } catch {}
     }
     for (const [key, value] of synced.entries()) unsetSyncedVar(key, value)
-    syncedSecretValues.clear()
+    RuntimePolicy.clearSyncedSecrets()
     await clearAtlasCliConfig(session)
     await dropUsageQueue()
     // Session file last, once the managed-key-replaying artifacts are gone.
@@ -869,12 +723,12 @@ export namespace OpenScience {
       // snapshot preload-env.ts replayed at boot; a var is only removed when
       // its live value still matches, so shell exports survive.
       const previous = await readSyncedSnapshot()
-      for (const [key, value] of syncedSecretValues.entries()) previous.set(key, value)
+      for (const [key, value] of RuntimePolicy.syncedSecretEntries()) previous.set(key, value)
       for (const [key, value] of previous.entries()) {
         if (fresh.has(key)) continue
         unsetSyncedVar(key, value)
       }
-      syncedSecretValues.clear()
+      RuntimePolicy.clearSyncedSecrets()
       for (const [key, value] of fresh.entries()) {
         // Respect precedence: never clobber a user's own shell export or BYOK
         // value. Only write the synced value when the slot is empty or already
@@ -895,7 +749,7 @@ export namespace OpenScience {
         // Track the synced value regardless (for redaction + later cleanup). A
         // shadowing shell export is left untouched by the unset pass above, which
         // only removes a var whose live value still equals the synced one.
-        syncedSecretValues.set(key, value)
+        RuntimePolicy.setSyncedSecret(key, value)
       }
 
       // Write model lockdown config to managed config dir (highest priority config layer)
@@ -955,32 +809,12 @@ export namespace OpenScience {
     }
   }
 
-  /** Provider env var names whose values are user-owned secrets worth masking
-   *  when they leak into command output. Shares the single BYOK-provider source
-   *  of truth with the sync blocklist (synced-env-policy.ts) so a key the user
-   *  exported in their shell is redacted the same as a synced one. */
-  const BYOK_ENV_KEYS = BYOK_LLM_ENV_KEYS
-
   /** Populate the BYOK secret cache from auth.json (api-type keys) and the
    *  user's provider env vars. Best-effort + idempotent; safe to call often.
    *  Managed thk_* values are excluded (they are already redacted via the
    *  synced set and are never the user's own credential). */
   export async function refreshByokSecrets(env: NodeJS.ProcessEnv = process.env): Promise<void> {
-    try {
-      const auth = await Auth.all().catch(() => ({}) as Record<string, Auth.Info>)
-      for (const info of Object.values(auth)) {
-        if (info.type !== "api") continue
-        if (!info.key || isManagedAtlasKey(info.key)) continue
-        byokSecretValues.add(info.key)
-      }
-    } catch {
-      /* ignore */
-    }
-    for (const key of BYOK_ENV_KEYS) {
-      const value = env[key]
-      if (!value || isManagedAtlasKey(value)) continue
-      byokSecretValues.add(value)
-    }
+    return RuntimePolicy.refreshByokSecrets(env)
   }
 
   /** Register externally-sourced secret values (e.g. the decrypted service
@@ -988,87 +822,47 @@ export namespace OpenScience {
    *  output exactly like BYOK/managed keys. Short and managed (thk_*) values are
    *  ignored. Idempotent — safe to call on every credential save. */
   export function registerSecretValues(values: Iterable<string>): void {
-    for (const value of values) {
-      if (!value || value.length < 4 || isManagedAtlasKey(value)) continue
-      byokSecretValues.add(value)
-    }
+    RuntimePolicy.registerSecretValues(values)
   }
 
   /** Mask every known managed + BYOK secret value in arbitrary text. Sync so it
    *  can run inline on streamed subprocess output. Call refreshByokSecrets()
    *  ahead of a subprocess run to seed the BYOK cache. */
   export function redactSecrets(text: string): string {
-    let result = text
-    for (const value of syncedSecretValues.values()) {
-      if (value.length < 4) continue
-      result = result.replaceAll(value, "[REDACTED]")
-    }
-    for (const value of byokSecretValues) {
-      if (value.length < 4) continue
-      result = result.replaceAll(value, "[REDACTED]")
-    }
-    for (const pattern of TOKEN_SECRET_PATTERNS) result = result.replace(pattern, "[REDACTED]")
-    result = result.replace(BEARER_SECRET, "$1[REDACTED]")
-    result = result.replace(QUOTED_SECRET, "$1$2[REDACTED]$2")
-    result = result.replace(BARE_SECRET, "$1[REDACTED]")
-    return result
+    return RuntimePolicy.redactSecrets(text)
   }
 
   /** Redact a JSON-shaped value, including plain values stored under credential-
    *  shaped keys, using the currently seeded secret cache. */
   export function redactSensitive<T>(value: T): T {
-    const visit = (item: unknown, key?: string): unknown => {
-      if (typeof item === "string") return key && SECRET_FIELD.test(key) ? "[REDACTED]" : redactSecrets(item)
-      if (Array.isArray(item)) return item.map((entry) => visit(entry))
-      if (!item || typeof item !== "object") return item
-      return Object.fromEntries(
-        Object.entries(item as Record<string, unknown>).map(([name, entry]) => [name, visit(entry, name)]),
-      )
-    }
-    return visit(value) as T
+    return RuntimePolicy.redactSensitive(value)
   }
 
   /** Refresh known BYOK values, then redact a JSON-shaped value. Persistence
    *  boundaries should use this entry point before serializing. */
   export async function scrubSecrets<T>(value: T): Promise<T> {
-    await refreshByokSecrets()
-    return redactSensitive(value)
+    return RuntimePolicy.scrubSecrets(value)
   }
 
   /** Whether a value is a managed Atlas proxy token (thk_*). Managed calls are
    *  the only ones that debit Credits. */
   export function isManagedKeyValue(value: string | undefined): boolean {
-    return typeof value === "string" && isManagedAtlasKey(value)
+    return RuntimePolicy.isManagedKeyValue(value)
   }
 
   /** Whether an env var name was populated by the dashboard sync (managed). */
   export function isSyncedSecretKey(key: string): boolean {
-    return syncedSecretValues.has(key)
+    return RuntimePolicy.isSyncedSecretKey(key)
   }
 
   /** Whether a value matches a dashboard-synced (managed) secret. */
   export function isSyncedSecretValue(value: string | undefined): boolean {
-    if (!value) return false
-    for (const v of syncedSecretValues.values()) if (v === value) return true
-    return false
+    return RuntimePolicy.isSyncedSecretValue(value)
   }
 
   /** Filter env vars for subprocesses — exclude managed Atlas proxy tokens. */
   export function filterEnvForSubprocess(env: NodeJS.ProcessEnv): Record<string, string> {
-    const result: Record<string, string> = {}
-    for (const [key, value] of Object.entries(env)) {
-      if (!value) continue
-      if (isManagedAtlasKey(value)) continue
-      // Entries ending in `_` (LC_, XDG_) are true prefixes; the rest are exact
-      // names. Treating all as prefixes let HOME match HOMEBREW_GITHUB_API_TOKEN,
-      // USER match USERPROFILE, etc. — over-broad passthrough.
-      const isSafe =
-        SAFE_ENV_PREFIXES.some((p) => (p.endsWith("_") ? key.startsWith(p) : key === p)) || SAFE_SYNCED_KEYS.has(key)
-      if (isSafe || !syncedSecretValues.has(key)) {
-        result[key] = value
-      }
-    }
-    return result
+    return RuntimePolicy.filterEnvForSubprocess(env)
   }
 
   /** Minimal environment for arbitrary notebook/R code. Kernels need language
@@ -1076,110 +870,17 @@ export namespace OpenScience {
    * credentials. Provider, Atlas, cloud, and ad-hoc secret vars stay on the
    * OpenScience host and can only enter a kernel through an explicit start env. */
   export function filterEnvForKernel(env: NodeJS.ProcessEnv): Record<string, string> {
-    const result: Record<string, string> = {}
-    for (const [key, value] of Object.entries(env)) {
-      if (!value) continue
-      const runtime =
-        SAFE_ENV_PREFIXES.some((prefix) => (prefix.endsWith("_") ? key.startsWith(prefix) : key === prefix)) ||
-        KERNEL_RUNTIME_KEYS.has(key)
-      if (runtime) result[key] = value
-    }
-    return result
+    return RuntimePolicy.filterEnvForKernel(env)
   }
 
   export function kernelEnv(env: NodeJS.ProcessEnv = process.env) {
-    return filterEnvForKernel(env)
+    return RuntimePolicy.kernelEnv(env)
   }
 
   /** Host credential files that an OS-sandboxed kernel must not read. Atlas
    * access is intentionally provided by the native host broker instead. */
   export function kernelSensitivePaths() {
-    return [
-      filepath,
-      path.join(Global.Path.data, "auth.json"),
-      path.join(Global.Path.data, "credentials.json"),
-      path.join(Global.Path.data, "mcp-auth.json"),
-      path.join(getSyncedConfigDir(), "synced-env.json"),
-      process.env.ATLAS_CLI_CONFIG_PATH || path.join(os.homedir(), ".config", "atlas-cli", "config.json"),
-    ]
-  }
-
-  /** Provider IDs (as stored in auth.json) whose user-owned BYOK keys are safe
-   *  to expose to skill subprocesses, mapped to the env var(s) the scripts
-   *  read. These are keys the user explicitly added with `openscience login` —
-   *  unlike the shared managed keys, which stay stripped. */
-  const BYOK_SUBPROCESS_PROVIDERS: Record<string, { keys: string[]; baseUrl?: string; publicBaseUrl?: string }> = {
-    openai: {
-      keys: ["OPENAI_API_KEY"],
-      baseUrl: "OPENAI_BASE_URL",
-      publicBaseUrl: "https://api.openai.com/v1",
-    },
-    anthropic: {
-      keys: ["ANTHROPIC_API_KEY"],
-      baseUrl: "ANTHROPIC_BASE_URL",
-      publicBaseUrl: "https://api.anthropic.com/v1",
-    },
-    google: {
-      keys: ["GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"],
-      baseUrl: "GOOGLE_GENERATIVE_AI_BASE_URL",
-      publicBaseUrl: "https://generativelanguage.googleapis.com/v1beta",
-    },
-    xai: {
-      keys: ["XAI_API_KEY"],
-      baseUrl: "XAI_BASE_URL",
-      publicBaseUrl: "https://api.x.ai/v1",
-    },
-    meta: { keys: ["META_MODEL_API_KEY"] },
-    openrouter: {
-      keys: ["OPENROUTER_API_KEY"],
-      baseUrl: "OPENROUTER_BASE_URL",
-      publicBaseUrl: "https://openrouter.ai/api/v1",
-    },
-    togetherai: {
-      keys: ["TOGETHER_API_KEY"],
-      baseUrl: "TOGETHER_BASE_URL",
-      publicBaseUrl: "https://api.together.xyz/v1",
-    },
-    together: {
-      keys: ["TOGETHER_API_KEY"],
-      baseUrl: "TOGETHER_BASE_URL",
-      publicBaseUrl: "https://api.together.xyz/v1",
-    },
-    groq: {
-      keys: ["GROQ_API_KEY"],
-      baseUrl: "GROQ_BASE_URL",
-      publicBaseUrl: "https://api.groq.com/openai/v1",
-    },
-    "fireworks-ai": {
-      keys: ["FIREWORKS_API_KEY"],
-      baseUrl: "FIREWORKS_BASE_URL",
-      publicBaseUrl: "https://api.fireworks.ai/inference/v1",
-    },
-    fireworks: {
-      keys: ["FIREWORKS_API_KEY"],
-      baseUrl: "FIREWORKS_BASE_URL",
-      publicBaseUrl: "https://api.fireworks.ai/inference/v1",
-    },
-    mistral: {
-      keys: ["MISTRAL_API_KEY"],
-      baseUrl: "MISTRAL_BASE_URL",
-      publicBaseUrl: "https://api.mistral.ai/v1",
-    },
-    deepseek: {
-      keys: ["DEEPSEEK_API_KEY"],
-      baseUrl: "DEEPSEEK_BASE_URL",
-      publicBaseUrl: "https://api.deepseek.com",
-    },
-    cerebras: {
-      keys: ["CEREBRAS_API_KEY"],
-      baseUrl: "CEREBRAS_BASE_URL",
-      publicBaseUrl: "https://api.cerebras.ai/v1",
-    },
-    perplexity: {
-      keys: ["PERPLEXITY_API_KEY"],
-      baseUrl: "PERPLEXITY_BASE_URL",
-      publicBaseUrl: "https://api.perplexity.ai",
-    },
+    return RuntimePolicy.kernelSensitivePaths()
   }
 
   /** Merge user-owned (BYOK) provider keys from auth.json into a subprocess env.
@@ -1189,17 +890,7 @@ export namespace OpenScience {
    *  url is pinned to the public endpoint so the key authenticates against the
    *  right host rather than a managed proxy. */
   export function mergeByokEnv(base: Record<string, string>, auth: Record<string, Auth.Info>): Record<string, string> {
-    const result = { ...base }
-    for (const [providerID, info] of Object.entries(auth)) {
-      if (info.type !== "api") continue
-      if (isManagedAtlasKey(info.key)) continue
-      const spec = BYOK_SUBPROCESS_PROVIDERS[providerID]
-      if (!spec) continue
-      if (spec.keys.some((key) => result[key])) continue
-      for (const key of spec.keys) result[key] = info.key
-      if (spec.baseUrl && spec.publicBaseUrl) result[spec.baseUrl] = spec.publicBaseUrl
-    }
-    return result
+    return RuntimePolicy.mergeByokEnv(base, auth)
   }
 
   /** Subprocess env = sanitized base env + any user-owned BYOK provider keys
@@ -1207,11 +898,7 @@ export namespace OpenScience {
    *  use a key the user connected with `openscience login`, without leaking the
    *  shared managed keys. */
   export async function subprocessEnv(env: NodeJS.ProcessEnv = process.env): Promise<Record<string, string>> {
-    const base = filterEnvForSubprocess(env)
-    const auth = await Auth.all().catch(() => ({}) as Record<string, Auth.Info>)
-    // Prepend the bundled atlas CLI to PATH so the agent's native `atlas`
-    // commands resolve without a separate global install.
-    return withAtlasOnPath(mergeByokEnv(base, auth))
+    return RuntimePolicy.subprocessEnv(env)
   }
 
   // Default thread/worker caps for scientific Python kernels. Without these,

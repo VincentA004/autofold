@@ -32,14 +32,19 @@ The following remain intentionally even when users see the Autofold name:
 
 ## Research-kernel extraction order
 
-1. Split legacy project/session migration out of project identity.
-2. Extract compute secret-redaction and environment policy from the broad
-   OpenScience service dependency.
-3. Split project bootstrap into base research, chat, and optional developer-tool
+1. Split project bootstrap into base research, chat, and optional developer-tool
    bootstraps.
-4. Add a dedicated Autofold server entrypoint before removing donor CLI commands.
-5. Consolidate the three artifact systems only after UI consumers move to the
+2. Consolidate the three artifact systems only after UI consumers move to the
    campaign/trial/run model.
+
+Completed in the first backend extraction:
+
+- Legacy session migration now loads behind a compatibility-only dynamic import;
+  core project identity no longer imports the session-agent runtime.
+- Compute execution now depends on a narrow runtime security policy; the broad
+  OpenScience namespace remains only as a compatibility facade for older callers.
+- Local Autofold development starts from a dedicated server entrypoint without
+  statically registering every donor CLI command. The legacy CLI remains intact.
 
 ## Verified cleanup candidates
 

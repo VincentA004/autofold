@@ -5,7 +5,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import z from "zod"
 import { Global } from "../global"
-import { OpenScience } from "../openscience"
+import { RuntimePolicy } from "../security/runtime-policy"
 import { Shell } from "../shell/shell"
 import { Instance } from "../project/instance"
 import { Sandbox } from "../sandbox/sandbox"
@@ -247,7 +247,7 @@ export namespace ComputeJobs {
   }
 
   async function write(root: string, jobs: Job[]): Promise<void> {
-    const clean = await OpenScience.scrubSecrets(jobs)
+    const clean = await RuntimePolicy.scrubSecrets(jobs)
     const filepath = metaOf(root)
     const temp = `${filepath}.${process.pid}.${crypto.randomUUID()}.tmp`
     await fs.mkdir(root, { recursive: true })
@@ -524,7 +524,7 @@ export namespace ComputeJobs {
         file: spec.argv[0]!,
         args: spec.argv.slice(1),
         workspace: authority.writable,
-        unreadable: OpenScience.kernelSensitivePaths(),
+        unreadable: RuntimePolicy.kernelSensitivePaths(),
         options: authority.sandbox,
       })
       return {
@@ -547,7 +547,7 @@ export namespace ComputeJobs {
       args: ["-lc", wrapped],
       workspace: authority.writable,
       extraWritable: [exitOf(scope.root, job.id)],
-      unreadable: OpenScience.kernelSensitivePaths(),
+      unreadable: RuntimePolicy.kernelSensitivePaths(),
       options: authority.sandbox,
     })
     return {
@@ -571,12 +571,12 @@ export namespace ComputeJobs {
       file: argv[0]!,
       args: argv.slice(1),
       workspace: authority.writable,
-      unreadable: OpenScience.kernelSensitivePaths(),
+      unreadable: RuntimePolicy.kernelSensitivePaths(),
       options: authority.sandbox,
     })
     const proc = Bun.spawn([planned.file, ...planned.args], {
       cwd,
-      env: await OpenScience.subprocessEnv(process.env),
+      env: await RuntimePolicy.subprocessEnv(process.env),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "ignore",
@@ -781,7 +781,7 @@ export namespace ComputeJobs {
     ].join("; ")
     const argv = ssh(parsed, script)
     const proc = spawn(argv[0]!, argv.slice(1), {
-      env: await OpenScience.subprocessEnv(process.env),
+      env: await RuntimePolicy.subprocessEnv(process.env),
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     })
@@ -828,7 +828,7 @@ export namespace ComputeJobs {
     await fs.mkdir(logsOf(scope.root), { recursive: true })
     const log = path.join(logsOf(scope.root), `${job.id}.log`)
     const output = await fs.open(log, "a", 0o600)
-    const env = await OpenScience.subprocessEnv(process.env)
+    const env = await RuntimePolicy.subprocessEnv(process.env)
     const queued = (await read(scope.root)).find((item) => item.id === job.id)
     if (queued?.status === "cancelled") {
       await output.close()
@@ -1059,13 +1059,13 @@ export namespace ComputeJobs {
             file: spec.argv[0]!,
             args: spec.argv.slice(1),
             workspace: job.authority.writable,
-            unreadable: OpenScience.kernelSensitivePaths(),
+            unreadable: RuntimePolicy.kernelSensitivePaths(),
             options: job.authority.sandbox,
           })
         : { file: spec.argv[0]!, args: spec.argv.slice(1) }
       const proc = spawn(planned.file, planned.args, {
         cwd: job.authority?.workspace,
-        env: await OpenScience.subprocessEnv(process.env),
+        env: await RuntimePolicy.subprocessEnv(process.env),
         windowsHide: true,
         stdio: "ignore",
       })
