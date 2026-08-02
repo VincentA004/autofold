@@ -1,0 +1,272 @@
+import crypto from "node:crypto"
+import fs from "node:fs/promises"
+import path from "node:path"
+import { ComputeJobs } from "@/compute/jobs"
+import { Instance } from "@/project/instance"
+import { Research, ResearchService } from "./service"
+import { ExecutionProtocol } from "./execution-protocol"
+import { ResearchDomain } from "./domain"
+import { DesignAdapters } from "./adapters"
+
+const workerRoot = path.resolve(import.meta.dir, "../../../worker")
+const workerScript = path.join(workerRoot, "run_worker.py")
+const mockEvaluatorSource = path.join(workerRoot, "autofold_worker", "evaluate.py")
+const finalizers = new Map<string, Promise<void>>()
+
+async function fileHash(file: string): Promise<string> {
+  const hash = new Bun.CryptoHasher("sha256")
+  hash.update(await Bun.file(file).arrayBuffer())
+  return `sha256:${hash.digest("hex")}`
+}
+
+async function writeJSON(file: string, value: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`
+  await fs.writeFile(temporary, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 })
+  await fs.rename(temporary, file)
+}
+
+function inside(root: string, relative: string): string {
+  const target = path.resolve(root, relative)
+  const relation = path.relative(root, target)
+  if (relation === ".." || relation.startsWith(`..${path.sep}`) || path.isAbsolute(relation)) {
+    throw new Error(`Research run path escapes the project: ${relative}`)
+  }
+  return target
+}
+
+export namespace ResearchExecution {
+  export interface EvaluatorInfo {
+    id: string
+    version: string
+    sourceHash: string
+    direction: "minimize" | "maximize"
+    implementation: string
+  }
+
+  export async function evaluators(): Promise<EvaluatorInfo[]> {
+    return [
+      {
+        id: "mock-peptide-panel",
+        version: "1",
+        sourceHash: await fileHash(mockEvaluatorSource),
+        direction: "minimize",
+        implementation: "python-stdlib",
+      },
+    ]
+  }
+
+  export async function start(input: { trialId: string; sessionId: string }): Promise<ResearchDomain.Run> {
+    const projectId = Instance.project.id
+    const context = await Research.getTrialContext(projectId, input.trialId)
+    const adapter = await DesignAdapters.get(context.trial.designAdapter, Instance.directory)
+    if (!adapter.available) {
+      throw new ResearchService.ConflictError({
+        code: "design_adapter_unavailable",
+        message: adapter.reason ?? `Design adapter ${adapter.id} is unavailable`,
+      })
+    }
+    const installed = (await evaluators()).find(
+      (candidate) =>
+        candidate.id === context.experiment.contract.evaluator.id &&
+        candidate.version === context.experiment.contract.evaluator.version,
+    )
+    if (!installed) {
+      throw new ResearchService.ConflictError({
+        code: "evaluator_not_installed",
+        message: `Evaluator ${context.experiment.contract.evaluator.id}@${context.experiment.contract.evaluator.version} is not installed`,
+      })
+    }
+    if (installed.sourceHash !== context.experiment.contract.evaluator.sourceHash) {
+      throw new ResearchService.ConflictError({
+        code: "evaluator_source_mismatch",
+        message: "The installed evaluator source does not match the frozen experiment contract",
+      })
+    }
+
+    const runId = `run_${crypto.randomUUID().replaceAll("-", "")}`
+    const root = path.posix.join(".autofold", "runs", runId)
+    const bundlePath = path.posix.join(root, "bundle.json")
+    const programPath = path.posix.join(root, "trial.py")
+    const outputPath = path.posix.join(root, "output")
+    const run = await Research.beginRun(projectId, input.trialId, { runId, bundlePath, outputPath })
+    const bundle = ExecutionProtocol.TrialBundle.parse({
+      format: "autofold.trial-bundle.v1",
+      runId,
+      trialId: context.trial.id,
+      contractHash: context.experiment.contractHash,
+      designAdapter: context.trial.designAdapter,
+      programPath: inside(Instance.directory, programPath),
+      programHash: context.trial.programHash,
+      modality: context.experiment.contract.modality,
+      evaluator: {
+        id: installed.id,
+        version: installed.version,
+        sourceHash: installed.sourceHash,
+        direction: installed.direction,
+      },
+      proto: adapter.proto,
+      seeds: context.experiment.contract.evaluator.fixedSeeds,
+      candidateBudget: context.experiment.contract.budget.maximumCandidates,
+      submissionSize: context.experiment.contract.evaluator.submissionSize,
+    })
+    const absoluteBundle = inside(Instance.directory, bundlePath)
+    const sourceProgram = inside(Instance.directory, context.trial.programPath)
+    const absoluteProgram = inside(Instance.directory, programPath)
+    const absoluteOutput = inside(Instance.directory, outputPath)
+
+    try {
+      const actualProgramHash = await fileHash(sourceProgram)
+      if (actualProgramHash !== context.trial.programHash) {
+        throw new ResearchService.ConflictError({
+          code: "program_hash_mismatch",
+          message: `Trial program does not match its recorded hash: ${context.trial.programPath}`,
+        })
+      }
+      await fs.mkdir(path.dirname(absoluteProgram), { recursive: true })
+      await fs.copyFile(sourceProgram, absoluteProgram)
+      await writeJSON(absoluteBundle, bundle)
+      const command = [
+        ComputeJobs.quote(adapter.python),
+        ComputeJobs.quote(workerScript),
+        "--bundle",
+        ComputeJobs.quote(absoluteBundle),
+        "--output",
+        ComputeJobs.quote(absoluteOutput),
+        "--evaluator-source",
+        ComputeJobs.quote(mockEvaluatorSource),
+      ].join(" ")
+      const job = await ComputeJobs.start({
+        sessionID: input.sessionId,
+        name: `Autofold trial ${context.trial.id}`,
+        command,
+        cwd: ".",
+        target: { kind: "local" },
+        resources: {
+          cpus: 1,
+          gpus: 0,
+          time_minutes: Math.max(1, context.experiment.contract.budget.wallTimeMinutes),
+        },
+        artifacts: [path.posix.join(outputPath, "**", "*")],
+      })
+      const running = await Research.attachRunJob(projectId, run.id, job.id)
+      scheduleFinalization(
+        projectId,
+        Instance.directory,
+        running.id,
+        job.id,
+        context.experiment.contract.budget.wallTimeMinutes,
+      )
+      return running
+    } catch (error) {
+      await Research.failRun(projectId, run.id, error instanceof Error ? error.message : String(error))
+      throw error
+    }
+  }
+
+  export async function get(runId: string) {
+    const run = await Research.getRun(Instance.project.id, runId)
+    if (run.status === "running" && run.jobId) {
+      const job = await ComputeJobs.get(run.jobId)
+      if (job && ["succeeded", "failed", "cancelled", "interrupted"].includes(job.status)) {
+        scheduleFinalization(Instance.project.id, Instance.directory, run.id, job.id, 1)
+        await finalizers.get(run.id)
+        return Research.getRun(Instance.project.id, run.id)
+      }
+    }
+    return run
+  }
+
+  function scheduleFinalization(
+    projectId: string,
+    workspace: string,
+    runId: string,
+    jobId: string,
+    minutes: number,
+  ): void {
+    if (finalizers.has(runId)) return
+    const task = finalize(projectId, workspace, runId, jobId, minutes)
+      .catch(async (error) => {
+        await Research.failRun(projectId, runId, error instanceof Error ? error.message : String(error))
+      })
+      .finally(() => finalizers.delete(runId))
+    finalizers.set(runId, task)
+  }
+
+  async function finalize(
+    projectId: string,
+    workspace: string,
+    runId: string,
+    jobId: string,
+    minutes: number,
+  ): Promise<void> {
+    const job = await ComputeJobs.wait(jobId, {
+      workspace,
+      timeout: Math.max(60_000, minutes * 60_000 + 30_000),
+    })
+    if (job.status !== "succeeded") {
+      const detail = await ComputeJobs.log(jobId, { workspace }).catch(() => "")
+      throw new Error(detail.trim() || `Compute job ${jobId} ended with ${job.status}`)
+    }
+    const run = await Research.getRun(projectId, runId)
+    const context = await Research.getTrialContext(projectId, run.trialId)
+    const bundlePath = inside(workspace, run.bundlePath)
+    const output = inside(workspace, run.outputPath)
+    const bundle = ExecutionProtocol.TrialBundle.parse(await Bun.file(bundlePath).json())
+    const programPath = inside(workspace, bundle.programPath)
+    const candidatesPath = path.join(output, "candidates.json")
+    const resultPath = path.join(output, "result.json")
+    const candidates = ExecutionProtocol.CandidateSet.parse(await Bun.file(candidatesPath).json())
+    const result = ExecutionProtocol.EvaluationResult.parse(await Bun.file(path.join(output, "result.json")).json())
+    const manifestPath = path.join(output, "manifest.json")
+    const manifest = ExecutionProtocol.RunManifest.parse(await Bun.file(manifestPath).json())
+    if (
+      bundle.runId !== run.id ||
+      candidates.runId !== run.id ||
+      result.runId !== run.id ||
+      manifest.runId !== run.id ||
+      bundle.trialId !== run.trialId ||
+      candidates.trialId !== run.trialId ||
+      result.trialId !== run.trialId ||
+      manifest.trialId !== run.trialId
+    ) {
+      throw new Error(`Run ${run.id} returned artifacts for another run or trial`)
+    }
+    if (
+      bundle.contractHash !== context.experiment.contractHash ||
+      bundle.programHash !== context.trial.programHash ||
+      bundle.evaluator.sourceHash !== context.experiment.contract.evaluator.sourceHash ||
+      result.contractHash !== context.experiment.contractHash ||
+      result.evaluatorHash !== context.experiment.contract.evaluator.sourceHash ||
+      manifest.evaluatorHash !== context.experiment.contract.evaluator.sourceHash ||
+      result.designAdapter !== context.trial.designAdapter ||
+      manifest.designAdapter !== context.trial.designAdapter ||
+      result.programHash !== context.trial.programHash ||
+      manifest.programHash !== context.trial.programHash
+    ) {
+      throw new Error(`Run ${run.id} returned artifacts that do not match its frozen experiment`)
+    }
+    const expectedFiles: Record<string, string> = {
+      bundle: await fileHash(bundlePath),
+      program: await fileHash(programPath),
+      candidates: await fileHash(candidatesPath),
+      result: await fileHash(resultPath),
+    }
+    for (const [label, hash] of Object.entries(expectedFiles)) {
+      if (manifest.files[label] !== hash) throw new Error(`Run ${run.id} manifest does not match ${label}`)
+    }
+    const manifestHash = await fileHash(manifestPath)
+    await Research.completeRun(
+      projectId,
+      runId,
+      {
+        contractHash: result.contractHash,
+        evaluatorHash: result.evaluatorHash,
+        valid: result.valid,
+        score: result.score,
+        diagnostics: result.diagnostics,
+      },
+      manifestHash,
+    )
+  }
+}

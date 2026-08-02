@@ -1,0 +1,472 @@
+import crypto from "node:crypto"
+import z from "zod"
+import { NamedError } from "@synsci/util/error"
+import { ResearchDomain } from "./domain"
+import { StorageResearchStore, type ResearchState, type ResearchStore } from "./store"
+
+const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/)
+
+export namespace ResearchService {
+  export const NotFoundError = NamedError.create(
+    "ResearchNotFoundError",
+    z.object({ entity: z.enum(["campaign", "experiment", "trial", "evaluation", "run"]), id: z.string() }),
+  )
+
+  export const ConflictError = NamedError.create(
+    "ResearchConflictError",
+    z.object({ code: z.string(), message: z.string() }),
+  )
+
+  export const CreateCampaignInput = z.object({
+    objective: z.string().trim().min(1),
+    knowledgeCatalogId: z.string().trim().min(1).optional(),
+  })
+  export type CreateCampaignInput = z.infer<typeof CreateCampaignInput>
+
+  export const CreateExperimentInput = z.object({ contract: ResearchDomain.ExperimentContract })
+  export type CreateExperimentInput = z.infer<typeof CreateExperimentInput>
+
+  export const CreateTrialInput = z.object({
+    hypothesis: z.string().trim().min(1),
+    designAdapter: z.enum(["mock", "proto"]),
+    programPath: z.string().trim().min(1).max(4_000),
+    programHash: digest,
+    parentTrialId: z.string().startsWith("trl_").optional(),
+  })
+  export type CreateTrialInput = z.infer<typeof CreateTrialInput>
+
+  export const RecordEvaluationInput = z
+    .object({
+      contractHash: digest,
+      evaluatorHash: digest,
+      valid: z.boolean(),
+      score: z.number().finite().nullable(),
+      diagnostics: z.record(z.string(), z.number().finite()).default({}),
+    })
+    .superRefine((value, context) => {
+      if (value.valid && value.score === null) {
+        context.addIssue({ code: "custom", message: "A valid evaluation must include a score", path: ["score"] })
+      }
+    })
+  export type RecordEvaluationInput = z.infer<typeof RecordEvaluationInput>
+
+  export interface Options {
+    now?: () => string
+    id?: (prefix: "cmp" | "exp" | "trl" | "evl" | "run") => string
+  }
+
+  export interface EvaluationResult {
+    evaluation: ResearchDomain.Evaluation
+    trial: ResearchDomain.Trial
+    experiment: ResearchDomain.Experiment
+    decision: "promoted" | "rejected"
+  }
+
+  export class Service {
+    private readonly now: () => string
+    private readonly id: (prefix: "cmp" | "exp" | "trl" | "evl" | "run") => string
+
+    constructor(
+      private readonly store: ResearchStore,
+      options: Options = {},
+    ) {
+      this.now = options.now ?? (() => new Date().toISOString())
+      this.id = options.id ?? ((prefix) => `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`)
+    }
+
+    async listCampaigns(projectId: string): Promise<ResearchDomain.Campaign[]> {
+      const state = await this.store.read(projectId)
+      return Object.values(state.campaigns).toSorted((a, b) => b.createdAt.localeCompare(a.createdAt))
+    }
+
+    async createCampaign(projectId: string, raw: CreateCampaignInput): Promise<ResearchDomain.Campaign> {
+      const input = CreateCampaignInput.parse(raw)
+      return this.store.mutate(projectId, (state) => {
+        const timestamp = this.now()
+        const campaign = ResearchDomain.Campaign.parse({
+          id: this.id("cmp"),
+          projectId,
+          objective: input.objective,
+          status: "draft",
+          knowledgeCatalogId: input.knowledgeCatalogId ?? `okf_${crypto.randomUUID().replaceAll("-", "")}`,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        })
+        state.campaigns[campaign.id] = campaign
+        return campaign
+      })
+    }
+
+    async activateCampaign(projectId: string, campaignId: string): Promise<ResearchDomain.Campaign> {
+      return this.store.mutate(projectId, (state) => {
+        const campaign = this.campaign(state, campaignId)
+        if (campaign.status !== "draft" && campaign.status !== "paused") {
+          throw new ConflictError({
+            code: "campaign_not_activatable",
+            message: `Campaign ${campaignId} cannot be activated from ${campaign.status}`,
+          })
+        }
+        const updated = ResearchDomain.Campaign.parse({ ...campaign, status: "active", updatedAt: this.now() })
+        state.campaigns[campaignId] = updated
+        return updated
+      })
+    }
+
+    async listExperiments(projectId: string, campaignId: string): Promise<ResearchDomain.Experiment[]> {
+      const state = await this.store.read(projectId)
+      this.campaign(state, campaignId)
+      return Object.values(state.experiments)
+        .filter((experiment) => experiment.campaignId === campaignId)
+        .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt))
+    }
+
+    async createExperiment(
+      projectId: string,
+      campaignId: string,
+      raw: CreateExperimentInput,
+    ): Promise<ResearchDomain.Experiment> {
+      const input = CreateExperimentInput.parse(raw)
+      return this.store.mutate(projectId, (state) => {
+        const campaign = this.campaign(state, campaignId)
+        if (campaign.status !== "active") {
+          throw new ConflictError({
+            code: "campaign_not_active",
+            message: `Campaign ${campaignId} must be active before creating an experiment`,
+          })
+        }
+        const timestamp = this.now()
+        const experiment = ResearchDomain.Experiment.parse({
+          id: this.id("exp"),
+          campaignId,
+          status: "draft",
+          contract: input.contract,
+          contractHash: ResearchDomain.hashContract(input.contract),
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        })
+        state.experiments[experiment.id] = experiment
+        return experiment
+      })
+    }
+
+    async activateExperiment(projectId: string, experimentId: string): Promise<ResearchDomain.Experiment> {
+      return this.store.mutate(projectId, (state) => {
+        const experiment = this.experiment(state, experimentId)
+        const campaign = this.campaign(state, experiment.campaignId)
+        if (campaign.status !== "active") {
+          throw new ConflictError({
+            code: "campaign_not_active",
+            message: `Campaign ${campaign.id} must be active before activating an experiment`,
+          })
+        }
+        if (experiment.status !== "draft" && experiment.status !== "paused") {
+          throw new ConflictError({
+            code: "experiment_not_activatable",
+            message: `Experiment ${experimentId} cannot be activated from ${experiment.status}`,
+          })
+        }
+        ResearchDomain.assertContractIntegrity(experiment)
+        const updated = ResearchDomain.Experiment.parse({ ...experiment, status: "active", updatedAt: this.now() })
+        state.experiments[experimentId] = updated
+        return updated
+      })
+    }
+
+    async createTrial(projectId: string, experimentId: string, raw: CreateTrialInput): Promise<ResearchDomain.Trial> {
+      const input = CreateTrialInput.parse(raw)
+      return this.store.mutate(projectId, (state) => {
+        const experiment = this.experiment(state, experimentId)
+        if (experiment.status !== "active") {
+          throw new ConflictError({
+            code: "experiment_not_active",
+            message: `Experiment ${experimentId} must be active before creating a trial`,
+          })
+        }
+        ResearchDomain.assertContractIntegrity(experiment)
+        const parentTrialId = input.parentTrialId ?? experiment.incumbentTrialId
+        if (parentTrialId) {
+          const parent = this.trial(state, parentTrialId)
+          if (parent.experimentId !== experimentId) {
+            throw new ConflictError({
+              code: "parent_trial_mismatch",
+              message: `Parent trial ${parentTrialId} belongs to another experiment`,
+            })
+          }
+        }
+        const timestamp = this.now()
+        const trial = ResearchDomain.Trial.parse({
+          id: this.id("trl"),
+          experimentId,
+          parentTrialId,
+          hypothesis: input.hypothesis,
+          designAdapter: input.designAdapter,
+          programPath: input.programPath,
+          programHash: input.programHash,
+          status: "proposed",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        })
+        state.trials[trial.id] = trial
+        return trial
+      })
+    }
+
+    async transitionTrial(
+      projectId: string,
+      trialId: string,
+      status: ResearchDomain.TrialStatus,
+    ): Promise<ResearchDomain.Trial> {
+      return this.store.mutate(projectId, (state) => {
+        const trial = this.trial(state, trialId)
+        if (status === "succeeded") {
+          throw new ConflictError({
+            code: "evaluation_required",
+            message: `Trial ${trialId} can only succeed through a recorded evaluation`,
+          })
+        }
+        const updated = (() => {
+          try {
+            return ResearchDomain.transitionTrial(trial, status, this.now())
+          } catch (error) {
+            throw new ConflictError({
+              code: "illegal_trial_transition",
+              message: error instanceof Error ? error.message : String(error),
+            })
+          }
+        })()
+        state.trials[trialId] = updated
+        return updated
+      })
+    }
+
+    async getTrialContext(projectId: string, trialId: string) {
+      const state = await this.store.read(projectId)
+      const trial = this.trial(state, trialId)
+      const experiment = this.experiment(state, trial.experimentId)
+      const campaign = this.campaign(state, experiment.campaignId)
+      return { campaign, experiment, trial }
+    }
+
+    async beginRun(
+      projectId: string,
+      trialId: string,
+      paths: { runId?: string; bundlePath: string; outputPath: string },
+    ): Promise<ResearchDomain.Run> {
+      return this.store.mutate(projectId, (state) => {
+        const trial = this.trial(state, trialId)
+        if (trial.status !== "proposed") {
+          throw new ConflictError({
+            code: "trial_not_proposed",
+            message: `Trial ${trialId} must be proposed before it can run`,
+          })
+        }
+        if (Object.values(state.runs).some((run) => run.trialId === trialId && !["failed", "cancelled"].includes(run.status))) {
+          throw new ConflictError({
+            code: "trial_already_running",
+            message: `Trial ${trialId} already has an active or completed run`,
+          })
+        }
+        const timestamp = this.now()
+        const run = ResearchDomain.Run.parse({
+          id: paths.runId ?? this.id("run"),
+          trialId,
+          status: "queued",
+          bundlePath: paths.bundlePath,
+          outputPath: paths.outputPath,
+          createdAt: timestamp,
+        })
+        state.runs[run.id] = run
+        state.trials[trialId] = ResearchDomain.transitionTrial(trial, "queued", timestamp)
+        return run
+      })
+    }
+
+    async attachRunJob(projectId: string, runId: string, jobId: string): Promise<ResearchDomain.Run> {
+      return this.store.mutate(projectId, (state) => {
+        const run = this.run(state, runId)
+        if (run.status !== "queued") return run
+        const trial = this.trial(state, run.trialId)
+        const timestamp = this.now()
+        const updated = ResearchDomain.Run.parse({
+          ...run,
+          status: "running",
+          jobId,
+          startedAt: timestamp,
+        })
+        state.runs[runId] = updated
+        state.trials[trial.id] = ResearchDomain.transitionTrial(trial, "running", timestamp)
+        return updated
+      })
+    }
+
+    async getRun(projectId: string, runId: string): Promise<ResearchDomain.Run> {
+      return this.run(await this.store.read(projectId), runId)
+    }
+
+    async failRun(projectId: string, runId: string, message: string): Promise<ResearchDomain.Run> {
+      return this.store.mutate(projectId, (state) => {
+        const run = this.run(state, runId)
+        if (["succeeded", "failed", "cancelled"].includes(run.status)) return run
+        const trial = this.trial(state, run.trialId)
+        const timestamp = this.now()
+        const updated = ResearchDomain.Run.parse({
+          ...run,
+          status: "failed",
+          error: message,
+          completedAt: timestamp,
+        })
+        state.runs[runId] = updated
+        if (["queued", "running", "evaluating"].includes(trial.status)) {
+          state.trials[trial.id] = ResearchDomain.transitionTrial(trial, "failed", timestamp)
+        }
+        return updated
+      })
+    }
+
+    async completeRun(
+      projectId: string,
+      runId: string,
+      raw: RecordEvaluationInput,
+      manifestHash: string,
+    ): Promise<EvaluationResult & { run: ResearchDomain.Run }> {
+      const input = RecordEvaluationInput.parse(raw)
+      return this.store.mutate(projectId, (state) => {
+        const run = this.run(state, runId)
+        if (run.status !== "running") {
+          throw new ConflictError({ code: "run_not_running", message: `Run ${runId} is not running` })
+        }
+        let trial = this.trial(state, run.trialId)
+        if (trial.status !== "running") {
+          throw new ConflictError({ code: "trial_not_running", message: `Trial ${trial.id} is not running` })
+        }
+        trial = ResearchDomain.transitionTrial(trial, "evaluating", this.now())
+        state.trials[trial.id] = trial
+        const result = this.evaluate(state, trial, input)
+        const completedRun = ResearchDomain.Run.parse({
+          ...run,
+          status: "succeeded",
+          manifestHash,
+          completedAt: this.now(),
+        })
+        state.runs[runId] = completedRun
+        return { ...result, run: completedRun }
+      })
+    }
+
+    async recordEvaluation(
+      projectId: string,
+      trialId: string,
+      raw: RecordEvaluationInput,
+    ): Promise<EvaluationResult> {
+      const input = RecordEvaluationInput.parse(raw)
+      return this.store.mutate(projectId, (state) => {
+        const trial = this.trial(state, trialId)
+        if (trial.status !== "evaluating") {
+          throw new ConflictError({
+            code: "trial_not_evaluating",
+            message: `Trial ${trialId} must be evaluating before an evaluation can be recorded`,
+          })
+        }
+        return this.evaluate(state, trial, input)
+      })
+    }
+
+    async history(projectId: string, experimentId: string) {
+      const state = await this.store.read(projectId)
+      const experiment = this.experiment(state, experimentId)
+      const trials = Object.values(state.trials)
+        .filter((trial) => trial.experimentId === experimentId)
+        .toSorted((a, b) => a.createdAt.localeCompare(b.createdAt))
+      const trialIds = new Set(trials.map((trial) => trial.id))
+      const evaluations = Object.values(state.evaluations)
+        .filter((evaluation) => trialIds.has(evaluation.trialId))
+        .toSorted((a, b) => a.evaluatedAt.localeCompare(b.evaluatedAt))
+      const runs = Object.values(state.runs)
+        .filter((run) => trialIds.has(run.trialId))
+        .toSorted((a, b) => a.createdAt.localeCompare(b.createdAt))
+      return { experiment, trials, evaluations, runs }
+    }
+
+    private evaluate(
+      state: ResearchState,
+      trial: ResearchDomain.Trial,
+      input: RecordEvaluationInput,
+    ): EvaluationResult {
+      const experiment = this.experiment(state, trial.experimentId)
+      if (Object.values(state.evaluations).some((evaluation) => evaluation.trialId === trial.id)) {
+        throw new ConflictError({
+          code: "trial_already_evaluated",
+          message: `Trial ${trial.id} already has an evaluation`,
+        })
+      }
+      ResearchDomain.assertContractIntegrity(experiment)
+      if (input.contractHash !== experiment.contractHash) {
+        throw new ConflictError({
+          code: "contract_hash_mismatch",
+          message: `Evaluation contract does not match experiment ${experiment.id}`,
+        })
+      }
+      if (input.evaluatorHash !== experiment.contract.evaluator.sourceHash) {
+        throw new ConflictError({
+          code: "evaluator_hash_mismatch",
+          message: `Evaluation evaluator does not match experiment ${experiment.id}`,
+        })
+      }
+      const evaluation = ResearchDomain.Evaluation.parse({
+        id: this.id("evl"),
+        trialId: trial.id,
+        ...input,
+        evaluatedAt: this.now(),
+      })
+      const incumbent = experiment.incumbentTrialId
+        ? Object.values(state.evaluations).find((candidate) => candidate.trialId === experiment.incumbentTrialId)
+        : undefined
+      const promote = ResearchDomain.shouldPromote({
+        candidate: evaluation,
+        incumbent,
+        direction: experiment.contract.evaluator.direction,
+      })
+      const completedTrial = ResearchDomain.transitionTrial(trial, "succeeded", this.now())
+      const updatedExperiment = ResearchDomain.Experiment.parse({
+        ...experiment,
+        incumbentTrialId: promote ? trial.id : experiment.incumbentTrialId,
+        updatedAt: promote ? this.now() : experiment.updatedAt,
+      })
+      state.evaluations[evaluation.id] = evaluation
+      state.trials[trial.id] = completedTrial
+      state.experiments[experiment.id] = updatedExperiment
+      return {
+        evaluation,
+        trial: completedTrial,
+        experiment: updatedExperiment,
+        decision: promote ? "promoted" : "rejected",
+      }
+    }
+
+    private campaign(state: ResearchState, id: string): ResearchDomain.Campaign {
+      const campaign = state.campaigns[id]
+      if (!campaign) throw new NotFoundError({ entity: "campaign", id })
+      return campaign
+    }
+
+    private experiment(state: ResearchState, id: string): ResearchDomain.Experiment {
+      const experiment = state.experiments[id]
+      if (!experiment) throw new NotFoundError({ entity: "experiment", id })
+      return experiment
+    }
+
+    private trial(state: ResearchState, id: string): ResearchDomain.Trial {
+      const trial = state.trials[id]
+      if (!trial) throw new NotFoundError({ entity: "trial", id })
+      return trial
+    }
+
+    private run(state: ResearchState, id: string): ResearchDomain.Run {
+      const run = state.runs[id]
+      if (!run) throw new NotFoundError({ entity: "run", id })
+      return run
+    }
+  }
+}
+
+export const Research = new ResearchService.Service(new StorageResearchStore())

@@ -1,0 +1,1306 @@
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  Match,
+  on,
+  onCleanup,
+  onMount,
+  Show,
+  Suspense,
+  Switch,
+  type JSX,
+} from "solid-js"
+import { useNavigate, useParams } from "@solidjs/router"
+import { SessionTurn } from "@synsci/ui/session-turn"
+import { createAutoScroll } from "@synsci/ui/hooks"
+import { useSync } from "@/context/sync"
+import { useSDK } from "@/context/sdk"
+import { useLayout } from "@/context/layout"
+import { useTheme } from "@synsci/ui/theme"
+import { PromptInput } from "@/components/prompt-input"
+import { NewSessionView } from "@/components/session/session-new-view"
+import { AsciiSpinner } from "@/atlas/shared/AsciiSpinner"
+import { AppHeader, HeaderIconButton } from "@/atlas/AppHeader"
+import { RightPane } from "@/atlas/RightPane"
+import { FileExplorer } from "@/atlas/FileExplorer"
+import { FileView } from "@/atlas/FilePreview"
+import SkillsPage from "@/atlas/SkillsPage"
+import { centerTabs } from "@/atlas/store/centerTabs"
+import { FONT_MONO, FONT_SANS } from "@/styles/tokens"
+import { uiStore } from "@/atlas/store/ui"
+import { useGlobalKeys } from "@/atlas/useGlobalKeys"
+import { useDialog } from "@synsci/ui/context/dialog"
+import { useCommand, type CommandOption } from "@/context/command"
+import { useLanguage } from "@/context/language"
+import { confirmDialog } from "@/atlas/dialogs"
+import { DialogSettings } from "@/components/dialog-settings"
+import { DisconnectedPanel } from "@/atlas/DisconnectedPanel"
+import { CommandPalette } from "@/atlas/CommandPalette"
+import { HelpOverlay } from "@/atlas/HelpOverlay"
+import { ToastContainer } from "@/atlas/Toast"
+import {
+  IconChevronDown,
+  IconChevronLeft,
+  IconPlus,
+  IconSearch,
+  IconBookOpen,
+  IconSettings,
+  IconSun,
+  IconMoon,
+  IconMessageSquare,
+  IconFolderTree,
+  IconFile,
+  IconBrain,
+  IconX,
+  IconLayoutGrid,
+  IconMoreH,
+} from "@/atlas/shared/Icon"
+import { StatusDot } from "@/atlas/shared/StatusDot"
+import { DateTime } from "luxon"
+import { IconTrash } from "@/atlas/shared/Icon"
+import { toast } from "@/atlas/Toast"
+
+type SyncSession = ReturnType<typeof useSync>["data"]["session"][number]
+
+/**
+ * Session page — new visual identity (Synthetic Sciences wordmark + sessions
+ * sidebar + chat + canvas/agents/skills/files right pane) wrapping the
+ * unchanged openscience backend chat (SessionTurn rendering, PromptInput, real
+ * SSE streaming, sub-task delegation, tool calls, TODOs, diff cards).
+ */
+export default function Page(): JSX.Element {
+  const params = useParams()
+  const navigate = useNavigate()
+  const sync = useSync()
+  const sdk = useSDK()
+  const layout = useLayout()
+  const theme = useTheme()
+  const dialog = useDialog()
+  const [creating, setCreating] = createSignal(false)
+  const [mobileSessionsOpen, setMobileSessionsOpen] = createSignal(false)
+
+  async function newSession() {
+    if (creating()) return
+    setCreating(true)
+    try {
+      const res: any = await sdk.client.session.create({
+        directory: sync.project?.worktree ?? sync.data.path.directory,
+      } as any)
+      const data = res?.data ?? res
+      const id = data?.id ?? data?.sessionID
+      if (id) {
+        navigate(`/${params.dir}/session/${id}`)
+      } else {
+        navigate(`/${params.dir}/session/new`)
+      }
+    } catch {
+      navigate(`/${params.dir}/session/new`)
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  async function deleteSession(sessionID: string) {
+    // Capture the next-active id BEFORE the optimistic splice so we
+    // know where to navigate.
+    const active = params.id === sessionID
+    const next = sessions().find((s) => s.id !== sessionID)?.id
+    try {
+      await sync.session.delete(sessionID)
+      toast.info("session deleted")
+      if (active) {
+        navigate(next ? `/${params.dir}/session/${next}` : `/${params.dir}/session/new`)
+      }
+    } catch (e: any) {
+      console.error("session.delete failed", e)
+      toast.error("could not delete", e?.message ?? String(e))
+    }
+  }
+
+  async function renameSession(sessionID: string, title: string) {
+    const trimmed = title.trim()
+    if (!trimmed) return
+    try {
+      await sync.session.rename(sessionID, trimmed)
+    } catch (e: any) {
+      console.error("session.rename failed", e)
+      toast.error("could not rename", e?.message ?? String(e))
+    }
+  }
+
+  // Force-load the session list into the sync store every time we land
+  // on a project. sync.session.fetch() calls session.list AND reconciles
+  // the result into the per-directory store; the raw SDK call alone
+  // doesn't.
+  createEffect(
+    on(
+      () => params.dir,
+      () => {
+        ;(async () => {
+          try {
+            await sync.session.fetch(50)
+          } catch {}
+        })()
+      },
+    ),
+  )
+
+  // When the active session id changes, hydrate that session's messages
+  // (and parts) into the store. Without this the chat panel shows blank
+  // when you click an existing session — sync.session.sync() pulls the
+  // backend's stored messages in.
+  createEffect(
+    on(
+      () => params.id,
+      (id) => {
+        if (!id || id === "new") return
+        ;(async () => {
+          try {
+            await sync.session.sync(id)
+          } catch {}
+        })()
+      },
+    ),
+  )
+
+  // Hydrate child (sub-agent) sessions of the active session regardless of
+  // which right-pane tab is open, so the inline turn status and back-to-parent
+  // navigation populate immediately and survive a reload.
+  const hydratedChildren = new Set<string>()
+  createEffect(() => {
+    const id = params.id
+    if (!id || id === "new") return
+    for (const child of sync.data.session) {
+      if (child.parentID !== id || hydratedChildren.has(child.id)) continue
+      hydratedChildren.add(child.id)
+      void sync.session.sync(child.id).catch(() => {})
+    }
+  })
+
+  const project = createMemo(() => sync.project)
+  const projectName = () => {
+    const p = projectPath()
+    const segs = p.split("/").filter(Boolean)
+    return segs[segs.length - 1] ?? p
+  }
+  const projectPath = () => project()?.worktree ?? sdk.directory
+
+  const sessions = createMemo<SyncSession[]>(() =>
+    [...sync.data.session].filter((s) => !s.parentID).sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0)),
+  )
+  const messages = createMemo(() => (params.id ? (sync.data.message[params.id] ?? []) : []))
+  const lastUserMessage = createMemo(() => {
+    const ms = messages()
+    for (let i = ms.length - 1; i >= 0; i--) if (ms[i].role === "user") return ms[i]
+  })
+  // A SessionTurn renders nothing for an assistant message — it only renders
+  // when handed a user message, gathering that turn's assistant replies itself.
+  // So render exactly one turn per user message; iterating every message made
+  // each of the (often hundreds of) assistant messages paint an empty turn plus
+  // a divider, which stacked up as faint horizontal lines down the chat and
+  // bloated the DOM (slowing the reflow when the right pane opens).
+  // When the session is in a reverted state, turns at or past the revert point
+  // stay hidden until the user restores them or sends a new message (which
+  // makes the revert permanent server-side).
+  const activeSession = createMemo(() => (params.id ? sync.session.get(params.id) : undefined))
+  const revertInfo = createMemo(() => activeSession()?.revert)
+  // New-session worktree selection, shared between the empty-state view and the
+  // composer (matches the v1.1.116 new-session flow).
+  const [newSessionWorktree, setNewSessionWorktree] = createSignal("main")
+
+  // A `path.md` mentioned in an assistant message dispatches this; open it as a
+  // document tab (same surface as the Files tab / a tool-card filename click).
+  onMount(() => {
+    const onOpenFile = (e: Event) => {
+      const path = (e as CustomEvent).detail?.path
+      if (typeof path !== "string" || !path) return
+      const dir = projectPath()
+      const rel = dir && path.startsWith(dir + "/") ? path.slice(dir.length + 1) : path
+      centerTabs.openFile(dir, rel)
+    }
+    document.addEventListener("openscience:open-file", onOpenFile)
+    onCleanup(() => document.removeEventListener("openscience:open-file", onOpenFile))
+
+    // "Open in Shell tab" on a bash tool card → reveal the right pane's terminal
+    // and re-run the command there (the RightPane picks up terminalCommand).
+    const onShell = (e: Event) => {
+      const command = (e as CustomEvent).detail?.command
+      if (typeof command !== "string" || !command) return
+      uiStore.setRightPaneOpen(true)
+      uiStore.setTerminalCommand({
+        command: "bash",
+        args: ["-lc", command],
+        title: command.length > 24 ? command.slice(0, 24) + "…" : command,
+      })
+    }
+    document.addEventListener("open-shell-tab", onShell)
+    onCleanup(() => document.removeEventListener("open-shell-tab", onShell))
+  })
+  const turnMessages = createMemo(() => {
+    const revertID = revertInfo()?.messageID
+    return messages().filter((m) => m.role === "user" && (!revertID || m.id < revertID))
+  })
+  const sessionStatus = createMemo(() =>
+    params.id ? (sync.data.session_status?.[params.id] as { type?: string } | undefined)?.type : undefined,
+  )
+  // A message is a compaction boundary when it carries a `compaction` part.
+  const hasCompactionPart = (id: string) => (sync.data.part[id] ?? []).some((p) => p.type === "compaction")
+  // While compacting, an inline loader replaces the divider on the compaction
+  // message currently being summarized (the most recent one). Once compaction
+  // finishes the status leaves "compacting" and it becomes the "context
+  // compacted" divider; older boundaries always render as dividers.
+  const compactingMessageId = createMemo(() => {
+    if (sessionStatus() !== "compacting") return undefined
+    const msgs = turnMessages()
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (hasCompactionPart(msgs[i].id)) return msgs[i].id
+    }
+    return undefined
+  })
+  const revertedCount = createMemo(() => {
+    const revertID = revertInfo()?.messageID
+    if (!revertID) return 0
+    return messages().filter((m) => m.role === "user" && m.id >= revertID).length
+  })
+
+  const revertTo = async (messageID: string) => {
+    const id = params.id
+    if (!id) return
+    const ok = await confirmDialog(dialog, {
+      title: "Undo from here?",
+      message:
+        "Hides this message and everything after it, and rolls back the file changes they made. You can restore until you send the next message.",
+      confirmLabel: "undo",
+      danger: true,
+    })
+    if (!ok) return
+    try {
+      await sync.session.revert(id, messageID)
+      toast.success("reverted", "files rolled back. send a message to continue from here")
+    } catch (e: any) {
+      toast.error("undo failed", e?.message ?? String(e))
+    }
+  }
+
+  const restoreRevert = async () => {
+    const id = params.id
+    if (!id) return
+    try {
+      await sync.session.unrevert(id)
+      toast.success("messages restored")
+    } catch (e: any) {
+      toast.error("restore failed", e?.message ?? String(e))
+    }
+  }
+
+  // Undo/redo were orphaned when the chat surface was reskinned — revertTo()
+  // had no trigger. Re-expose them as first-class commands (palette + /undo,
+  // /redo slash) so undo works again. Undo reverts the last turn; redo restores
+  // a pending revert until the next message makes it permanent.
+  const commands = useCommand()
+  const language = useLanguage()
+  commands.register(() => {
+    const id = params.id
+    if (!id || id === "new") return []
+    const list: CommandOption[] = []
+    const last = lastUserMessage()
+    if (last && !revertInfo()) {
+      list.push({
+        id: "session.undo",
+        title: language.t("command.session.undo"),
+        description: language.t("command.session.undo.description"),
+        category: language.t("command.category.session"),
+        slash: "undo",
+        onSelect: () => void revertTo(last.id),
+      })
+    }
+    if (revertInfo()) {
+      list.push({
+        id: "session.redo",
+        title: language.t("command.session.redo"),
+        description: language.t("command.session.redo.description"),
+        category: language.t("command.category.session"),
+        slash: "redo",
+        onSelect: () => void restoreRevert(),
+      })
+    }
+    // /compact — summarize the conversation to free up context. Runs the backend
+    // compaction action (model/agent default to the session's last); it does NOT
+    // prefill text, so it must be a builtin option, not a `sync.data.command`
+    // entry (those prefill). The backend command is deduped out of the prompt
+    // menu's custom list by its `menu` flag.
+    list.push({
+      id: "session.compact",
+      title: "Compact conversation",
+      description: "Summarize the conversation so far to free up context",
+      category: language.t("command.category.session"),
+      slash: "compact",
+      onSelect: () => {
+        void sdk.client.session
+          .command({ sessionID: id, command: "compact", arguments: "" } as any)
+          .catch((e: unknown) => {
+            console.error("compact failed", e)
+            toast.error("could not compact", e instanceof Error ? e.message : String(e))
+          })
+      },
+    })
+    // /handoff — write a self-contained handoff.md for another agent, then compact.
+    list.push({
+      id: "session.handoff",
+      title: "Write handoff & compact",
+      description: "Write a self-contained handoff.md for another agent, then compact",
+      category: language.t("command.category.session"),
+      slash: "handoff",
+      onSelect: () => {
+        void sdk.client.session
+          .command({ sessionID: id, command: "handoff", arguments: "" } as any)
+          .catch((e: unknown) => {
+            console.error("handoff failed", e)
+            toast.error("could not write handoff", e instanceof Error ? e.message : String(e))
+          })
+      },
+    })
+    return list
+  })
+
+  const [stepsExpanded, setStepsExpanded] = createSignal<Record<string, boolean>>({})
+  const toggleSteps = (id: string) => setStepsExpanded((prev) => ({ ...prev, [id]: !prev[id] }))
+
+  const isDark = () => theme.mode() === "dark"
+  useGlobalKeys({ onNew: () => void newSession() })
+
+  // Center-pane tabs. The chat tab is always mounted (so streaming + scroll
+  // survive tab switches); Files mounts on first visit; document tabs mount
+  // when opened from the explorer and unmount on close.
+  const chatTitle = createMemo(() => {
+    const s = sessions().find((x) => x.id === params.id)
+    return s?.title || "Chat"
+  })
+  const [visitedFiles, setVisitedFiles] = createSignal(false)
+  createEffect(() => {
+    if (centerTabs.active() === "files") setVisitedFiles(true)
+  })
+  const [visitedSkills, setVisitedSkills] = createSignal(false)
+  createEffect(() => {
+    if (centerTabs.active() === "skills") setVisitedSkills(true)
+  })
+
+  // Chat scroll: stick to the bottom while the agent streams; detach the
+  // moment the user scrolls up (a "jump to latest" button re-attaches).
+  // Follow is driven by content growth (ResizeObserver on the content
+  // wrapper), not message count, so streamed part updates keep the view
+  // pinned instead of only re-anchoring on new messages / container resize.
+  const working = createMemo(() => {
+    const id = params.id
+    if (!id) return false
+    const status = sync.data.session_status?.[id]
+    return !!status && status.type !== "idle"
+  })
+
+  const chatScroll = createAutoScroll({
+    working,
+    overflowAnchor: "dynamic",
+    bottomThreshold: 120,
+  })
+
+  // Re-pin when the user switches sessions, and on initial mount once
+  // messages populate (covers direct URL / bookmark / refresh into a long,
+  // idle session, where createAutoScroll's settling window would otherwise
+  // expire before async-loaded messages render).
+  createEffect(
+    on(
+      () => [params.id, messages().length > 0] as const,
+      ([, hasMessages]) => {
+        if (!hasMessages) return
+        // A turn's markdown/code-highlight/katex renders progressively AFTER the
+        // message array populates, growing scrollHeight over ~1s. An idle session
+        // isn't in follow-mode, so createAutoScroll won't track that growth — a
+        // single scroll lands at the early bottom. Re-pin across the load window
+        // (bail the moment the user scrolls up, so we never fight them).
+        chatScroll.forceScrollToBottom()
+        const timers = [80, 200, 450, 800, 1200].map((ms) =>
+          setTimeout(() => {
+            if (!chatScroll.userScrolled()) chatScroll.forceScrollToBottom()
+          }, ms),
+        )
+        onCleanup(() => timers.forEach(clearTimeout))
+      },
+    ),
+  )
+
+  createEffect(() => {
+    if (project()) layout.projects.open(project()!.worktree)
+  })
+
+  // Re-anchor a bottom-following view on viewport-height changes with no new
+  // content (window resize, right-pane toggle, mobile virtual keyboard).
+  onMount(() => {
+    const onResize = () => {
+      if (!chatScroll.userScrolled()) chatScroll.forceScrollToBottom()
+    }
+    window.addEventListener("resize", onResize)
+    onCleanup(() => window.removeEventListener("resize", onResize))
+  })
+
+  return (
+    <div
+      class="atlas-root"
+      style={{
+        flex: 1,
+        display: "flex",
+        "flex-direction": "column",
+        height: "100dvh",
+        overflow: "hidden",
+        background: "var(--color-bg)",
+      }}
+    >
+      <ToastContainer />
+      <HelpOverlay open={uiStore.helpOpen()} onClose={() => uiStore.setHelpOpen(false)} />
+      <CommandPalette open={uiStore.paletteOpen()} onClose={() => uiStore.setPaletteOpen(false)} />
+
+      <DisconnectedPanel />
+      <Header
+        projectName={projectName()}
+        projectPath={projectPath()}
+        isDark={isDark()}
+        onBack={() => navigate("/")}
+        onOpenPalette={() => uiStore.setPaletteOpen(true)}
+        onOpenHelp={() => uiStore.setHelpOpen(true)}
+        onOpenSettings={() => dialog.show(() => <DialogSettings />)}
+        onToggleTheme={() => theme.setColorScheme(isDark() ? "light" : "dark")}
+        onToggleSessions={() => setMobileSessionsOpen((open) => !open)}
+        onOpenTools={() => uiStore.setRightPaneOpen(true)}
+      />
+
+      <div
+        class="session-workspace"
+        style={{
+          flex: 1,
+          "min-height": 0,
+          "min-width": 0,
+          display: "flex",
+          overflow: "hidden",
+          position: "relative",
+        }}
+      >
+        <Show when={mobileSessionsOpen()}>
+          <button
+            type="button"
+            class="session-sidebar-backdrop"
+            aria-label="close sessions"
+            onClick={() => setMobileSessionsOpen(false)}
+          />
+        </Show>
+        <SessionsSidebar
+          sessions={sessions()}
+          activeId={params.id}
+          dirParam={params.dir ?? ""}
+          creating={creating()}
+          mobileOpen={mobileSessionsOpen()}
+          onNew={() => {
+            setMobileSessionsOpen(false)
+            void newSession()
+          }}
+          onSelect={(id) => {
+            setMobileSessionsOpen(false)
+            navigate(`/${params.dir}/session/${id}`)
+          }}
+          onDelete={(id) => void deleteSession(id)}
+          onRename={(id, title) => void renameSession(id, title)}
+        />
+
+        <div
+          style={{
+            flex: 1,
+            "min-width": 0,
+            "min-height": 0,
+            display: "flex",
+            "flex-direction": "column",
+            background: "var(--color-bg)",
+            overflow: "hidden",
+          }}
+        >
+          <CenterTabStrip chatTitle={chatTitle()} />
+
+          <div
+            style={{
+              flex: 1,
+              "min-height": 0,
+              "min-width": 0,
+              position: "relative",
+              display: "flex",
+              "flex-direction": "column",
+            }}
+          >
+            {/* chat — always mounted so streaming + scroll survive tab switches */}
+            <div
+              style={{
+                display: centerTabs.active() === "chat" ? "flex" : "none",
+                flex: 1,
+                "min-height": 0,
+                "flex-direction": "column",
+                position: "relative",
+              }}
+            >
+              <Switch>
+                <Match when={params.id && messages().length > 0}>
+                  {/* Scoped to just the scroll area (not the revert banner / Composer
+                      below) so the jump-to-latest pill's position:absolute resolves
+                      against this box instead of the whole chat column. */}
+                  <div
+                    style={{
+                      position: "relative",
+                      flex: 1,
+                      "min-height": 0,
+                      display: "flex",
+                      "flex-direction": "column",
+                    }}
+                  >
+                    <div
+                      ref={chatScroll.scrollRef}
+                      onScroll={chatScroll.handleScroll}
+                      onClick={chatScroll.handleInteraction}
+                      class="atlas-scroll atlas-chat-scroll session-scroller"
+                      style={{
+                        flex: 1,
+                        "min-height": 0,
+                        "overflow-y": "auto",
+                        "overflow-x": "hidden",
+                      }}
+                    >
+                      {/* Sub-agent back-to-parent header only. Normal chats render
+                          NO fixed header — the sticky session title used to sit on top
+                          of the conversation and block content. The title is still
+                          shown/renamable in the session list. Kept outside contentRef
+                          so the ResizeObserver measures only the growing message list. */}
+                      <Show when={activeSession()?.parentID}>
+                        <div class="sticky top-0 z-30 bg-background-stronger w-full">
+                          <div class="w-full px-4 md:px-6 md:max-w-200 md:mx-auto">
+                            <div class="h-10 flex items-center gap-1.5">
+                              <Show when={activeSession()?.parentID}>
+                                <button
+                                  type="button"
+                                  class="flex items-center justify-center size-7 shrink-0 rounded-md text-text-weak hover:text-text-base hover:bg-surface-base-hover transition-colors"
+                                  aria-label="Back to parent session"
+                                  onClick={() => navigate(`/${params.dir}/session/${activeSession()!.parentID}`)}
+                                >
+                                  <IconChevronLeft />
+                                </button>
+                              </Show>
+                              <Show when={activeSession()?.title}>
+                                <EditableTitle
+                                  title={activeSession()!.title!}
+                                  onRename={(t) => void renameSession(activeSession()!.id, t)}
+                                />
+                              </Show>
+                            </div>
+                          </div>
+                        </div>
+                      </Show>
+
+                      {/* Centered conversation column with 2px between-turn divider */}
+                      <div
+                        ref={chatScroll.contentRef}
+                        class="w-full md:max-w-200 md:mx-auto flex flex-col items-start justify-start pt-3 pb-[calc(10rem+64px)]"
+                      >
+                        <For each={turnMessages()}>
+                          {(message, index) => (
+                            <div data-message-id={message.id} class="min-w-0 w-full max-w-full">
+                              <Show
+                                when={!hasCompactionPart(message.id)}
+                                fallback={
+                                  <Show
+                                    when={message.id === compactingMessageId()}
+                                    fallback={
+                                      <div
+                                        style={{
+                                          display: "flex",
+                                          "align-items": "center",
+                                          gap: "10px",
+                                          padding: "2px 16px",
+                                          "font-size": "11px",
+                                          "letter-spacing": "0.06em",
+                                          "text-transform": "uppercase",
+                                          color: "var(--color-text-faint)",
+                                        }}
+                                      >
+                                        <div style={{ flex: 1, height: "1px", background: "var(--color-border)" }} />
+                                        <span>context compacted</span>
+                                        <div style={{ flex: 1, height: "1px", background: "var(--color-border)" }} />
+                                      </div>
+                                    }
+                                  >
+                                    <div
+                                      style={{
+                                        display: "flex",
+                                        "align-items": "center",
+                                        "justify-content": "center",
+                                        gap: "8px",
+                                        padding: "6px 16px",
+                                        "font-family": FONT_MONO,
+                                        "font-size": "11px",
+                                        "letter-spacing": "0.06em",
+                                        "text-transform": "uppercase",
+                                        color: "var(--color-text-faint)",
+                                      }}
+                                    >
+                                      <AsciiSpinner size={10} />
+                                      <span>compacting conversation…</span>
+                                    </div>
+                                  </Show>
+                                }
+                              >
+                                <SessionTurn
+                                  sessionID={params.id!}
+                                  messageID={message.id}
+                                  lastUserMessageID={lastUserMessage()?.id}
+                                  stepsExpanded={stepsExpanded()[message.id] ?? false}
+                                  onStepsExpandedToggle={() => toggleSteps(message.id)}
+                                  classes={{
+                                    root: "min-w-0 w-full relative",
+                                    content: "flex flex-col justify-between !overflow-visible",
+                                    container: "w-full px-4 md:px-6",
+                                  }}
+                                />
+                              </Show>
+                              {/* The v1.1.116 between-turns rule — skipped for a
+                                  compaction row, which already draws its own "context
+                                  compacted" divider (avoids a doubled rule). */}
+                              <Show when={index() < turnMessages().length - 1 && !hasCompactionPart(message.id)}>
+                                <div class="session-turn-divider" />
+                              </Show>
+                            </div>
+                          )}
+                        </For>
+                      </div>
+                    </div>
+
+                    <Show when={chatScroll.userScrolled()}>
+                      <button
+                        type="button"
+                        onClick={() => chatScroll.forceScrollToBottom()}
+                        title="Jump to latest"
+                        style={{
+                          position: "absolute",
+                          // The content column reserves calc(10rem + 64px) of bottom
+                          // padding (above) so the last message clears the absolute
+                          // prompt dock; land the pill just above that same
+                          // reservation so the dock doesn't sit on top of it.
+                          bottom: "calc(10rem + 64px + 16px)",
+                          left: "50%",
+                          transform: "translateX(-50%)",
+                          display: "inline-flex",
+                          "align-items": "center",
+                          gap: "6px",
+                          padding: "6px 12px",
+                          "border-radius": "999px",
+                          border: "1px solid var(--color-border-strong)",
+                          background: "var(--color-surface-solid)",
+                          "box-shadow": "var(--shadow-md)",
+                          "font-family": FONT_MONO,
+                          "font-size": "11px",
+                          color: "var(--color-text)",
+                          cursor: "pointer",
+                          "z-index": 6,
+                        }}
+                      >
+                        <IconChevronDown size={13} strokeWidth={1.6} />
+                        jump to latest
+                      </button>
+                    </Show>
+                  </div>
+                </Match>
+                <Match when={true}>
+                  <NewSessionView worktree={newSessionWorktree()} onWorktreeChange={setNewSessionWorktree} />
+                </Match>
+              </Switch>
+
+              <div class="session-prompt-dock">
+                <div class="session-prompt-dock__inner">
+                  <Show when={revertInfo()}>
+                    <div
+                      class="mb-3"
+                      style={{
+                        display: "flex",
+                        "align-items": "center",
+                        gap: "12px",
+                        padding: "8px 12px",
+                        border: "1px solid var(--color-border)",
+                        "border-radius": "8px",
+                        "font-size": "12px",
+                        "font-family": FONT_SANS,
+                        color: "var(--color-text-muted)",
+                        background: "var(--color-bg)",
+                      }}
+                    >
+                      <span style={{ flex: 1, "min-width": 0 }}>
+                        Conversation reverted. {revertedCount()} turn{revertedCount() === 1 ? "" : "s"} hidden and file
+                        changes rolled back. Sending a new message makes this permanent.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void restoreRevert()}
+                        style={{
+                          border: "1px solid var(--color-border)",
+                          background: "transparent",
+                          color: "inherit",
+                          padding: "4px 10px",
+                          "border-radius": "8px",
+                          "font-size": "12px",
+                          cursor: "pointer",
+                          "white-space": "nowrap",
+                        }}
+                      >
+                        restore
+                      </button>
+                    </div>
+                  </Show>
+                  <PromptInput
+                    newSessionWorktree={newSessionWorktree()}
+                    onNewSessionWorktreeReset={() => setNewSessionWorktree("main")}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* files — the host explorer, mounted on first visit */}
+            <Show when={visitedFiles()}>
+              <div
+                style={{
+                  display: centerTabs.active() === "files" ? "flex" : "none",
+                  flex: 1,
+                  "min-height": 0,
+                  "flex-direction": "column",
+                }}
+              >
+                <FileExplorer />
+              </div>
+            </Show>
+
+            {/* skills — the global capability catalog, mounted on first visit */}
+            <Show when={visitedSkills()}>
+              <div
+                style={{
+                  display: centerTabs.active() === "skills" ? "flex" : "none",
+                  flex: 1,
+                  "min-height": 0,
+                  "flex-direction": "column",
+                }}
+              >
+                {/* Local boundary: SkillsPage reads its skills resource eagerly, so
+                    its first-load suspend must stay in this pane, not blank the
+                    whole session via the coarse route-level <Suspense>. */}
+                <Suspense fallback={<PaneLoading />}>
+                  <SkillsPage />
+                </Suspense>
+              </div>
+            </Show>
+
+            {/* document tabs — one inline FileView per opened file */}
+            <For each={centerTabs.docs()}>
+              {(doc) => (
+                <div
+                  style={{
+                    display: centerTabs.active() === doc.id ? "flex" : "none",
+                    flex: 1,
+                    "min-height": 0,
+                    "flex-direction": "column",
+                  }}
+                >
+                  {/* Local boundary: FileView reads its `file` resource eagerly (the
+                      `kind` memo forces it at mount), so opening a NEW file suspends.
+                      Contain it here so the doc tab shows a local spinner instead of
+                      blanking the entire session through the route-level <Suspense>. */}
+                  <Suspense fallback={<PaneLoading />}>
+                    <FileView
+                      path={doc.path}
+                      directory={doc.directory}
+                      active={centerTabs.active() === doc.id}
+                      subtitle={`This computer · ${doc.directory.replace(/\/$/, "")}/${doc.path}`}
+                    />
+                  </Suspense>
+                </div>
+              )}
+            </For>
+          </div>
+        </div>
+
+        <RightPane />
+      </div>
+    </div>
+  )
+}
+
+// Pane-scoped Suspense fallback — a small centered spinner shown while an
+// interaction-mounted pane (a file view, the Skills catalog) loads its data,
+// so the load can't reach the route-level boundary and blank the whole session.
+function PaneLoading(): JSX.Element {
+  return (
+    <div style={{ flex: 1, display: "flex", "align-items": "center", "justify-content": "center" }}>
+      <AsciiSpinner size={10} label="loading…" color="var(--color-text-faint)" />
+    </div>
+  )
+}
+
+function CenterTabStrip(props: { chatTitle: string }): JSX.Element {
+  const active = centerTabs.active
+  return (
+    <div class="workspace-tabs atlas-scroll" role="tablist" aria-label="Open work">
+      <CenterTab active={active() === "chat"} label={props.chatTitle} onClick={() => centerTabs.setActive("chat")}>
+        <IconMessageSquare size={12} strokeWidth={1.6} />
+      </CenterTab>
+      <CenterTab active={active() === "files"} label="Files" onClick={() => centerTabs.setActive("files")}>
+        <IconFolderTree size={12} strokeWidth={1.6} />
+      </CenterTab>
+      <CenterTab active={active() === "skills"} label="Skills" onClick={() => centerTabs.setActive("skills")}>
+        <IconBrain size={12} strokeWidth={1.6} />
+      </CenterTab>
+      <For each={centerTabs.docs()}>
+        {(doc) => (
+          <CenterTab
+            active={active() === doc.id}
+            label={doc.name}
+            onClick={() => centerTabs.setActive(doc.id)}
+            onClose={() => centerTabs.closeDoc(doc.id)}
+          >
+            <IconFile size={12} strokeWidth={1.6} />
+          </CenterTab>
+        )}
+      </For>
+    </div>
+  )
+}
+
+function CenterTab(props: {
+  active: boolean
+  label: string
+  onClick: () => void
+  onClose?: () => void
+  children: JSX.Element
+}): JSX.Element {
+  return (
+    <div
+      class="workspace-tab"
+      role="tab"
+      aria-selected={props.active}
+      data-active={props.active ? "true" : "false"}
+      onClick={props.onClick}
+      title={props.label}
+    >
+      <span class="workspace-tab__icon">{props.children}</span>
+      <span style={{ overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>{props.label}</span>
+      <Show when={props.onClose}>
+        <span
+          class="workspace-tab__close"
+          role="button"
+          aria-label="close tab"
+          onClick={(e) => {
+            e.stopPropagation()
+            props.onClose!()
+          }}
+        >
+          <IconX size={11} strokeWidth={1.8} />
+        </span>
+      </Show>
+    </div>
+  )
+}
+
+function Header(props: {
+  projectName: string
+  projectPath: string
+  isDark: boolean
+  onBack: () => void
+  onOpenPalette: () => void
+  onOpenHelp: () => void
+  onOpenSettings: () => void
+  onToggleTheme: () => void
+  onToggleSessions: () => void
+  onOpenTools: () => void
+}): JSX.Element {
+  const [menu, setMenu] = createSignal(false)
+  return (
+    <AppHeader class="workspace-header">
+      <HeaderIconButton class="session-sidebar-toggle" onClick={props.onToggleSessions} title="Show sessions">
+        <IconMessageSquare size={13} strokeWidth={1.5} />
+      </HeaderIconButton>
+      <button
+        class="workspace-header__back"
+        onClick={props.onBack}
+        title="Back to projects"
+        aria-label="Back to projects"
+      >
+        <IconChevronLeft size={14} strokeWidth={1.6} />
+      </button>
+      <div class="workspace-header__title" title={props.projectPath}>
+        <strong>{props.projectName}</strong>
+        <span>Research workspace</span>
+      </div>
+      <span class="workspace-header__spacer" />
+      <button class="workspace-header__tools" type="button" onClick={props.onOpenTools}>
+        <IconLayoutGrid size={13} strokeWidth={1.5} />
+        <span>Tools</span>
+      </button>
+      <HeaderIconButton class="workspace-header__search" onClick={props.onOpenPalette} title="Search and commands">
+        <IconSearch size={13} strokeWidth={1.5} />
+      </HeaderIconButton>
+      <div class="workspace-header__menu-wrap" onMouseLeave={() => setMenu(false)}>
+        <HeaderIconButton class="workspace-header__menu" onClick={() => setMenu((open) => !open)} title="More">
+          <IconMoreH size={14} strokeWidth={1.7} />
+        </HeaderIconButton>
+        <Show when={menu()}>
+          <div class="workspace-header__popover" role="menu">
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setMenu(false)
+                props.onOpenHelp()
+              }}
+            >
+              <IconBookOpen size={13} strokeWidth={1.5} />
+              Help and shortcuts
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setMenu(false)
+                props.onOpenSettings()
+              }}
+            >
+              <IconSettings size={13} strokeWidth={1.5} />
+              Settings
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setMenu(false)
+                props.onToggleTheme()
+              }}
+            >
+              <Show when={props.isDark} fallback={<IconMoon size={13} strokeWidth={1.5} />}>
+                <IconSun size={13} strokeWidth={1.5} />
+              </Show>
+              {props.isDark ? "Use light theme" : "Use dark theme"}
+            </button>
+          </div>
+        </Show>
+      </div>
+    </AppHeader>
+  )
+}
+
+// The conversation title in the sticky chat header — double-click to rename,
+// mirroring the sidebar's SessionRow. Enter/blur commits, Esc cancels.
+function EditableTitle(props: { title: string; onRename: (t: string) => void }): JSX.Element {
+  const [editing, setEditing] = createSignal(false)
+  const [draft, setDraft] = createSignal("")
+  const start = () => {
+    setDraft(props.title)
+    setEditing(true)
+  }
+  const commit = () => {
+    if (!editing()) return
+    const next = draft().trim()
+    setEditing(false)
+    if (next && next !== props.title) props.onRename(next)
+  }
+  return (
+    <Show
+      when={editing()}
+      fallback={
+        <h1
+          class="text-14-medium text-text-strong truncate"
+          style={{ cursor: "text" }}
+          title="Double-click to rename"
+          onDblClick={start}
+        >
+          {props.title}
+        </h1>
+      }
+    >
+      <input
+        ref={(el) =>
+          queueMicrotask(() => {
+            el.focus()
+            el.select()
+          })
+        }
+        class="text-14-medium text-text-strong truncate"
+        value={draft()}
+        onInput={(e) => setDraft(e.currentTarget.value)}
+        onKeyDown={(e) => {
+          e.stopPropagation()
+          if (e.key === "Enter") {
+            e.preventDefault()
+            commit()
+          } else if (e.key === "Escape") {
+            e.preventDefault()
+            setEditing(false)
+          }
+        }}
+        onBlur={commit}
+        spellcheck={false}
+        autocomplete="off"
+        style={{
+          all: "unset",
+          "box-sizing": "border-box",
+          flex: 1,
+          "min-width": 0,
+          "font-family": FONT_SANS,
+          background: "var(--color-surface-solid)",
+          "box-shadow": "inset 0 0 0 1px var(--color-border-strong)",
+          "border-radius": "6px",
+          padding: "1px 6px",
+          margin: "0 -6px",
+          color: "var(--color-text-strong, var(--color-text))",
+        }}
+      />
+    </Show>
+  )
+}
+
+function SessionsSidebar(props: {
+  sessions: SyncSession[]
+  activeId: string | undefined
+  dirParam: string
+  creating: boolean
+  mobileOpen: boolean
+  onNew: () => void
+  onSelect: (id: string) => void
+  onDelete: (id: string) => void
+  onRename: (id: string, title: string) => void
+}): JSX.Element {
+  return (
+    <aside class="atlas-scroll session-sidebar" data-mobile-open={props.mobileOpen ? "true" : "false"}>
+      <div class="session-sidebar__top">
+        <button class="session-sidebar__new" onClick={props.onNew} disabled={props.creating}>
+          <IconPlus size={13} strokeWidth={1.8} />
+          {props.creating ? "Creating…" : "New research"}
+        </button>
+      </div>
+
+      <div class="session-sidebar__label">
+        <span>Recent</span>
+        <span>{props.sessions.length}</span>
+      </div>
+
+      <div class="session-sidebar__list">
+        <For each={props.sessions}>
+          {(s) => (
+            <SessionRow
+              session={s}
+              active={props.activeId === s.id}
+              onSelect={() => props.onSelect(s.id)}
+              onDelete={() => props.onDelete(s.id)}
+              onRename={(title) => props.onRename(s.id, title)}
+            />
+          )}
+        </For>
+        <Show when={props.sessions.length === 0}>
+          <div
+            style={{
+              padding: "12px 10px",
+              "font-family": FONT_MONO,
+              "font-size": "11px",
+              color: "var(--color-text-faint)",
+              "line-height": 1.55,
+            }}
+          >
+            No sessions yet — click <span style={{ color: "var(--color-text-muted)" }}>New research</span> above.
+          </div>
+        </Show>
+      </div>
+    </aside>
+  )
+}
+
+function SessionRow(props: {
+  session: SyncSession
+  active: boolean
+  onSelect: () => void
+  onDelete: () => void
+  onRename: (title: string) => void
+}): JSX.Element {
+  const [hover, setHover] = createSignal(false)
+  const [editing, setEditing] = createSignal(false)
+  const [draft, setDraft] = createSignal("")
+  const startEdit = () => {
+    setDraft(props.session.title || "")
+    setEditing(true)
+  }
+  const commit = () => {
+    if (!editing()) return
+    const next = draft().trim()
+    setEditing(false)
+    if (next && next !== (props.session.title || "")) props.onRename(next)
+  }
+  const cancel = () => {
+    setEditing(false)
+    setDraft("")
+  }
+  return (
+    <div
+      role="button"
+      tabindex="0"
+      onClick={() => {
+        if (editing()) return
+        props.onSelect()
+      }}
+      onDblClick={(e) => {
+        e.stopPropagation()
+        startEdit()
+      }}
+      onKeyDown={(e) => {
+        if (editing()) return
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault()
+          props.onSelect()
+        }
+      }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onFocusIn={() => setHover(true)}
+      onFocusOut={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setHover(false)
+      }}
+      style={{
+        cursor: editing() ? "text" : "pointer",
+        display: "flex",
+        "flex-direction": "column",
+        gap: "3px",
+        padding: "8px 12px",
+        "padding-right": hover() && !editing() ? "34px" : "12px",
+        "border-radius": "8px",
+        background: props.active ? "var(--color-bg-elevated)" : hover() ? "var(--color-accent-subtle)" : "transparent",
+        transition: "background 120ms ease, padding 120ms ease",
+        position: "relative",
+      }}
+    >
+      <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
+        <StatusDot status={props.active ? "active" : "muted"} size={9} />
+        <Show
+          when={editing()}
+          fallback={
+            <span
+              title="Double-click to rename"
+              style={{
+                "font-family": FONT_MONO,
+                "font-size": "12.5px",
+                color: props.active ? "var(--color-text)" : "var(--color-text-muted)",
+                "font-weight": 400,
+                flex: 1,
+                overflow: "hidden",
+                "text-overflow": "ellipsis",
+                "white-space": "nowrap",
+              }}
+            >
+              {props.session.title || "session"}
+            </span>
+          }
+        >
+          <input
+            ref={(el) =>
+              queueMicrotask(() => {
+                el.focus()
+                el.select()
+              })
+            }
+            value={draft()}
+            onInput={(e) => setDraft(e.currentTarget.value)}
+            onClick={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              e.stopPropagation()
+              if (e.key === "Enter") {
+                e.preventDefault()
+                commit()
+              } else if (e.key === "Escape") {
+                e.preventDefault()
+                cancel()
+              }
+            }}
+            onBlur={commit}
+            spellcheck={false}
+            autocomplete="off"
+            style={{
+              all: "unset",
+              "box-sizing": "border-box",
+              flex: 1,
+              "min-width": 0,
+              padding: "1px 5px",
+              "margin-left": "-5px",
+              "border-radius": "5px",
+              background: "var(--color-surface-solid)",
+              "box-shadow": "inset 0 0 0 1px var(--color-border-strong)",
+              "font-family": FONT_MONO,
+              "font-size": "12.5px",
+              color: "var(--color-text)",
+            }}
+          />
+        </Show>
+      </div>
+      <div
+        style={{
+          "font-family": FONT_MONO,
+          "font-size": "10.5px",
+          color: "var(--color-text-faint)",
+          "letter-spacing": "0.04em",
+          "padding-left": "17px",
+        }}
+      >
+        {props.session.time?.updated ? DateTime.fromMillis(props.session.time.updated).toRelative() : "—"}
+      </div>
+      <Show when={hover() && !editing()}>
+        <button
+          type="button"
+          title="delete session"
+          aria-label="delete session"
+          onPointerDown={(e) => {
+            // Stop pointerdown on the parent row before its own click
+            // can fire — Solid runs the row's onClick first otherwise.
+            e.stopPropagation()
+          }}
+          onClick={(e) => {
+            e.stopPropagation()
+            e.preventDefault()
+            props.onDelete()
+          }}
+          style={{
+            position: "absolute",
+            right: "6px",
+            top: "50%",
+            transform: "translateY(-50%)",
+            display: "inline-flex",
+            "align-items": "center",
+            "justify-content": "center",
+            width: "22px",
+            height: "22px",
+            "border-radius": "4px",
+            background: "var(--color-surface-solid)",
+            border: "1px solid var(--color-border)",
+            color: "var(--color-text-faint)",
+            cursor: "pointer",
+            transition: "all 120ms ease",
+          }}
+          onMouseEnter={(el) => {
+            el.currentTarget.style.background = "var(--color-error-muted)"
+            el.currentTarget.style.borderColor = "var(--color-error)"
+            el.currentTarget.style.color = "var(--color-error)"
+          }}
+          onMouseLeave={(el) => {
+            el.currentTarget.style.background = "var(--color-surface-solid)"
+            el.currentTarget.style.borderColor = "var(--color-border)"
+            el.currentTarget.style.color = "var(--color-text-faint)"
+          }}
+        >
+          <IconTrash size={11} strokeWidth={1.5} />
+        </button>
+      </Show>
+    </div>
+  )
+}

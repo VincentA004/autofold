@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@synsci/plugin",
+  "version": "2.0.1",
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "typecheck": "tsgo --noEmit",
+    "build": "tsc"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./tool": "./src/tool.ts"
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@synsci/sdk": "2.0.1",
+    "zod": "4.1.8"
+  },
+  "devDependencies": {
+    "@tsconfig/node22": "22.0.2",
+    "@types/node": "22.13.9",
+    "typescript": "5.8.2",
+    "@typescript/native-preview": "7.0.0-dev.20251207.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/synthetic-sciences/openscience.git"
+  }
+}

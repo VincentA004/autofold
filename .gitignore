@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.playwright-cli/
+output/
+*.log
+.DS_Store
+__pycache__/
+*.py[cod]
+.autofold/
