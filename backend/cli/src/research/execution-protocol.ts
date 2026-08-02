@@ -3,8 +3,7 @@ import z from "zod"
 const Digest = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 
 export namespace ExecutionProtocol {
-  export const TrialBundle = z.object({
-    format: z.literal("autofold.trial-bundle.v1"),
+  const TrialBundleFields = {
     runId: z.string().startsWith("run_"),
     trialId: z.string().startsWith("trl_"),
     contractHash: Digest,
@@ -28,7 +27,15 @@ export namespace ExecutionProtocol {
     seeds: z.array(z.number().int()).min(1),
     candidateBudget: z.number().int().positive(),
     submissionSize: z.number().int().positive(),
+  }
+  export const TrialBundleV1 = z.object({ format: z.literal("autofold.trial-bundle.v1"), ...TrialBundleFields })
+  export const TrialBundleV2 = z.object({
+    format: z.literal("autofold.trial-bundle.v2"),
+    ...TrialBundleFields,
+    targetArtifactHash: Digest,
+    targetArtifactPath: z.string().trim().min(1).optional(),
   })
+  export const TrialBundle = z.union([TrialBundleV1, TrialBundleV2])
   export type TrialBundle = z.infer<typeof TrialBundle>
 
   export const Candidate = z.object({
@@ -38,12 +45,59 @@ export namespace ExecutionProtocol {
   })
   export type Candidate = z.infer<typeof Candidate>
 
-  export const CandidateSet = z.object({
+  export const CandidateSetV1 = z.object({
     format: z.literal("autofold.candidate-set.v1"),
     runId: z.string().startsWith("run_"),
     trialId: z.string().startsWith("trl_"),
     candidates: z.array(Candidate),
   })
+
+  const UnitMetric = z.number().finite().min(0).max(1)
+  export const PeptideCandidateArtifact = Candidate.extend({
+    format: z.literal("autofold.peptide-candidate.v1"),
+    modality: z.enum(["linear_minibinder", "short_peptide", "cyclic_peptide", "modified_peptide"]),
+    generation: z.object({
+      model: z.string().trim().min(1),
+      version: z.string().trim().min(1),
+      artifactHash: Digest,
+      parametersHash: Digest,
+    }),
+    evidence: z.object({
+      interfaceConfidence: UnitMetric,
+      foldConfidence: UnitMetric,
+      predictorAgreement: UnitMetric,
+      solubility: UnitMetric,
+      aggregationRisk: UnitMetric,
+      synthesisRisk: UnitMetric,
+      predictors: z
+        .array(
+          z.object({
+            model: z.string().trim().min(1),
+            version: z.string().trim().min(1),
+            artifactHash: Digest,
+          }),
+        )
+        .min(1),
+    }),
+  })
+  export type PeptideCandidateArtifact = z.infer<typeof PeptideCandidateArtifact>
+
+  export const CandidateSetV2 = z
+    .object({
+      format: z.literal("autofold.candidate-set.v2"),
+      runId: z.string().startsWith("run_"),
+      trialId: z.string().startsWith("trl_"),
+      targetArtifactHash: Digest,
+      candidates: z.array(PeptideCandidateArtifact),
+    })
+    .superRefine((candidateSet, context) => {
+      const ids = new Set(candidateSet.candidates.map((candidate) => candidate.id))
+      if (ids.size !== candidateSet.candidates.length) {
+        context.addIssue({ code: "custom", path: ["candidates"], message: "Candidate IDs must be unique" })
+      }
+    })
+
+  export const CandidateSet = z.union([CandidateSetV1, CandidateSetV2])
   export type CandidateSet = z.infer<typeof CandidateSet>
 
   export const EvaluationResult = z.object({

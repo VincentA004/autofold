@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 import { ResearchTerminal } from "./terminal"
 
 describe("research terminal", () => {
@@ -73,5 +76,60 @@ describe("research terminal", () => {
     expect(calls[0]?.url).toBe("http://127.0.0.1:4096/session/")
     expect(calls[0]?.init?.method).toBe("POST")
     expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ title: "Acceptance compute" })
+  })
+
+  test("authors a target file before freezing an experiment with the scientific evaluator", async () => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "autofold-terminal-target-"))
+    const target = {
+      format: "autofold.target-artifact.v1",
+      name: "CLI receptor",
+      chains: [{ id: "A", sequence: "ACDEFGHIK" }],
+      bindingSite: { residues: [{ chainId: "A", position: 4 }] },
+    }
+    await fs.writeFile(path.join(workspace, "target.json"), JSON.stringify(target))
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    try {
+      const code = await ResearchTerminal.run(
+        [
+          "experiment",
+          "create",
+          "cmp_one",
+          "--objective",
+          "Improve binding",
+          "--target-file",
+          "target.json",
+          "--evaluator",
+          "peptide-panel",
+          "--workspace",
+          workspace,
+        ],
+        {
+          output: () => undefined,
+          fetchFn: (async (input, init) => {
+            calls.push({ url: String(input), init })
+            const url = String(input)
+            if (url.endsWith("/evaluators")) {
+              return new Response(
+                JSON.stringify([
+                  { id: "mock-peptide-panel", version: "1", sourceHash: `sha256:${"a".repeat(64)}`, direction: "minimize" },
+                  { id: "peptide-panel", version: "1", sourceHash: `sha256:${"b".repeat(64)}`, direction: "minimize" },
+                ]),
+              )
+            }
+            if (url.endsWith("/targets")) {
+              return new Response(JSON.stringify({ targetArtifactHash: `sha256:${"c".repeat(64)}` }))
+            }
+            return new Response(JSON.stringify({ id: "exp_one" }))
+          }) as typeof fetch,
+        },
+      )
+      expect(code).toBe(0)
+      expect(JSON.parse(String(calls[1]?.init?.body))).toEqual(target)
+      const contract = JSON.parse(String(calls[2]?.init?.body)).contract
+      expect(contract.targetArtifactHash).toBe(`sha256:${"c".repeat(64)}`)
+      expect(contract.evaluator.id).toBe("peptide-panel")
+    } finally {
+      await fs.rm(workspace, { recursive: true, force: true })
+    }
   })
 })

@@ -5,6 +5,7 @@ import { Instance } from "@/project/instance"
 import {
   DesignAdapters,
   Research,
+  ResearchArtifacts,
   ResearchDomain,
   ResearchExecution,
   ResearchPrograms,
@@ -49,6 +50,17 @@ export const ResearchRoutes = lazy(() =>
         responses: { 200: { description: "Mock and Proto trial.py templates" } },
       }),
       (c) => c.json(ResearchPrograms.templates()),
+    )
+    .post(
+      "/targets",
+      describeRoute({
+        summary: "Validate and freeze a target artifact",
+        description: "Stores a Target Artifact v1 by its canonical content hash.",
+        operationId: "research.target.author",
+        responses: { 200: { description: "Content-addressed target artifact" } },
+      }),
+      validator("json", ResearchArtifacts.TargetArtifact),
+      async (c) => c.json(await ResearchArtifacts.authorTarget(Instance.directory, c.req.valid("json"))),
     )
     .get(
       "/campaigns",

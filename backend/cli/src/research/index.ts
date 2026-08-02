@@ -1,4 +1,5 @@
 export { ResearchDomain } from "./domain"
+export { ResearchArtifacts } from "./artifacts"
 export { ExecutionProtocol } from "./execution-protocol"
 export { DesignAdapters } from "./adapters"
 export { ResearchExecution } from "./execution"

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 FORMATS = {
-    "bundle": "autofold.trial-bundle.v1",
+    "bundles": {"autofold.trial-bundle.v1", "autofold.trial-bundle.v2"},
     "candidates": "autofold.candidate-set.v1",
     "evaluation": "autofold.evaluation-result.v1",
     "manifest": "autofold.run-manifest.v1",
@@ -43,11 +43,15 @@ def require_string(value: dict[str, Any], key: str, prefix: str | None = None) -
 
 
 def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
-    if value.get("format") != FORMATS["bundle"]:
+    if value.get("format") not in FORMATS["bundles"]:
         raise ProtocolError("Unsupported trial bundle format")
     require_string(value, "runId", "run_")
     require_string(value, "trialId", "trl_")
     require_string(value, "contractHash", "sha256:")
+    if value["format"] == "autofold.trial-bundle.v2":
+        require_string(value, "targetArtifactHash", "sha256:")
+        if "targetArtifactPath" in value:
+            require_string(value, "targetArtifactPath")
     if value.get("designAdapter") not in {"mock", "proto"}:
         raise ProtocolError("Unsupported design adapter")
     require_string(value, "programPath")

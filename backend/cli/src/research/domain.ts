@@ -163,6 +163,7 @@ export namespace ResearchDomain {
       diagnostics: z.record(z.string(), z.number().finite()),
       provenance: z.object({
         contractHash: Digest,
+        targetArtifactHash: Digest.optional(),
         evaluatorHash: Digest,
         programHash: Digest,
         manifestHash: Digest.optional(),

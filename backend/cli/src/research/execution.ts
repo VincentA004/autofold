@@ -5,6 +5,7 @@ import { ComputeJobs } from "@/compute/jobs"
 import { ExecutionAuthority } from "@/project/execution"
 import { Instance } from "@/project/instance"
 import { Research, ResearchService } from "./service"
+import { ResearchArtifacts } from "./artifacts"
 import { ExecutionProtocol } from "./execution-protocol"
 import { ResearchDomain } from "./domain"
 import { DesignAdapters } from "./adapters"
@@ -12,6 +13,7 @@ import { DesignAdapters } from "./adapters"
 const workerRoot = path.resolve(import.meta.dir, "../../../worker")
 const workerScript = path.join(workerRoot, "run_worker.py")
 const mockEvaluatorSource = path.join(workerRoot, "autofold_worker", "evaluate.py")
+const peptideEvaluatorSource = path.join(workerRoot, "autofold_worker", "peptide_panel_v1.py")
 const finalizers = new Map<string, Promise<void>>()
 
 async function fileHash(file: string): Promise<string> {
@@ -45,16 +47,36 @@ export namespace ResearchExecution {
     implementation: string
   }
 
-  export async function evaluators(): Promise<EvaluatorInfo[]> {
+  interface InstalledEvaluator extends EvaluatorInfo {
+    sourcePath: string
+    requiresTargetArtifact: boolean
+  }
+
+  async function installedEvaluators(): Promise<InstalledEvaluator[]> {
     return [
       {
         id: "mock-peptide-panel",
         version: "1",
         sourceHash: await fileHash(mockEvaluatorSource),
         direction: "minimize",
-        implementation: "python-stdlib",
+        implementation: "python-stdlib-sequence-heuristic",
+        sourcePath: mockEvaluatorSource,
+        requiresTargetArtifact: false,
+      },
+      {
+        id: "peptide-panel",
+        version: "1",
+        sourceHash: await fileHash(peptideEvaluatorSource),
+        direction: "minimize",
+        implementation: "python-stdlib-locked-evidence-panel",
+        sourcePath: peptideEvaluatorSource,
+        requiresTargetArtifact: true,
       },
     ]
+  }
+
+  export async function evaluators(): Promise<EvaluatorInfo[]> {
+    return (await installedEvaluators()).map(({ sourcePath: _sourcePath, requiresTargetArtifact: _required, ...info }) => info)
   }
 
   export async function start(input: { trialId: string; sessionId: string }): Promise<ResearchDomain.Run> {
@@ -67,7 +89,7 @@ export namespace ResearchExecution {
         message: adapter.reason ?? `Design adapter ${adapter.id} is unavailable`,
       })
     }
-    const installed = (await evaluators()).find(
+    const installed = (await installedEvaluators()).find(
       (candidate) =>
         candidate.id === context.experiment.contract.evaluator.id &&
         candidate.version === context.experiment.contract.evaluator.version,
@@ -84,6 +106,14 @@ export namespace ResearchExecution {
         message: "The installed evaluator source does not match the frozen experiment contract",
       })
     }
+    const storedTarget = installed.requiresTargetArtifact
+      ? await ResearchArtifacts.readTarget(Instance.directory, context.experiment.contract.targetArtifactHash).catch(() => {
+          throw new ResearchService.ConflictError({
+            code: "target_artifact_unavailable",
+            message: `Target artifact ${context.experiment.contract.targetArtifactHash} is not available or no longer valid`,
+          })
+        })
+      : undefined
 
     // Authorization is a precondition, not a run outcome. Check it before
     // beginRun mutates the proposed trial into a running state so a denied
@@ -98,13 +128,16 @@ export namespace ResearchExecution {
     const root = path.posix.join(".autofold", "runs", runId)
     const bundlePath = path.posix.join(root, "bundle.json")
     const programPath = path.posix.join(root, "trial.py")
+    const targetPath = storedTarget ? path.posix.join(root, "target.json") : undefined
     const outputPath = path.posix.join(root, "output")
     const run = await Research.beginRun(projectId, input.trialId, { runId, bundlePath, outputPath })
     const bundle = ExecutionProtocol.TrialBundle.parse({
-      format: "autofold.trial-bundle.v1",
+      format: "autofold.trial-bundle.v2",
       runId,
       trialId: context.trial.id,
       contractHash: context.experiment.contractHash,
+      targetArtifactHash: context.experiment.contract.targetArtifactHash,
+      targetArtifactPath: targetPath ? inside(Instance.directory, targetPath) : undefined,
       designAdapter: context.trial.designAdapter,
       programPath: inside(Instance.directory, programPath),
       programHash: context.trial.programHash,
@@ -123,6 +156,7 @@ export namespace ResearchExecution {
     const absoluteBundle = inside(Instance.directory, bundlePath)
     const sourceProgram = inside(Instance.directory, context.trial.programPath)
     const absoluteProgram = inside(Instance.directory, programPath)
+    const absoluteTarget = targetPath ? inside(Instance.directory, targetPath) : undefined
     const absoluteOutput = inside(Instance.directory, outputPath)
 
     try {
@@ -135,6 +169,9 @@ export namespace ResearchExecution {
       }
       await fs.mkdir(path.dirname(absoluteProgram), { recursive: true })
       await fs.copyFile(sourceProgram, absoluteProgram)
+      if (storedTarget && absoluteTarget) {
+        await fs.copyFile(inside(Instance.directory, storedTarget.targetArtifactPath), absoluteTarget)
+      }
       await writeJSON(absoluteBundle, bundle)
       const command = [
         ComputeJobs.quote(adapter.python),
@@ -144,7 +181,7 @@ export namespace ResearchExecution {
         "--output",
         ComputeJobs.quote(absoluteOutput),
         "--evaluator-source",
-        ComputeJobs.quote(mockEvaluatorSource),
+        ComputeJobs.quote(installed.sourcePath),
       ].join(" ")
       const job = await ComputeJobs.start({
         sessionID: input.sessionId,
@@ -231,6 +268,21 @@ export namespace ResearchExecution {
       candidates: await fileHash(candidatesPath),
       result: await fileHash(resultPath),
     }
+    if (bundle.format === "autofold.trial-bundle.v2" && bundle.targetArtifactPath) {
+      expectedFiles.target = await fileHash(inside(workspace, bundle.targetArtifactPath))
+      if (expectedFiles.target !== bundle.targetArtifactHash) {
+        throw new Error(`Run ${run.id} target artifact no longer matches its frozen hash`)
+      }
+    }
+    if (
+      (bundle.format === "autofold.trial-bundle.v2" &&
+        bundle.targetArtifactHash !== context.experiment.contract.targetArtifactHash) ||
+      (candidates.format === "autofold.candidate-set.v2" &&
+        (bundle.format !== "autofold.trial-bundle.v2" ||
+          candidates.targetArtifactHash !== context.experiment.contract.targetArtifactHash))
+    ) {
+      throw new Error(`Run ${run.id} artifacts do not match its frozen target`)
+    }
     for (const [label, hash] of Object.entries(expectedFiles)) {
       if (manifest.files[label] !== hash) throw new Error(`Run ${run.id} manifest does not match ${label}`)
     }
@@ -309,6 +361,8 @@ export namespace ResearchExecution {
     }
     if (
       bundle.contractHash !== context.experiment.contractHash ||
+      (bundle.format === "autofold.trial-bundle.v2" &&
+        bundle.targetArtifactHash !== context.experiment.contract.targetArtifactHash) ||
       bundle.programHash !== context.trial.programHash ||
       bundle.evaluator.sourceHash !== context.experiment.contract.evaluator.sourceHash ||
       result.contractHash !== context.experiment.contractHash ||
@@ -326,6 +380,18 @@ export namespace ResearchExecution {
       program: await fileHash(programPath),
       candidates: await fileHash(candidatesPath),
       result: await fileHash(resultPath),
+    }
+    if (bundle.format === "autofold.trial-bundle.v2" && bundle.targetArtifactPath) {
+      expectedFiles.target = await fileHash(inside(workspace, bundle.targetArtifactPath))
+      if (expectedFiles.target !== bundle.targetArtifactHash) {
+        throw new Error(`Run ${run.id} target artifact no longer matches its frozen hash`)
+      }
+    }
+    if (
+      candidates.format === "autofold.candidate-set.v2" &&
+      candidates.targetArtifactHash !== context.experiment.contract.targetArtifactHash
+    ) {
+      throw new Error(`Run ${run.id} candidates reference another target`)
     }
     for (const [label, hash] of Object.entries(expectedFiles)) {
       if (manifest.files[label] !== hash) throw new Error(`Run ${run.id} manifest does not match ${label}`)

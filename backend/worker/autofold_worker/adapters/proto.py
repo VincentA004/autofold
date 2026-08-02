@@ -11,6 +11,7 @@ from typing import Any
 from ..protocol import ProtocolError
 
 AMINO_ACIDS = set("ACDEFGHIKLMNPQRSTVWY")
+SCIENTIFIC_EVALUATOR = ("peptide-panel", "1")
 
 
 def _commit(path: Path) -> str:
@@ -46,17 +47,30 @@ def _normalize(raw: Any, bundle: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(sequence, str) or not sequence or not set(sequence).issubset(AMINO_ACIDS):
             raise ProtocolError("Proto trial returned a non-canonical protein sequence")
         identifier = hashlib.sha256(sequence.encode("ascii")).hexdigest()[:16]
-        candidates.append(
-            {
-                "id": item.get("id", f"pep_{identifier}") if isinstance(item, dict) else f"pep_{identifier}",
-                "sequence": sequence,
-                "seed": item.get("seed", seeds[index % len(seeds)]) if isinstance(item, dict) else seeds[index % len(seeds)],
-            }
-        )
+        candidate = {
+            "id": item.get("id", f"pep_{identifier}") if isinstance(item, dict) else f"pep_{identifier}",
+            "sequence": sequence,
+            "seed": item.get("seed", seeds[index % len(seeds)]) if isinstance(item, dict) else seeds[index % len(seeds)],
+        }
+        evaluator = bundle["evaluator"]
+        if (evaluator["id"], evaluator["version"]) == SCIENTIFIC_EVALUATOR:
+            if not isinstance(item, dict) or not isinstance(item.get("generation"), dict) or not isinstance(item.get("evidence"), dict):
+                raise ProtocolError("Peptide panel v1 requires generation and evidence for every candidate")
+            candidate.update(
+                {
+                    "format": "autofold.peptide-candidate.v1",
+                    "modality": item.get("modality", bundle["modality"]),
+                    "generation": item["generation"],
+                    "evidence": item["evidence"],
+                }
+            )
+        candidates.append(candidate)
+    scientific = (bundle["evaluator"]["id"], bundle["evaluator"]["version"]) == SCIENTIFIC_EVALUATOR
     return {
-        "format": "autofold.candidate-set.v1",
+        "format": "autofold.candidate-set.v2" if scientific else "autofold.candidate-set.v1",
         "runId": bundle["runId"],
         "trialId": bundle["trialId"],
+        **({"targetArtifactHash": bundle["targetArtifactHash"]} if scientific else {}),
         "candidates": candidates,
     }
 

@@ -128,6 +128,12 @@ export namespace ResearchTerminal {
         outputJSON(output, await client.get("/campaigns"))
         return 0
       }
+      if (command === "target" && noun === "add") {
+        const targetFile = path.resolve(workspace, requiredFlag(parsed, "file"))
+        if (!(await Bun.file(targetFile).exists())) throw new Error(`Target file was not found: ${targetFile}`)
+        outputJSON(output, await client.post("/targets", await Bun.file(targetFile).json()))
+        return 0
+      }
       if (command === "campaign" && noun === "create") {
         const objective = requiredFlag(parsed, "objective")
         outputJSON(output, await client.post("/campaigns", { objective }))
@@ -143,18 +149,28 @@ export namespace ResearchTerminal {
       }
       if (command === "experiment" && noun === "create") {
         const campaignId = requiredPosition(parsed, 2, "campaign id")
+        const targetFile = stringFlag(parsed, "target-file")
         const evaluators = await client.get<Array<{
           id: string
           version: string
           sourceHash: string
           direction: "minimize" | "maximize"
         }>>("/evaluators")
-        const evaluator = evaluators.find((item) => item.id === stringFlag(parsed, "evaluator")) ?? evaluators[0]
+        const requestedEvaluator = stringFlag(parsed, "evaluator")
+        const evaluator = evaluators.find((item) => item.id === requestedEvaluator) ?? evaluators[0]
         if (!evaluator) throw new Error("No locked evaluator is installed")
+        const targetArtifactHash = targetFile
+          ? (
+              await client.post<{ targetArtifactHash: string }>(
+                "/targets",
+                await Bun.file(path.resolve(workspace, targetFile)).json(),
+              )
+            ).targetArtifactHash
+          : requiredFlag(parsed, "target")
         const contract = {
           version: 1,
           objective: requiredFlag(parsed, "objective"),
-          targetArtifactHash: requiredFlag(parsed, "target"),
+          targetArtifactHash,
           modality: stringFlag(parsed, "modality") ?? "short_peptide",
           budget: {
             maximumCandidates: integerFlag(parsed, "candidates", 64),
@@ -296,10 +312,11 @@ Commands:
   sessions
   session create [--title TEXT]
   campaigns
+  target add --file TARGET.json
   campaign create --objective TEXT
   campaign activate CMP_ID
   experiments CMP_ID
-  experiment create CMP_ID --objective TEXT --target sha256:... [--modality short_peptide]
+  experiment create CMP_ID --objective TEXT (--target sha256:... | --target-file TARGET.json) [--evaluator ID] [--modality short_peptide]
   experiment activate EXP_ID
   history EXP_ID
   template mock|proto

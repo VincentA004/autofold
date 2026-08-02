@@ -43,6 +43,9 @@ function conceptFrontmatter(concept: ResearchDomain.KnowledgeConcept) {
     diagnostics: concept.diagnostics,
     provenance: {
       contract_hash: concept.provenance.contractHash,
+      ...(concept.provenance.targetArtifactHash
+        ? { target_artifact_hash: concept.provenance.targetArtifactHash }
+        : {}),
       evaluator_hash: concept.provenance.evaluatorHash,
       program_hash: concept.provenance.programHash,
       ...(concept.provenance.manifestHash ? { manifest_hash: concept.provenance.manifestHash } : {}),

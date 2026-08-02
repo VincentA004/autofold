@@ -216,6 +216,7 @@ describe("research service", () => {
       ])
       expect(result.knowledge.provenance).toEqual({
         contractHash: experiment.contractHash,
+        targetArtifactHash: experiment.contract.targetArtifactHash,
         evaluatorHash: experiment.contract.evaluator.sourceHash,
         programHash: trial.programHash,
         manifestHash: digest("e"),
@@ -314,6 +315,7 @@ describe("research service", () => {
       expect(concepts[0]?.verified).toBeUndefined()
       expect(concepts[0]?.provenance).toEqual({
         contractHash: experiment.contractHash,
+        targetArtifactHash: experiment.contract.targetArtifactHash,
         evaluatorHash: experiment.contract.evaluator.sourceHash,
         programHash: trial.programHash,
       })

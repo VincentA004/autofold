@@ -382,6 +382,7 @@ export namespace ResearchService {
           diagnostics: {},
           provenance: {
             contractHash: experiment.contractHash,
+            targetArtifactHash: experiment.contract.targetArtifactHash,
             evaluatorHash: experiment.contract.evaluator.sourceHash,
             programHash: trial.programHash,
           },
@@ -573,6 +574,7 @@ export namespace ResearchService {
         diagnostics: input.diagnostics,
         provenance: {
           contractHash: evaluation.contractHash,
+          targetArtifactHash: experiment.contract.targetArtifactHash,
           evaluatorHash: evaluation.evaluatorHash,
           programHash: trial.programHash,
           manifestHash: run?.manifestHash,
