@@ -68,6 +68,7 @@ Start with `bun run research:cli -- help`. A typical terminal loop is:
 
 ```text
 bun run research:cli -- status
+bun run research:cli -- session create --title "Acceptance compute"
 bun run research:cli -- campaign create --objective "Discover a selective peptide binder"
 bun run research:cli -- campaign activate CMP_ID
 bun run research:cli -- experiment create CMP_ID --objective "Improve the locked peptide score" --target sha256:...

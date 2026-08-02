@@ -38,18 +38,22 @@ export namespace ResearchTerminal {
   }
 
   export class Client {
-    private readonly base: string
+    private readonly server: string
 
     constructor(
       server: string,
       private readonly workspace: string,
       private readonly fetchFn: Fetch = fetch,
     ) {
-      this.base = `${server.replace(/\/+$/, "")}/research`
+      this.server = server.replace(/\/+$/, "")
     }
 
     async request<T>(route: string, method = "GET", body?: unknown): Promise<T> {
-      const response = await this.fetchFn(`${this.base}${route}`, {
+      return this.serverRequest<T>(`/research${route}`, method, body)
+    }
+
+    async serverRequest<T>(route: string, method = "GET", body?: unknown): Promise<T> {
+      const response = await this.fetchFn(`${this.server}${route}`, {
         method,
         headers: {
           "x-openscience-directory": /[^\x00-\x7f]/.test(this.workspace)
@@ -105,6 +109,19 @@ export namespace ResearchTerminal {
           client.get("/campaigns"),
         ])
         outputJSON(output, { server, workspace, adapters, evaluators, campaigns })
+        return 0
+      }
+      if (command === "sessions") {
+        outputJSON(output, await client.serverRequest("/session/"))
+        return 0
+      }
+      if (command === "session" && noun === "create") {
+        outputJSON(
+          output,
+          await client.serverRequest("/session/", "POST", {
+            ...(stringFlag(parsed, "title") ? { title: stringFlag(parsed, "title") } : {}),
+          }),
+        )
         return 0
       }
       if (command === "campaigns") {
@@ -276,6 +293,8 @@ Global flags:
 
 Commands:
   status
+  sessions
+  session create [--title TEXT]
   campaigns
   campaign create --objective TEXT
   campaign activate CMP_ID

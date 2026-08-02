@@ -2,6 +2,7 @@ import crypto from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { ComputeJobs } from "@/compute/jobs"
+import { ExecutionAuthority } from "@/project/execution"
 import { Instance } from "@/project/instance"
 import { Research, ResearchService } from "./service"
 import { ExecutionProtocol } from "./execution-protocol"
@@ -83,6 +84,15 @@ export namespace ResearchExecution {
         message: "The installed evaluator source does not match the frozen experiment contract",
       })
     }
+
+    // Authorization is a precondition, not a run outcome. Check it before
+    // beginRun mutates the proposed trial into a running state so a denied
+    // launch can be retried after trust or sandbox remediation.
+    await ExecutionAuthority.require({
+      projectID: projectId,
+      sessionID: input.sessionId,
+      capability: "local_job",
+    })
 
     const runId = `run_${crypto.randomUUID().replaceAll("-", "")}`
     const root = path.posix.join(".autofold", "runs", runId)

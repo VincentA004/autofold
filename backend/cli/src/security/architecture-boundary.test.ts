@@ -25,4 +25,13 @@ describe("Autofold backend architecture boundary", () => {
     expect(compatibility).toContain("return RuntimePolicy.redactSecrets(text)")
     expect(compatibility).toContain("return RuntimePolicy.subprocessEnv(env)")
   })
+
+  test("research execution authorizes before consuming a proposed trial", () => {
+    const execution = read("../research/execution.ts")
+    const authorization = execution.indexOf("await ExecutionAuthority.require")
+    const transition = execution.indexOf("await Research.beginRun")
+
+    expect(authorization).toBeGreaterThan(-1)
+    expect(transition).toBeGreaterThan(authorization)
+  })
 })

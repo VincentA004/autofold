@@ -59,4 +59,19 @@ describe("research terminal", () => {
     expect(output.some((line) => line.includes("running"))).toBe(true)
     expect(output.some((line) => line.includes('"candidates"'))).toBe(true)
   })
+
+  test("creates a session through the same project-scoped terminal client", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const code = await ResearchTerminal.run(["session", "create", "--title", "Acceptance compute"], {
+      output: () => undefined,
+      fetchFn: (async (input, init) => {
+        calls.push({ url: String(input), init })
+        return new Response(JSON.stringify({ id: "ses_one" }))
+      }) as typeof fetch,
+    })
+    expect(code).toBe(0)
+    expect(calls[0]?.url).toBe("http://127.0.0.1:4096/session/")
+    expect(calls[0]?.init?.method).toBe("POST")
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ title: "Acceptance compute" })
+  })
 })
