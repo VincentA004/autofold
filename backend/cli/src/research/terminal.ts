@@ -1,0 +1,301 @@
+import path from "node:path"
+
+type Fetch = typeof fetch
+type Output = (value: string) => void
+
+interface Parsed {
+  positionals: string[]
+  flags: Record<string, string | boolean>
+}
+
+const terminalRunStates = new Set(["succeeded", "failed", "cancelled"])
+
+export namespace ResearchTerminal {
+  export function parse(argv: string[]): Parsed {
+    const positionals: string[] = []
+    const flags: Record<string, string | boolean> = {}
+    for (let index = 0; index < argv.length; index++) {
+      const value = argv[index]!
+      if (!value.startsWith("--")) {
+        positionals.push(value)
+        continue
+      }
+      const [rawKey, inline] = value.slice(2).split("=", 2)
+      if (!rawKey) throw new Error(`Invalid flag: ${value}`)
+      if (inline !== undefined) {
+        flags[rawKey] = inline
+        continue
+      }
+      const next = argv[index + 1]
+      if (next && !next.startsWith("--")) {
+        flags[rawKey] = next
+        index++
+      } else {
+        flags[rawKey] = true
+      }
+    }
+    return { positionals, flags }
+  }
+
+  export class Client {
+    private readonly base: string
+
+    constructor(
+      server: string,
+      private readonly workspace: string,
+      private readonly fetchFn: Fetch = fetch,
+    ) {
+      this.base = `${server.replace(/\/+$/, "")}/research`
+    }
+
+    async request<T>(route: string, method = "GET", body?: unknown): Promise<T> {
+      const response = await this.fetchFn(`${this.base}${route}`, {
+        method,
+        headers: {
+          "x-openscience-directory": /[^\x00-\x7f]/.test(this.workspace)
+            ? encodeURIComponent(this.workspace)
+            : this.workspace,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      })
+      const text = await response.text()
+      if (!response.ok) {
+        let message = text
+        try {
+          const parsed = JSON.parse(text) as { message?: string; data?: { message?: string } }
+          message = parsed.data?.message ?? parsed.message ?? text
+        } catch {}
+        throw new Error(`${method} ${route} failed (${response.status}): ${message || response.statusText}`)
+      }
+      return (text ? JSON.parse(text) : undefined) as T
+    }
+
+    get<T>(route: string) {
+      return this.request<T>(route)
+    }
+
+    post<T>(route: string, body?: unknown) {
+      return this.request<T>(route, "POST", body)
+    }
+  }
+
+  export async function run(
+    argv: string[],
+    options: { fetchFn?: Fetch; output?: Output; error?: Output; sleep?: (milliseconds: number) => Promise<void> } = {},
+  ): Promise<number> {
+    const parsed = parse(argv)
+    const output = options.output ?? console.log
+    const error = options.error ?? console.error
+    const server = stringFlag(parsed, "server") ?? process.env.AUTOFOLD_URL ?? "http://127.0.0.1:4096"
+    const workspace = path.resolve(stringFlag(parsed, "workspace") ?? process.cwd())
+    const client = new Client(server, workspace, options.fetchFn)
+    const command = parsed.positionals[0] ?? "help"
+    const noun = parsed.positionals[1]
+
+    try {
+      if (command === "help" || command === "--help" || command === "-h") {
+        output(help())
+        return 0
+      }
+      if (command === "status") {
+        const [adapters, evaluators, campaigns] = await Promise.all([
+          client.get("/design-adapters"),
+          client.get("/evaluators"),
+          client.get("/campaigns"),
+        ])
+        outputJSON(output, { server, workspace, adapters, evaluators, campaigns })
+        return 0
+      }
+      if (command === "campaigns") {
+        outputJSON(output, await client.get("/campaigns"))
+        return 0
+      }
+      if (command === "campaign" && noun === "create") {
+        const objective = requiredFlag(parsed, "objective")
+        outputJSON(output, await client.post("/campaigns", { objective }))
+        return 0
+      }
+      if (command === "campaign" && noun === "activate") {
+        outputJSON(output, await client.post(`/campaigns/${requiredPosition(parsed, 2, "campaign id")}/activate`))
+        return 0
+      }
+      if (command === "experiments") {
+        outputJSON(output, await client.get(`/campaigns/${requiredPosition(parsed, 1, "campaign id")}/experiments`))
+        return 0
+      }
+      if (command === "experiment" && noun === "create") {
+        const campaignId = requiredPosition(parsed, 2, "campaign id")
+        const evaluators = await client.get<Array<{
+          id: string
+          version: string
+          sourceHash: string
+          direction: "minimize" | "maximize"
+        }>>("/evaluators")
+        const evaluator = evaluators.find((item) => item.id === stringFlag(parsed, "evaluator")) ?? evaluators[0]
+        if (!evaluator) throw new Error("No locked evaluator is installed")
+        const contract = {
+          version: 1,
+          objective: requiredFlag(parsed, "objective"),
+          targetArtifactHash: requiredFlag(parsed, "target"),
+          modality: stringFlag(parsed, "modality") ?? "short_peptide",
+          budget: {
+            maximumCandidates: integerFlag(parsed, "candidates", 64),
+            gpuHours: numberFlag(parsed, "gpu-hours", 0),
+            wallTimeMinutes: integerFlag(parsed, "wall-minutes", 30),
+          },
+          evaluator: {
+            id: evaluator.id,
+            version: evaluator.version,
+            sourceHash: evaluator.sourceHash,
+            direction: evaluator.direction,
+            fixedSeeds: (stringFlag(parsed, "seeds") ?? "7,11,23").split(",").map((value) => Number(value.trim())),
+            submissionSize: integerFlag(parsed, "submission", 8),
+          },
+        }
+        outputJSON(output, await client.post(`/campaigns/${campaignId}/experiments`, { contract }))
+        return 0
+      }
+      if (command === "experiment" && noun === "activate") {
+        outputJSON(output, await client.post(`/experiments/${requiredPosition(parsed, 2, "experiment id")}/activate`))
+        return 0
+      }
+      if (command === "history") {
+        outputJSON(output, await client.get(`/experiments/${requiredPosition(parsed, 1, "experiment id")}/history`))
+        return 0
+      }
+      if (command === "template") {
+        const adapter = requiredPosition(parsed, 1, "adapter (mock or proto)")
+        if (adapter !== "mock" && adapter !== "proto") throw new Error("Adapter must be mock or proto")
+        const templates = await client.get<Record<"mock" | "proto", string>>("/program-templates")
+        output(templates[adapter])
+        return 0
+      }
+      if (command === "trial" && noun === "create") {
+        const experimentId = requiredPosition(parsed, 2, "experiment id")
+        const programFile = path.resolve(workspace, requiredFlag(parsed, "program"))
+        if (!(await Bun.file(programFile).exists())) throw new Error(`Program file was not found: ${programFile}`)
+        const program = await Bun.file(programFile).text()
+        outputJSON(
+          output,
+          await client.post(`/experiments/${experimentId}/authored-trials`, {
+            hypothesis: requiredFlag(parsed, "hypothesis"),
+            designAdapter: stringFlag(parsed, "adapter") ?? "mock",
+            program,
+            ...(stringFlag(parsed, "parent") ? { parentTrialId: stringFlag(parsed, "parent") } : {}),
+          }),
+        )
+        return 0
+      }
+      if (command === "run" && noun === "start") {
+        outputJSON(
+          output,
+          await client.post(`/trials/${requiredPosition(parsed, 2, "trial id")}/run`, {
+            sessionID: requiredFlag(parsed, "session"),
+          }),
+        )
+        return 0
+      }
+      if (command === "run" && noun === "get") {
+        outputJSON(output, await client.get(`/runs/${requiredPosition(parsed, 2, "run id")}`))
+        return 0
+      }
+      if (command === "run" && noun === "watch") {
+        const runId = requiredPosition(parsed, 2, "run id")
+        const sleep = options.sleep ?? ((milliseconds) => Bun.sleep(milliseconds))
+        let previous = ""
+        while (true) {
+          const run = await client.get<{ status: string; error?: string }>(`/runs/${runId}`)
+          if (run.status !== previous) output(`${new Date().toISOString()}  ${runId}  ${run.status}`)
+          previous = run.status
+          if (terminalRunStates.has(run.status)) {
+            if (run.status === "succeeded") outputJSON(output, await client.get(`/runs/${runId}/artifacts`))
+            else if (run.error) error(run.error)
+            return run.status === "succeeded" ? 0 : 1
+          }
+          await sleep(1_500)
+        }
+      }
+      if (command === "artifacts") {
+        outputJSON(output, await client.get(`/runs/${requiredPosition(parsed, 1, "run id")}/artifacts`))
+        return 0
+      }
+      if (command === "knowledge") {
+        outputJSON(output, await client.get(`/campaigns/${requiredPosition(parsed, 1, "campaign id")}/knowledge`))
+        return 0
+      }
+      throw new Error(`Unknown command: ${parsed.positionals.join(" ") || "(empty)"}`)
+    } catch (caught) {
+      error(caught instanceof Error ? caught.message : String(caught))
+      return 1
+    }
+  }
+
+  function outputJSON(output: Output, value: unknown): void {
+    output(JSON.stringify(value, null, 2))
+  }
+
+  function stringFlag(input: Parsed, key: string): string | undefined {
+    const value = input.flags[key]
+    return typeof value === "string" ? value : undefined
+  }
+
+  function requiredFlag(input: Parsed, key: string): string {
+    const value = stringFlag(input, key)
+    if (!value) throw new Error(`Missing required --${key}`)
+    return value
+  }
+
+  function requiredPosition(input: Parsed, index: number, label: string): string {
+    const value = input.positionals[index]
+    if (!value) throw new Error(`Missing ${label}`)
+    return value
+  }
+
+  function integerFlag(input: Parsed, key: string, fallback: number): number {
+    const value = numberFlag(input, key, fallback)
+    if (!Number.isInteger(value)) throw new Error(`--${key} must be an integer`)
+    return value
+  }
+
+  function numberFlag(input: Parsed, key: string, fallback: number): number {
+    const raw = stringFlag(input, key)
+    const value = raw === undefined ? fallback : Number(raw)
+    if (!Number.isFinite(value)) throw new Error(`--${key} must be a number`)
+    return value
+  }
+
+  export function help(): string {
+    return `Autofold research terminal
+
+Usage: bun run research:cli -- <command> [arguments] [flags]
+
+Global flags:
+  --server URL          backend URL (default http://127.0.0.1:4096)
+  --workspace PATH      project workspace (default current directory)
+
+Commands:
+  status
+  campaigns
+  campaign create --objective TEXT
+  campaign activate CMP_ID
+  experiments CMP_ID
+  experiment create CMP_ID --objective TEXT --target sha256:... [--modality short_peptide]
+  experiment activate EXP_ID
+  history EXP_ID
+  template mock|proto
+  trial create EXP_ID --hypothesis TEXT --adapter mock|proto --program trial.py
+  run start TRL_ID --session SES_ID
+  run get RUN_ID
+  run watch RUN_ID
+  artifacts RUN_ID
+  knowledge CMP_ID
+
+Typical flow: create + activate campaign, create + activate experiment, author a
+trial from a template, start it with a live session ID, then watch the run.`
+  }
+}
+
+if (import.meta.main) {
+  process.exitCode = await ResearchTerminal.run(Bun.argv.slice(2))
+}

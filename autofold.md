@@ -62,4 +62,19 @@ The experiment score measures quality-adjusted discovery yield and diversity und
 
 ## Implemented vertical slice
 
-The workspace Research tab now runs the complete control-plane path for the deterministic mock and pinned Proto adapters: campaign creation and activation, frozen experiment contracts, immutable `trial.py` authoring, sandbox-authorized run launch, manifest-verified candidates, locked evaluation and promotion, and campaign-scoped OKF v0.2 concepts. Research state is authoritative; the readable bundle is published under `.autofold/campaigns/<campaign-id>/knowledge`.
+The terminal research client runs the complete control-plane path for the deterministic mock and pinned Proto adapters: campaign creation and activation, frozen experiment contracts, immutable `trial.py` authoring, sandbox-authorized run launch, manifest-verified candidates, locked evaluation and promotion, and campaign-scoped OKF v0.2 concepts. Research state is authoritative; the readable bundle is published under `.autofold/campaigns/<campaign-id>/knowledge`.
+
+Start with `bun run research:cli -- help`. A typical terminal loop is:
+
+```text
+bun run research:cli -- status
+bun run research:cli -- campaign create --objective "Discover a selective peptide binder"
+bun run research:cli -- campaign activate CMP_ID
+bun run research:cli -- experiment create CMP_ID --objective "Improve the locked peptide score" --target sha256:...
+bun run research:cli -- experiment activate EXP_ID
+bun run research:cli -- template proto > trial.py
+bun run research:cli -- trial create EXP_ID --adapter proto --hypothesis "Increasing diversity improves yield" --program trial.py
+bun run research:cli -- run start TRL_ID --session SES_ID
+bun run research:cli -- run watch RUN_ID
+bun run research:cli -- knowledge CMP_ID
+```

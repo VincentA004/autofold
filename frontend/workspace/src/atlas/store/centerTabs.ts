@@ -5,7 +5,6 @@ import { uiStore } from "@/atlas/store/ui"
  * Center-pane tab model. The center area is a tab strip:
  *   - "chat"  — the (non-closable) session / work-item view
  *   - "files" — the host file explorer
- *   - "research" — campaign, experiment, trial, and knowledge ledger
  *   - one tab per opened document (a real file, rendered inline)
  *
  * Opening a file from the explorer spawns (or focuses) a document tab; the
@@ -53,6 +52,5 @@ export const centerTabs = {
   openFile,
   closeDoc,
   showFiles: () => setActive("files"),
-  showResearch: () => setActive("research"),
   showChat: () => setActive("chat"),
 }

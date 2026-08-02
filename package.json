@@ -14,6 +14,7 @@
   "scripts": {
     "dev": "npm --workspace @synsci/workspace run dev",
     "dev:backend": "bun run --conditions=browser backend/cli/src/autofold-server.ts --port 4096 --cors http://127.0.0.1:3001",
+    "research:cli": "bun run backend/cli/src/research/terminal.ts",
     "build": "npm --workspace @synsci/workspace run build",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
