@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import matter from "gray-matter"
 import { ResearchDomain } from "./domain"
 import { ResearchService } from "./service"
 import { MemoryResearchStore } from "./store"
@@ -75,6 +79,9 @@ describe("research service", () => {
     const history = await service.history(projectId, experiment.id)
     expect(history.trials).toHaveLength(1)
     expect(history.evaluations).toHaveLength(1)
+    const knowledge = await service.listKnowledge(projectId, experiment.campaignId)
+    expect(knowledge).toHaveLength(1)
+    expect(knowledge[0]?.decision).toBe("promoted")
   })
 
   test("rejects a worse trial and parents it to the incumbent", async () => {
@@ -164,5 +171,109 @@ describe("research service", () => {
     const history = await service.history(projectId, experiment.id)
     expect(history.trials[0]?.status).toBe("evaluating")
     expect(history.evaluations).toHaveLength(0)
+  })
+
+  test("atomically records valid run knowledge and writes a campaign OKF v0.2 bundle", async () => {
+    const { service, store, projectId } = fixture()
+    const experiment = await activeExperiment(service, projectId)
+    const trial = await service.createTrial(projectId, experiment.id, {
+      hypothesis: "Bundle-backed baseline",
+      designAdapter: "mock",
+      programPath: "trials/baseline.py",
+      programHash: digest("c"),
+    })
+    const run = await service.beginRun(projectId, trial.id, {
+      runId: "run_valid",
+      bundlePath: ".autofold/runs/run_valid/bundle.json",
+      outputPath: ".autofold/runs/run_valid/output",
+    })
+    await service.attachRunJob(projectId, run.id, "job-valid")
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "autofold-okf-"))
+
+    try {
+      const result = await service.completeRun(
+        projectId,
+        run.id,
+        {
+          contractHash: experiment.contractHash,
+          evaluatorHash: experiment.contract.evaluator.sourceHash,
+          valid: true,
+          score: 0.31,
+          diagnostics: { agreement: 0.91 },
+        },
+        digest("e"),
+        workspace,
+      )
+
+      expect(result.decision).toBe("promoted")
+      expect(result.knowledge.status).toBe("stable")
+      expect(result.knowledge.verified).toEqual([
+        { by: "process:autofold-locked-evaluator", at: result.evaluation.evaluatedAt },
+      ])
+      expect(result.knowledge.sources.map((source) => source.resource)).toEqual([
+        "../../../../runs/run_valid/bundle.json",
+        "../../../../runs/run_valid/output",
+      ])
+      expect(result.knowledge.provenance).toEqual({
+        contractHash: experiment.contractHash,
+        evaluatorHash: experiment.contract.evaluator.sourceHash,
+        programHash: trial.programHash,
+        manifestHash: digest("e"),
+      })
+
+      const state = await store.read(projectId)
+      expect(Object.values(state.evaluations)).toHaveLength(1)
+      expect(Object.values(state.knowledge)).toEqual([result.knowledge])
+      expect(state.runs[run.id]?.status).toBe("succeeded")
+
+      const root = path.join(workspace, ".autofold", "campaigns", experiment.campaignId, "knowledge")
+      const index = await Bun.file(path.join(root, "index.md")).text()
+      const concept = await Bun.file(path.join(root, "concepts", `${result.knowledge.id}.md`)).text()
+      expect(matter(index).data).toEqual({ okf_version: "0.2" })
+      expect(index).toContain(`concepts/${result.knowledge.id}.md`)
+      const frontmatter = matter(concept).data
+      expect(frontmatter.type).toBe("Research Evaluation")
+      expect(frontmatter.status).toBe("stable")
+      expect(frontmatter.decision).toBe("promoted")
+      expect(frontmatter.verified[0].by).toBe("process:autofold-locked-evaluator")
+      expect(frontmatter.sources[0].resource).toBe("../../../../runs/run_valid/bundle.json")
+    } finally {
+      await fs.rm(workspace, { recursive: true, force: true })
+    }
+  })
+
+  test("records rejected invalid run knowledge without claiming machine verification", async () => {
+    const { service, projectId } = fixture()
+    const experiment = await activeExperiment(service, projectId)
+    const trial = await service.createTrial(projectId, experiment.id, {
+      hypothesis: "Invalid candidate set",
+      designAdapter: "mock",
+      programPath: "trials/invalid.py",
+      programHash: digest("d"),
+    })
+    const run = await service.beginRun(projectId, trial.id, {
+      runId: "run_invalid",
+      bundlePath: ".autofold/runs/run_invalid/bundle.json",
+      outputPath: ".autofold/runs/run_invalid/output",
+    })
+    await service.attachRunJob(projectId, run.id, "job-invalid")
+    const result = await service.completeRun(
+      projectId,
+      run.id,
+      {
+        contractHash: experiment.contractHash,
+        evaluatorHash: experiment.contract.evaluator.sourceHash,
+        valid: false,
+        score: null,
+        diagnostics: { malformed: 1 },
+      },
+      digest("f"),
+    )
+
+    expect(result.decision).toBe("rejected")
+    expect(result.knowledge.status).toBe("draft")
+    expect(result.knowledge.verified).toBeUndefined()
+    expect(result.knowledge.score).toBeNull()
+    expect(await service.getKnowledge(projectId, experiment.campaignId, result.knowledge.id)).toEqual(result.knowledge)
   })
 })

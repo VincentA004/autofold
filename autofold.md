@@ -11,7 +11,7 @@ Project / workspace
     └── Experiment
         ├── immutable objective, evaluator, and budget
         └── Trial
-            ├── editable experiment program
+            ├── content-addressed experiment program (immutable once recorded)
             ├── execution runs
             ├── evaluation
             └── evidence and artifacts
@@ -60,3 +60,6 @@ An agent may change the trial program, model combination, parameters, routing, a
 
 The experiment score measures quality-adjusted discovery yield and diversity under a fixed compute budget, not the luckiest single candidate.
 
+## Implemented vertical slice
+
+The workspace Research tab now runs the complete control-plane path for the deterministic mock and pinned Proto adapters: campaign creation and activation, frozen experiment contracts, immutable `trial.py` authoring, sandbox-authorized run launch, manifest-verified candidates, locked evaluation and promotion, and campaign-scoped OKF v0.2 concepts. Research state is authoritative; the readable bundle is published under `.autofold/campaigns/<campaign-id>/knowledge`.

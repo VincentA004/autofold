@@ -177,6 +177,61 @@ export namespace ResearchExecution {
     return run
   }
 
+  export async function artifacts(runId: string) {
+    const run = await get(runId)
+    if (run.status !== "succeeded") {
+      throw new ResearchService.ConflictError({
+        code: "run_artifacts_unavailable",
+        message: `Run ${runId} has no verified artifacts while its status is ${run.status}`,
+      })
+    }
+    const workspace = Instance.directory
+    const context = await Research.getTrialContext(Instance.project.id, run.trialId)
+    const output = inside(workspace, run.outputPath)
+    const bundlePath = inside(workspace, run.bundlePath)
+    const candidatesPath = path.join(output, "candidates.json")
+    const resultPath = path.join(output, "result.json")
+    const manifestPath = path.join(output, "manifest.json")
+    const [bundle, candidates, evaluation, manifest] = await Promise.all([
+      Bun.file(bundlePath).json().then(ExecutionProtocol.TrialBundle.parse),
+      Bun.file(candidatesPath).json().then(ExecutionProtocol.CandidateSet.parse),
+      Bun.file(resultPath).json().then(ExecutionProtocol.EvaluationResult.parse),
+      Bun.file(manifestPath).json().then(ExecutionProtocol.RunManifest.parse),
+    ])
+    if (
+      bundle.runId !== run.id ||
+      candidates.runId !== run.id ||
+      evaluation.runId !== run.id ||
+      manifest.runId !== run.id ||
+      bundle.trialId !== run.trialId ||
+      candidates.trialId !== run.trialId ||
+      evaluation.trialId !== run.trialId ||
+      manifest.trialId !== run.trialId
+    ) {
+      throw new Error(`Run ${run.id} artifacts do not match the persisted run identity`)
+    }
+    const expectedFiles: Record<string, string> = {
+      bundle: await fileHash(bundlePath),
+      program: await fileHash(inside(workspace, bundle.programPath)),
+      candidates: await fileHash(candidatesPath),
+      result: await fileHash(resultPath),
+    }
+    for (const [label, hash] of Object.entries(expectedFiles)) {
+      if (manifest.files[label] !== hash) throw new Error(`Run ${run.id} manifest does not match ${label}`)
+    }
+    if (run.manifestHash !== (await fileHash(manifestPath))) {
+      throw new Error(`Run ${run.id} manifest no longer matches its persisted hash`)
+    }
+    return {
+      run,
+      trial: context.trial,
+      candidates,
+      evaluation,
+      manifest,
+      incumbent: context.experiment.incumbentTrialId === run.trialId,
+    }
+  }
+
   function scheduleFinalization(
     projectId: string,
     workspace: string,
@@ -267,6 +322,7 @@ export namespace ResearchExecution {
         diagnostics: result.diagnostics,
       },
       manifestHash,
+      workspace,
     )
   }
 }

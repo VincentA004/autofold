@@ -126,6 +126,49 @@ export namespace ResearchDomain {
   })
   export type Run = z.infer<typeof Run>
 
+  export const KnowledgeSource = z.object({
+    id: z.string().trim().min(1),
+    resource: z.string().trim().min(1),
+    title: z.string().trim().min(1).optional(),
+    author: z.string().trim().min(1).optional(),
+    last_modified: z.string().date().optional(),
+  })
+  export type KnowledgeSource = z.infer<typeof KnowledgeSource>
+
+  export const KnowledgeActor = z.object({
+    by: z.string().trim().min(1),
+    at: Timestamp,
+  })
+  export type KnowledgeActor = z.infer<typeof KnowledgeActor>
+
+  export const KnowledgeConcept = z.object({
+    id: z.string().regex(/^knw_[A-Za-z0-9_-]+$/),
+    campaignId: z.string().startsWith("cmp_"),
+    experimentId: z.string().startsWith("exp_"),
+    trialId: z.string().startsWith("trl_"),
+    evaluationId: z.string().startsWith("evl_"),
+    runId: z.string().startsWith("run_").optional(),
+    type: z.literal("Research Evaluation"),
+    title: z.string().trim().min(1),
+    description: z.string().trim().min(1),
+    tags: z.array(z.string().trim().min(1)),
+    sources: z.array(KnowledgeSource).min(1),
+    generated: KnowledgeActor,
+    verified: z.array(KnowledgeActor).min(1).optional(),
+    status: z.enum(["draft", "stable", "deprecated"]),
+    score: z.number().finite().nullable(),
+    decision: z.enum(["promoted", "rejected"]),
+    diagnostics: z.record(z.string(), z.number().finite()),
+    provenance: z.object({
+      contractHash: Digest,
+      evaluatorHash: Digest,
+      programHash: Digest,
+      manifestHash: Digest.optional(),
+    }),
+    createdAt: Timestamp,
+  })
+  export type KnowledgeConcept = z.infer<typeof KnowledgeConcept>
+
   const trialTransitions: Record<TrialStatus, ReadonlySet<TrialStatus>> = {
     proposed: new Set(["queued", "cancelled"]),
     queued: new Set(["running", "cancelled", "failed"]),

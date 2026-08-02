@@ -1,15 +1,20 @@
 import crypto from "node:crypto"
 import z from "zod"
 import { NamedError } from "@synsci/util/error"
+import { Lock } from "@/util/lock"
+import { Log } from "@/util/log"
 import { ResearchDomain } from "./domain"
+import { ResearchKnowledge } from "./knowledge"
 import { StorageResearchStore, type ResearchState, type ResearchStore } from "./store"
 
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 
 export namespace ResearchService {
+  const log = Log.create({ service: "research.knowledge" })
+
   export const NotFoundError = NamedError.create(
     "ResearchNotFoundError",
-    z.object({ entity: z.enum(["campaign", "experiment", "trial", "evaluation", "run"]), id: z.string() }),
+    z.object({ entity: z.enum(["campaign", "experiment", "trial", "evaluation", "run", "knowledge"]), id: z.string() }),
   )
 
   export const ConflictError = NamedError.create(
@@ -52,7 +57,7 @@ export namespace ResearchService {
 
   export interface Options {
     now?: () => string
-    id?: (prefix: "cmp" | "exp" | "trl" | "evl" | "run") => string
+    id?: (prefix: "cmp" | "exp" | "trl" | "evl" | "run" | "knw") => string
   }
 
   export interface EvaluationResult {
@@ -60,11 +65,12 @@ export namespace ResearchService {
     trial: ResearchDomain.Trial
     experiment: ResearchDomain.Experiment
     decision: "promoted" | "rejected"
+    knowledge: ResearchDomain.KnowledgeConcept
   }
 
   export class Service {
     private readonly now: () => string
-    private readonly id: (prefix: "cmp" | "exp" | "trl" | "evl" | "run") => string
+    private readonly id: (prefix: "cmp" | "exp" | "trl" | "evl" | "run" | "knw") => string
 
     constructor(
       private readonly store: ResearchStore,
@@ -77,6 +83,28 @@ export namespace ResearchService {
     async listCampaigns(projectId: string): Promise<ResearchDomain.Campaign[]> {
       const state = await this.store.read(projectId)
       return Object.values(state.campaigns).toSorted((a, b) => b.createdAt.localeCompare(a.createdAt))
+    }
+
+    async listKnowledge(projectId: string, campaignId: string): Promise<ResearchDomain.KnowledgeConcept[]> {
+      const state = await this.store.read(projectId)
+      this.campaign(state, campaignId)
+      return Object.values(state.knowledge)
+        .filter((concept) => concept.campaignId === campaignId)
+        .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id))
+    }
+
+    async getKnowledge(
+      projectId: string,
+      campaignId: string,
+      conceptId: string,
+    ): Promise<ResearchDomain.KnowledgeConcept> {
+      const state = await this.store.read(projectId)
+      this.campaign(state, campaignId)
+      const concept = state.knowledge[conceptId]
+      if (!concept || concept.campaignId !== campaignId) {
+        throw new NotFoundError({ entity: "knowledge", id: conceptId })
+      }
+      return concept
     }
 
     async createCampaign(projectId: string, raw: CreateCampaignInput): Promise<ResearchDomain.Campaign> {
@@ -328,9 +356,10 @@ export namespace ResearchService {
       runId: string,
       raw: RecordEvaluationInput,
       manifestHash: string,
+      workspace?: string,
     ): Promise<EvaluationResult & { run: ResearchDomain.Run }> {
       const input = RecordEvaluationInput.parse(raw)
-      return this.store.mutate(projectId, (state) => {
+      const result = await this.store.mutate(projectId, (state) => {
         const run = this.run(state, runId)
         if (run.status !== "running") {
           throw new ConflictError({ code: "run_not_running", message: `Run ${runId} is not running` })
@@ -341,16 +370,26 @@ export namespace ResearchService {
         }
         trial = ResearchDomain.transitionTrial(trial, "evaluating", this.now())
         state.trials[trial.id] = trial
-        const result = this.evaluate(state, trial, input)
         const completedRun = ResearchDomain.Run.parse({
           ...run,
           status: "succeeded",
           manifestHash,
           completedAt: this.now(),
         })
+        const result = this.evaluate(state, trial, input, completedRun)
         state.runs[runId] = completedRun
         return { ...result, run: completedRun }
       })
+      if (workspace) {
+        await this.publishKnowledge(projectId, result.knowledge.campaignId, workspace).catch((error) =>
+          log.warn("failed to write derived OKF bundle", {
+            projectId,
+            campaignId: result.knowledge.campaignId,
+            error,
+          }),
+        )
+      }
+      return result
     }
 
     async recordEvaluation(
@@ -391,6 +430,7 @@ export namespace ResearchService {
       state: ResearchState,
       trial: ResearchDomain.Trial,
       input: RecordEvaluationInput,
+      run?: ResearchDomain.Run,
     ): EvaluationResult {
       const experiment = this.experiment(state, trial.experimentId)
       if (Object.values(state.evaluations).some((evaluation) => evaluation.trialId === trial.id)) {
@@ -412,11 +452,12 @@ export namespace ResearchService {
           message: `Evaluation evaluator does not match experiment ${experiment.id}`,
         })
       }
+      const evaluatedAt = this.now()
       const evaluation = ResearchDomain.Evaluation.parse({
         id: this.id("evl"),
         trialId: trial.id,
         ...input,
-        evaluatedAt: this.now(),
+        evaluatedAt,
       })
       const incumbent = experiment.incumbentTrialId
         ? Object.values(state.evaluations).find((candidate) => candidate.trialId === experiment.incumbentTrialId)
@@ -432,15 +473,80 @@ export namespace ResearchService {
         incumbentTrialId: promote ? trial.id : experiment.incumbentTrialId,
         updatedAt: promote ? this.now() : experiment.updatedAt,
       })
+      const campaign = this.campaign(state, experiment.campaignId)
+      const decision = promote ? "promoted" : "rejected"
+      const knowledge = ResearchDomain.KnowledgeConcept.parse({
+        id: this.id("knw"),
+        campaignId: campaign.id,
+        experimentId: experiment.id,
+        trialId: trial.id,
+        evaluationId: evaluation.id,
+        runId: run?.id,
+        type: "Research Evaluation",
+        title: `${decision === "promoted" ? "Promoted" : "Rejected"} trial ${trial.id}`,
+        description: input.valid
+          ? `Locked evaluation ${decision} trial ${trial.id} with score ${input.score}.`
+          : `Locked evaluation rejected trial ${trial.id} because its result was invalid.`,
+        tags: ["autofold", "research-evaluation", decision, input.valid ? "valid" : "invalid"],
+        sources: run
+          ? [
+              {
+                id: "run-bundle",
+                resource: ResearchKnowledge.relativeRunResource(campaign.id, run.bundlePath),
+                title: `Immutable trial bundle for ${run.id}`,
+                author: "process:autofold-worker",
+                last_modified: evaluatedAt.slice(0, 10),
+              },
+              {
+                id: "run-output",
+                resource: ResearchKnowledge.relativeRunResource(campaign.id, run.outputPath),
+                title: `Evaluator output for ${run.id}`,
+                author: "process:autofold-worker",
+                last_modified: evaluatedAt.slice(0, 10),
+              },
+            ]
+          : [
+              {
+                id: "evaluation-record",
+                resource: `autofold://evaluations/${evaluation.id}`,
+                title: `Recorded evaluation ${evaluation.id}`,
+                author: "process:autofold-research-service",
+                last_modified: evaluatedAt.slice(0, 10),
+              },
+            ],
+        generated: { by: "autofold/research-v1", at: evaluatedAt },
+        verified: input.valid ? [{ by: "process:autofold-locked-evaluator", at: evaluatedAt }] : undefined,
+        status: input.valid ? "stable" : "draft",
+        score: input.score,
+        decision,
+        diagnostics: input.diagnostics,
+        provenance: {
+          contractHash: evaluation.contractHash,
+          evaluatorHash: evaluation.evaluatorHash,
+          programHash: trial.programHash,
+          manifestHash: run?.manifestHash,
+        },
+        createdAt: evaluatedAt,
+      })
       state.evaluations[evaluation.id] = evaluation
       state.trials[trial.id] = completedTrial
       state.experiments[experiment.id] = updatedExperiment
+      state.knowledge[knowledge.id] = knowledge
       return {
         evaluation,
         trial: completedTrial,
         experiment: updatedExperiment,
-        decision: promote ? "promoted" : "rejected",
+        decision,
+        knowledge,
       }
+    }
+
+    private async publishKnowledge(projectId: string, campaignId: string, workspace: string): Promise<void> {
+      using _ = await Lock.write(`research-okf:${projectId}:${campaignId}`)
+      const state = await this.store.read(projectId)
+      const campaign = this.campaign(state, campaignId)
+      const concepts = Object.values(state.knowledge).filter((concept) => concept.campaignId === campaignId)
+      await ResearchKnowledge.writeBundle({ workspace, campaign, concepts })
     }
 
     private campaign(state: ResearchState, id: string): ResearchDomain.Campaign {

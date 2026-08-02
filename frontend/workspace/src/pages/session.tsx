@@ -27,6 +27,7 @@ import { RightPane } from "@/atlas/RightPane"
 import { FileExplorer } from "@/atlas/FileExplorer"
 import { FileView } from "@/atlas/FilePreview"
 import SkillsPage from "@/atlas/SkillsPage"
+import { ResearchWorkspace } from "@/research/ResearchWorkspace"
 import { centerTabs } from "@/atlas/store/centerTabs"
 import { FONT_MONO, FONT_SANS } from "@/styles/tokens"
 import { uiStore } from "@/atlas/store/ui"
@@ -53,6 +54,7 @@ import {
   IconFolderTree,
   IconFile,
   IconBrain,
+  IconFlask,
   IconX,
   IconLayoutGrid,
   IconMoreH,
@@ -385,6 +387,10 @@ export default function Page(): JSX.Element {
   const [visitedSkills, setVisitedSkills] = createSignal(false)
   createEffect(() => {
     if (centerTabs.active() === "skills") setVisitedSkills(true)
+  })
+  const [visitedResearch, setVisitedResearch] = createSignal(false)
+  createEffect(() => {
+    if (centerTabs.active() === "research") setVisitedResearch(true)
   })
 
   // Chat scroll: stick to the bottom while the agent streams; detach the
@@ -798,6 +804,20 @@ export default function Page(): JSX.Element {
               </div>
             </Show>
 
+            {/* research — campaign-scoped experiment and knowledge ledger */}
+            <Show when={visitedResearch()}>
+              <div
+                style={{
+                  display: centerTabs.active() === "research" ? "flex" : "none",
+                  flex: 1,
+                  "min-height": 0,
+                  "flex-direction": "column",
+                }}
+              >
+                <ResearchWorkspace sessionID={params.id?.startsWith("ses_") ? params.id : undefined} />
+              </div>
+            </Show>
+
             {/* document tabs — one inline FileView per opened file */}
             <For each={centerTabs.docs()}>
               {(doc) => (
@@ -856,6 +876,9 @@ function CenterTabStrip(props: { chatTitle: string }): JSX.Element {
       </CenterTab>
       <CenterTab active={active() === "skills"} label="Skills" onClick={() => centerTabs.setActive("skills")}>
         <IconBrain size={12} strokeWidth={1.6} />
+      </CenterTab>
+      <CenterTab active={active() === "research"} label="Research" onClick={() => centerTabs.setActive("research")}>
+        <IconFlask size={12} strokeWidth={1.6} />
       </CenterTab>
       <For each={centerTabs.docs()}>
         {(doc) => (
