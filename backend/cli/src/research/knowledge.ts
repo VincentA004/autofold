@@ -35,10 +35,11 @@ function conceptFrontmatter(concept: ResearchDomain.KnowledgeConcept) {
     campaign_id: concept.campaignId,
     experiment_id: concept.experimentId,
     trial_id: concept.trialId,
-    evaluation_id: concept.evaluationId,
+    ...(concept.evaluationId ? { evaluation_id: concept.evaluationId } : {}),
     ...(concept.runId ? { run_id: concept.runId } : {}),
     score: concept.score,
     decision: concept.decision,
+    ...(concept.error ? { error: concept.error } : {}),
     diagnostics: concept.diagnostics,
     provenance: {
       contract_hash: concept.provenance.contractHash,
@@ -52,6 +53,10 @@ function conceptFrontmatter(concept: ResearchDomain.KnowledgeConcept) {
 function conceptBody(concept: ResearchDomain.KnowledgeConcept): string {
   const score = concept.score === null ? "No valid score" : String(concept.score)
   const sources = concept.sources.map((source) => `[^${source.id}]: ${source.title ?? source.resource}`).join("\n")
+  const derivation =
+    concept.type === "Research Failure"
+      ? "The failure is derived from the persisted final run record listed in the concept sources."
+      : "The outcome derives from the immutable run artifacts listed in the concept sources."
   return [
     `# ${concept.title}`,
     "",
@@ -62,8 +67,9 @@ function conceptBody(concept: ResearchDomain.KnowledgeConcept): string {
     `- Decision: **${concept.decision}**`,
     `- Score: ${score}`,
     `- Lifecycle: ${concept.status}`,
+    ...(concept.error ? [`- Failure: ${concept.error}`] : []),
     "",
-    "The outcome derives from the immutable run artifacts listed in the concept sources.",
+    derivation,
     "",
     sources,
     "",
@@ -89,9 +95,9 @@ export namespace ResearchKnowledge {
       "",
       `Campaign knowledge catalog: \`${campaign.knowledgeCatalogId}\``,
       "",
-      "## Evaluation knowledge",
+      "## Research knowledge",
       "",
-      ...(entries.length ? entries : ["No completed evaluations yet."]),
+      ...(entries.length ? entries : ["No research outcomes yet."]),
       "",
     ].join("\n")
     return matter.stringify(body, { okf_version: "0.2" })

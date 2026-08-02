@@ -331,11 +331,19 @@ export namespace ResearchService {
       return this.run(await this.store.read(projectId), runId)
     }
 
-    async failRun(projectId: string, runId: string, message: string): Promise<ResearchDomain.Run> {
-      return this.store.mutate(projectId, (state) => {
+    async failRun(projectId: string, runId: string, message: string, workspace?: string): Promise<ResearchDomain.Run> {
+      const error = message.trim().slice(0, 4_000) || "Unknown worker failure"
+      const result = await this.store.mutate(projectId, (state) => {
         const run = this.run(state, runId)
-        if (["succeeded", "failed", "cancelled"].includes(run.status)) return run
+        if (["succeeded", "failed", "cancelled"].includes(run.status)) {
+          const existing = Object.values(state.knowledge).find(
+            (concept) => concept.runId === run.id && concept.type === "Research Failure",
+          )
+          return { run, campaignId: existing?.campaignId }
+        }
         const trial = this.trial(state, run.trialId)
+        const experiment = this.experiment(state, trial.experimentId)
+        const campaign = this.campaign(state, experiment.campaignId)
         const timestamp = this.now()
         const updated = ResearchDomain.Run.parse({
           ...run,
@@ -347,8 +355,51 @@ export namespace ResearchService {
         if (["queued", "running", "evaluating"].includes(trial.status)) {
           state.trials[trial.id] = ResearchDomain.transitionTrial(trial, "failed", timestamp)
         }
-        return updated
+        const knowledge = ResearchDomain.KnowledgeConcept.parse({
+          id: this.id("knw"),
+          campaignId: campaign.id,
+          experimentId: experiment.id,
+          trialId: trial.id,
+          runId: run.id,
+          type: "Research Failure",
+          title: `Failed trial ${trial.id}`,
+          description: `Execution failed before a locked evaluation was completed: ${error}`,
+          tags: ["autofold", "research-failure", "failed", "unverified"],
+          sources: [
+            {
+              id: "run-record",
+              resource: `autofold://runs/${run.id}`,
+              title: `Final failed run record for ${run.id}`,
+              author: "process:autofold-research-service",
+              last_modified: timestamp.slice(0, 10),
+            },
+          ],
+          generated: { by: "autofold/research-v1", at: timestamp },
+          status: "draft",
+          score: null,
+          decision: "failed",
+          error,
+          diagnostics: {},
+          provenance: {
+            contractHash: experiment.contractHash,
+            evaluatorHash: experiment.contract.evaluator.sourceHash,
+            programHash: trial.programHash,
+          },
+          createdAt: timestamp,
+        })
+        state.knowledge[knowledge.id] = knowledge
+        return { run: updated, campaignId: campaign.id }
       })
+      if (workspace && result.campaignId) {
+        await this.publishKnowledge(projectId, result.campaignId, workspace).catch((cause) =>
+          log.warn("failed to write derived OKF bundle", {
+            projectId,
+            campaignId: result.campaignId,
+            error: cause,
+          }),
+        )
+      }
+      return result.run
     }
 
     async completeRun(

@@ -276,4 +276,59 @@ describe("research service", () => {
     expect(result.knowledge.score).toBeNull()
     expect(await service.getKnowledge(projectId, experiment.campaignId, result.knowledge.id)).toEqual(result.knowledge)
   })
+
+  test("records an idempotent unverified OKF concept for a terminal worker failure", async () => {
+    const { service, store, projectId } = fixture()
+    const experiment = await activeExperiment(service, projectId)
+    const trial = await service.createTrial(projectId, experiment.id, {
+      hypothesis: "Malformed worker program",
+      designAdapter: "mock",
+      programPath: "trials/failure.py",
+      programHash: digest("f"),
+    })
+    const run = await service.beginRun(projectId, trial.id, {
+      runId: "run_failure",
+      bundlePath: ".autofold/runs/run_failure/bundle.json",
+      outputPath: ".autofold/runs/run_failure/output",
+    })
+    await service.attachRunJob(projectId, run.id, "job-failure")
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "autofold-okf-failure-"))
+
+    try {
+      const failed = await service.failRun(projectId, run.id, "Worker exited with code 2", workspace)
+      expect(failed.status).toBe("failed")
+      await service.failRun(projectId, run.id, "A duplicate finalizer must not create another concept", workspace)
+
+      const state = await store.read(projectId)
+      const concepts = Object.values(state.knowledge)
+      expect(concepts).toHaveLength(1)
+      expect(concepts[0]).toMatchObject({
+        type: "Research Failure",
+        decision: "failed",
+        status: "draft",
+        score: null,
+        error: "Worker exited with code 2",
+        runId: run.id,
+      })
+      expect(concepts[0]?.evaluationId).toBeUndefined()
+      expect(concepts[0]?.verified).toBeUndefined()
+      expect(concepts[0]?.provenance).toEqual({
+        contractHash: experiment.contractHash,
+        evaluatorHash: experiment.contract.evaluator.sourceHash,
+        programHash: trial.programHash,
+      })
+
+      const root = path.join(workspace, ".autofold", "campaigns", experiment.campaignId, "knowledge")
+      const index = await Bun.file(path.join(root, "index.md")).text()
+      const concept = await Bun.file(path.join(root, "concepts", `${concepts[0]?.id}.md`)).text()
+      expect(index).toContain("## Research knowledge")
+      const frontmatter = matter(concept).data
+      expect(frontmatter.type).toBe("Research Failure")
+      expect(frontmatter.evaluation_id).toBeUndefined()
+      expect(frontmatter.error).toBe("Worker exited with code 2")
+      expect(frontmatter.sources[0].resource).toBe("autofold://runs/run_failure")
+    } finally {
+      await fs.rm(workspace, { recursive: true, force: true })
+    }
+  })
 })

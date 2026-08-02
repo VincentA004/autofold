@@ -141,32 +141,42 @@ export namespace ResearchDomain {
   })
   export type KnowledgeActor = z.infer<typeof KnowledgeActor>
 
-  export const KnowledgeConcept = z.object({
-    id: z.string().regex(/^knw_[A-Za-z0-9_-]+$/),
-    campaignId: z.string().startsWith("cmp_"),
-    experimentId: z.string().startsWith("exp_"),
-    trialId: z.string().startsWith("trl_"),
-    evaluationId: z.string().startsWith("evl_"),
-    runId: z.string().startsWith("run_").optional(),
-    type: z.literal("Research Evaluation"),
-    title: z.string().trim().min(1),
-    description: z.string().trim().min(1),
-    tags: z.array(z.string().trim().min(1)),
-    sources: z.array(KnowledgeSource).min(1),
-    generated: KnowledgeActor,
-    verified: z.array(KnowledgeActor).min(1).optional(),
-    status: z.enum(["draft", "stable", "deprecated"]),
-    score: z.number().finite().nullable(),
-    decision: z.enum(["promoted", "rejected"]),
-    diagnostics: z.record(z.string(), z.number().finite()),
-    provenance: z.object({
-      contractHash: Digest,
-      evaluatorHash: Digest,
-      programHash: Digest,
-      manifestHash: Digest.optional(),
-    }),
-    createdAt: Timestamp,
-  })
+  export const KnowledgeConcept = z
+    .object({
+      id: z.string().regex(/^knw_[A-Za-z0-9_-]+$/),
+      campaignId: z.string().startsWith("cmp_"),
+      experimentId: z.string().startsWith("exp_"),
+      trialId: z.string().startsWith("trl_"),
+      evaluationId: z.string().startsWith("evl_").optional(),
+      runId: z.string().startsWith("run_").optional(),
+      type: z.enum(["Research Evaluation", "Research Failure"]),
+      title: z.string().trim().min(1),
+      description: z.string().trim().min(1),
+      tags: z.array(z.string().trim().min(1)),
+      sources: z.array(KnowledgeSource).min(1),
+      generated: KnowledgeActor,
+      verified: z.array(KnowledgeActor).min(1).optional(),
+      status: z.enum(["draft", "stable", "deprecated"]),
+      score: z.number().finite().nullable(),
+      decision: z.enum(["promoted", "rejected", "failed"]),
+      error: z.string().trim().min(1).max(4_000).optional(),
+      diagnostics: z.record(z.string(), z.number().finite()),
+      provenance: z.object({
+        contractHash: Digest,
+        evaluatorHash: Digest,
+        programHash: Digest,
+        manifestHash: Digest.optional(),
+      }),
+      createdAt: Timestamp,
+    })
+    .superRefine((concept, context) => {
+      if (concept.type === "Research Evaluation" && (!concept.evaluationId || concept.decision === "failed")) {
+        context.addIssue({ code: "custom", message: "Evaluation knowledge requires an evaluation and decision" })
+      }
+      if (concept.type === "Research Failure" && (concept.evaluationId || concept.decision !== "failed" || !concept.error)) {
+        context.addIssue({ code: "custom", message: "Failure knowledge requires an error and failed decision" })
+      }
+    })
   export type KnowledgeConcept = z.infer<typeof KnowledgeConcept>
 
   const trialTransitions: Record<TrialStatus, ReadonlySet<TrialStatus>> = {

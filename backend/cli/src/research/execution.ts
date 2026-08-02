@@ -169,7 +169,12 @@ export namespace ResearchExecution {
       )
       return running
     } catch (error) {
-      await Research.failRun(projectId, run.id, error instanceof Error ? error.message : String(error))
+      await Research.failRun(
+        projectId,
+        run.id,
+        error instanceof Error ? error.message : String(error),
+        Instance.directory,
+      )
       throw error
     }
   }
@@ -252,7 +257,12 @@ export namespace ResearchExecution {
     if (finalizers.has(runId)) return
     const task = finalize(projectId, workspace, runId, jobId, minutes)
       .catch(async (error) => {
-        await Research.failRun(projectId, runId, error instanceof Error ? error.message : String(error))
+        await Research.failRun(
+          projectId,
+          runId,
+          error instanceof Error ? error.message : String(error),
+          workspace,
+        )
       })
       .finally(() => finalizers.delete(runId))
     finalizers.set(runId, task)
