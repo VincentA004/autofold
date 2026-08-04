@@ -83,3 +83,13 @@ bun run research:cli -- knowledge CMP_ID
 ```
 
 The trial fixture proposes deterministic sequences only. Production runs use the worker-owned Boltz adapter; the test suite substitutes a source-hashed deterministic evidence adapter so it can verify the full artifact and evaluator path without GPU inference.
+
+## Bounded autoresearch v1
+
+The first experiment-RSI controller is implemented through the existing child-session harness. Each iteration creates a biology, ML, or general child agent; injects the frozen contract, target, incumbent program, verified candidates, recent evaluations, campaign OKF concepts, and a compact pinned Proto tool catalog; then grants write access to exactly one mutable draft `trial.py`. The draft is preserved under `.autofold/autoresearch`, statically preflighted without importing it, frozen by content hash, executed, and promoted or rejected by the locked evaluator. A rejected trial does not stop the loop; the next iteration still starts from the current incumbent.
+
+```text
+bun run research:cli -- autoresearch EXP_ID --session SES_ID --iterations 3
+```
+
+The command is deliberately bounded to ten sequential iterations. It stops on authoring, preflight, or scientific execution failure and returns the child session, draft, trial, run, score, and promotion decision for every completed attempt. Existing scientific experiments created before evidence-adapter pinning must be recreated before using this loop.

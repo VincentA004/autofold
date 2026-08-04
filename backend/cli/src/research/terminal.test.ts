@@ -78,6 +78,29 @@ describe("research terminal", () => {
     expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ title: "Acceptance compute" })
   })
 
+  test("starts a bounded autoresearch loop through the research API", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const output: string[] = []
+    const code = await ResearchTerminal.run(
+      ["autoresearch", "exp_one", "--session", "ses_one", "--iterations", "3", "--agent", "biology"],
+      {
+        output: (value) => output.push(value),
+        fetchFn: (async (input, init) => {
+          calls.push({ url: String(input), init })
+          return new Response(JSON.stringify({ experimentId: "exp_one", completedIterations: 3, iterations: [] }))
+        }) as typeof fetch,
+      },
+    )
+    expect(code).toBe(0)
+    expect(calls[0]?.url).toBe("http://127.0.0.1:4096/research/experiments/exp_one/autoresearch")
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      sessionId: "ses_one",
+      iterations: 3,
+      agent: "biology",
+    })
+    expect(output[0]).toContain('"completedIterations": 3')
+  })
+
   test("authors a target file before freezing an experiment with the scientific evaluator", async () => {
     const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "autofold-terminal-target-"))
     const target = {

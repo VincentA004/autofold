@@ -195,6 +195,18 @@ export namespace ResearchTerminal {
         outputJSON(output, await client.post(`/experiments/${requiredPosition(parsed, 2, "experiment id")}/activate`))
         return 0
       }
+      if (command === "autoresearch") {
+        const experimentId = requiredPosition(parsed, 1, "experiment id")
+        outputJSON(
+          output,
+          await client.post(`/experiments/${experimentId}/autoresearch`, {
+            sessionId: requiredFlag(parsed, "session"),
+            iterations: integerFlag(parsed, "iterations", 1),
+            ...(stringFlag(parsed, "agent") ? { agent: stringFlag(parsed, "agent") } : {}),
+          }),
+        )
+        return 0
+      }
       if (command === "history") {
         outputJSON(output, await client.get(`/experiments/${requiredPosition(parsed, 1, "experiment id")}/history`))
         return 0
@@ -337,6 +349,7 @@ Commands:
   experiments CMP_ID
   experiment create CMP_ID --objective TEXT (--target sha256:... | --target-file TARGET.json) [--target-structure TARGET.cif] [--evaluator ID] [--modality short_peptide]
   experiment activate EXP_ID
+  autoresearch EXP_ID --session SES_ID [--iterations N] [--agent biology|ml|task]
   history EXP_ID
   template mock|proto
   trial create EXP_ID --hypothesis TEXT --adapter mock|proto --program trial.py

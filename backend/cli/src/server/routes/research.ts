@@ -5,6 +5,7 @@ import { Instance } from "@/project/instance"
 import {
   DesignAdapters,
   Research,
+  ResearchAutoresearch,
   ResearchArtifacts,
   ResearchDomain,
   ResearchExecution,
@@ -155,6 +156,33 @@ export const ResearchRoutes = lazy(() =>
       validator("param", ExperimentParam),
       async (c) =>
         c.json(await Research.activateExperiment(Instance.project.id, c.req.valid("param").experimentId)),
+    )
+    .post(
+      "/experiments/:experimentId/autoresearch",
+      describeRoute({
+        summary: "Run bounded experiment-level RSI",
+        description:
+          "Creates a dynamic child agent for each iteration, freezes its Proto proposal, executes it, and returns locked evaluation outcomes.",
+        operationId: "research.autoresearch.run",
+        responses: { 200: { description: "Completed bounded autoresearch iterations" } },
+      }),
+      validator("param", ExperimentParam),
+      validator(
+        "json",
+        ResearchAutoresearch.Input.omit({ experimentId: true }).extend({
+          iterations: ResearchAutoresearch.Input.shape.iterations.optional(),
+          agent: ResearchAutoresearch.Input.shape.agent.optional(),
+        }),
+      ),
+      async (c) =>
+        c.json(
+          await ResearchAutoresearch.run({
+            experimentId: c.req.valid("param").experimentId,
+            sessionId: c.req.valid("json").sessionId,
+            iterations: c.req.valid("json").iterations ?? 1,
+            agent: c.req.valid("json").agent ?? "biology",
+          }),
+        ),
     )
     .get(
       "/experiments/:experimentId/history",

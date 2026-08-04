@@ -34,4 +34,13 @@ describe("Autofold backend architecture boundary", () => {
     expect(authorization).toBeGreaterThan(-1)
     expect(transition).toBeGreaterThan(authorization)
   })
+
+  test("autoresearch loads the child-agent harness only when an iteration authors a draft", () => {
+    const autoresearch = read("../research/autoresearch.ts")
+
+    expect(autoresearch).not.toContain('import { Session } from "@/session"')
+    expect(autoresearch).not.toContain('import { SessionPrompt } from "@/session/prompt"')
+    expect(autoresearch).toContain('await import("@/session")')
+    expect(autoresearch).toContain('await import("@/session/prompt")')
+  })
 })
