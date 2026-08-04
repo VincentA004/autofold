@@ -36,6 +36,13 @@ export namespace ResearchDomain {
     version: z.string().trim().min(1),
     sourceHash: Digest,
     containerHash: Digest.optional(),
+    evidenceAdapter: z
+      .object({
+        id: z.string().trim().min(1),
+        version: z.string().trim().min(1),
+        sourceHash: Digest,
+      })
+      .optional(),
     direction: z.enum(["minimize", "maximize"]),
     fixedSeeds: z.array(z.number().int()).min(1).max(1_024),
     submissionSize: z.number().int().positive(),

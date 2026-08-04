@@ -53,7 +53,12 @@ def _normalize(raw: Any, bundle: dict[str, Any]) -> dict[str, Any]:
             "seed": item.get("seed", seeds[index % len(seeds)]) if isinstance(item, dict) else seeds[index % len(seeds)],
         }
         evaluator = bundle["evaluator"]
-        if (evaluator["id"], evaluator["version"]) == SCIENTIFIC_EVALUATOR:
+        scientific = (evaluator["id"], evaluator["version"]) == SCIENTIFIC_EVALUATOR
+        trusted_evidence = bundle["format"] == "autofold.trial-bundle.v3"
+        if scientific and trusted_evidence:
+            if isinstance(item, dict) and ("generation" in item or "evidence" in item):
+                raise ProtocolError("Trial programs may not provide trusted generation or evaluator evidence")
+        elif scientific:
             if not isinstance(item, dict) or not isinstance(item.get("generation"), dict) or not isinstance(item.get("evidence"), dict):
                 raise ProtocolError("Peptide panel v1 requires generation and evidence for every candidate")
             candidate.update(
@@ -66,11 +71,12 @@ def _normalize(raw: Any, bundle: dict[str, Any]) -> dict[str, Any]:
             )
         candidates.append(candidate)
     scientific = (bundle["evaluator"]["id"], bundle["evaluator"]["version"]) == SCIENTIFIC_EVALUATOR
+    trusted_evidence = bundle["format"] == "autofold.trial-bundle.v3"
     return {
-        "format": "autofold.candidate-set.v2" if scientific else "autofold.candidate-set.v1",
+        "format": "autofold.candidate-set.v2" if scientific and not trusted_evidence else "autofold.candidate-set.v1",
         "runId": bundle["runId"],
         "trialId": bundle["trialId"],
-        **({"targetArtifactHash": bundle["targetArtifactHash"]} if scientific else {}),
+        **({"targetArtifactHash": bundle["targetArtifactHash"]} if scientific and not trusted_evidence else {}),
         "candidates": candidates,
     }
 

@@ -131,7 +131,7 @@ export namespace ResearchTerminal {
       if (command === "target" && noun === "add") {
         const targetFile = path.resolve(workspace, requiredFlag(parsed, "file"))
         if (!(await Bun.file(targetFile).exists())) throw new Error(`Target file was not found: ${targetFile}`)
-        outputJSON(output, await client.post("/targets", await Bun.file(targetFile).json()))
+        outputJSON(output, await client.post("/targets", await targetAuthoringPayload(workspace, targetFile, parsed)))
         return 0
       }
       if (command === "campaign" && noun === "create") {
@@ -155,6 +155,7 @@ export namespace ResearchTerminal {
           version: string
           sourceHash: string
           direction: "minimize" | "maximize"
+          evidenceAdapter?: { id: string; version: string; sourceHash: string }
         }>>("/evaluators")
         const requestedEvaluator = stringFlag(parsed, "evaluator")
         const evaluator = evaluators.find((item) => item.id === requestedEvaluator) ?? evaluators[0]
@@ -163,7 +164,7 @@ export namespace ResearchTerminal {
           ? (
               await client.post<{ targetArtifactHash: string }>(
                 "/targets",
-                await Bun.file(path.resolve(workspace, targetFile)).json(),
+                await targetAuthoringPayload(workspace, path.resolve(workspace, targetFile), parsed),
               )
             ).targetArtifactHash
           : requiredFlag(parsed, "target")
@@ -182,6 +183,7 @@ export namespace ResearchTerminal {
             version: evaluator.version,
             sourceHash: evaluator.sourceHash,
             direction: evaluator.direction,
+            ...(evaluator.evidenceAdapter ? { evidenceAdapter: evaluator.evidenceAdapter } : {}),
             fixedSeeds: (stringFlag(parsed, "seeds") ?? "7,11,23").split(",").map((value) => Number(value.trim())),
             submissionSize: integerFlag(parsed, "submission", 8),
           },
@@ -268,6 +270,23 @@ export namespace ResearchTerminal {
     output(JSON.stringify(value, null, 2))
   }
 
+  async function targetAuthoringPayload(workspace: string, targetFile: string, parsed: Parsed) {
+    const artifact = await Bun.file(targetFile).json()
+    const structureFlag = stringFlag(parsed, "structure") ?? stringFlag(parsed, "target-structure")
+    if (!structureFlag) return { artifact }
+    const structureFile = path.resolve(workspace, structureFlag)
+    if (!(await Bun.file(structureFile).exists())) throw new Error(`Target structure was not found: ${structureFile}`)
+    const structure = new Uint8Array(await Bun.file(structureFile).arrayBuffer())
+    const contentHash = `sha256:${new Bun.CryptoHasher("sha256").update(structure).digest("hex")}`
+    const requestedFormat = stringFlag(parsed, "structure-format")
+    const format = requestedFormat ?? (structureFile.toLowerCase().endsWith(".pdb") ? "pdb" : "mmcif")
+    if (format !== "pdb" && format !== "mmcif") throw new Error("Structure format must be pdb or mmcif")
+    return {
+      artifact: { ...artifact, structure: { format, contentHash } },
+      structureBase64: Buffer.from(structure).toString("base64"),
+    }
+  }
+
   function stringFlag(input: Parsed, key: string): string | undefined {
     const value = input.flags[key]
     return typeof value === "string" ? value : undefined
@@ -312,11 +331,11 @@ Commands:
   sessions
   session create [--title TEXT]
   campaigns
-  target add --file TARGET.json
+  target add --file TARGET.json [--structure TARGET.cif] [--structure-format pdb|mmcif]
   campaign create --objective TEXT
   campaign activate CMP_ID
   experiments CMP_ID
-  experiment create CMP_ID --objective TEXT (--target sha256:... | --target-file TARGET.json) [--evaluator ID] [--modality short_peptide]
+  experiment create CMP_ID --objective TEXT (--target sha256:... | --target-file TARGET.json) [--target-structure TARGET.cif] [--evaluator ID] [--modality short_peptide]
   experiment activate EXP_ID
   history EXP_ID
   template mock|proto

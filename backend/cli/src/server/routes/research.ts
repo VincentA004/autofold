@@ -59,8 +59,8 @@ export const ResearchRoutes = lazy(() =>
         operationId: "research.target.author",
         responses: { 200: { description: "Content-addressed target artifact" } },
       }),
-      validator("json", ResearchArtifacts.TargetArtifact),
-      async (c) => c.json(await ResearchArtifacts.authorTarget(Instance.directory, c.req.valid("json"))),
+      validator("json", ResearchArtifacts.AuthorTargetInput),
+      async (c) => c.json(await ResearchArtifacts.authorTargetInput(Instance.directory, c.req.valid("json"))),
     )
     .get(
       "/campaigns",

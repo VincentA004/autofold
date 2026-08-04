@@ -64,7 +64,7 @@ The experiment score measures quality-adjusted discovery yield and diversity und
 
 The terminal research client runs the complete control-plane path for the deterministic mock and pinned Proto adapters: campaign creation and activation, frozen experiment contracts, immutable `trial.py` authoring, sandbox-authorized run launch, manifest-verified candidates, locked evaluation and promotion, and campaign-scoped OKF v0.2 concepts. Research state is authoritative; the readable bundle is published under `.autofold/campaigns/<campaign-id>/knowledge`.
 
-The first scientific contract is also implemented: content-addressed Target Artifact v1 files, artifact-backed Peptide Candidate Artifact v1 evidence, and the deterministic `peptide-panel@1` evaluator. Its pinned Proto acceptance fixture uses synthetic evidence only; a real model adapter is the next integration milestone. See [docs/scientific-contract-v1.md](docs/scientific-contract-v1.md).
+The first scientific contract is also implemented: content-addressed Target Artifact v1 JSON plus verified PDB/mmCIF blobs, worker-owned Model Run Artifact v1 evidence, and the deterministic `peptide-panel@1` evaluator. Agent-editable Proto proposes sequences but cannot author trusted evidence. The first production adapter is pinned to Boltz 2.2.1 through proto-tools; a deterministic CPU fixture tests the same provenance path without claiming biological validity. See [docs/scientific-contract-v1.md](docs/scientific-contract-v1.md).
 
 Start with `bun run research:cli -- help`. The current scientific acceptance loop is:
 
@@ -73,13 +73,13 @@ bun run research:cli -- status
 bun run research:cli -- session create --title "Acceptance compute"
 bun run research:cli -- campaign create --objective "Discover a selective peptide binder"
 bun run research:cli -- campaign activate CMP_ID
-bun run research:cli -- target add --file docs/target-artifact.example.json
+bun run research:cli -- target add --file docs/target-artifact.example.json --structure target.cif
 bun run research:cli -- experiment create CMP_ID --objective "Improve the locked peptide score" --target TARGET_HASH --evaluator peptide-panel
 bun run research:cli -- experiment activate EXP_ID
-bun run research:cli -- trial create EXP_ID --adapter proto --hypothesis "Validate the scientific contract with synthetic evidence" --program backend/worker/tests/fixtures/proto_scientific_trial.py
+bun run research:cli -- trial create EXP_ID --adapter proto --hypothesis "Test a peptide proposal strategy" --program backend/worker/tests/fixtures/proto_scientific_trial.py
 bun run research:cli -- run start TRL_ID --session SES_ID
 bun run research:cli -- run watch RUN_ID
 bun run research:cli -- knowledge CMP_ID
 ```
 
-The fixture above is for deterministic integration testing only. A production trial must replace its synthetic evidence with pinned model-adapter outputs.
+The trial fixture proposes deterministic sequences only. Production runs use the worker-owned Boltz adapter; the test suite substitutes a source-hashed deterministic evidence adapter so it can verify the full artifact and evaluator path without GPU inference.

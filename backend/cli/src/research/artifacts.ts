@@ -19,7 +19,7 @@ function canonicalJSON(value: unknown): string {
   return JSON.stringify(value, null, 2) + "\n"
 }
 
-function sha256(content: string): string {
+function sha256(content: string | Uint8Array): string {
   const hash = new Bun.CryptoHasher("sha256")
   hash.update(content)
   return `sha256:${hash.digest("hex")}`
@@ -89,10 +89,17 @@ export namespace ResearchArtifacts {
     })
   export type TargetArtifact = z.infer<typeof TargetArtifact>
 
+  export const AuthorTargetInput = z.object({
+    artifact: TargetArtifact,
+    structureBase64: z.string().max(140_000_000).optional(),
+  })
+  export type AuthorTargetInput = z.infer<typeof AuthorTargetInput>
+
   export interface StoredTarget {
     artifact: TargetArtifact
     targetArtifactHash: string
     targetArtifactPath: string
+    structureArtifactPath?: string
   }
 
   export function targetPath(targetArtifactHash: string): string {
@@ -100,12 +107,33 @@ export namespace ResearchArtifacts {
     return path.posix.join(".autofold", "targets", digest, "target.json")
   }
 
-  export async function authorTarget(workspace: string, raw: TargetArtifact): Promise<StoredTarget> {
+  export function structurePath(targetArtifactHash: string, format: "pdb" | "mmcif"): string {
+    const targetArtifactPath = targetPath(targetArtifactHash)
+    return path.posix.join(path.posix.dirname(targetArtifactPath), format === "pdb" ? "structure.pdb" : "structure.cif")
+  }
+
+  export async function authorTarget(
+    workspace: string,
+    raw: TargetArtifact,
+    structureContent?: Uint8Array,
+  ): Promise<StoredTarget> {
     const artifact = TargetArtifact.parse(raw)
+    if (artifact.structure && !structureContent) {
+      throw new Error("A target declaring a structure must include the structure content")
+    }
+    if (!artifact.structure && structureContent) {
+      throw new Error("Structure content requires target structure metadata")
+    }
+    if (artifact.structure && structureContent && sha256(structureContent) !== artifact.structure.contentHash) {
+      throw new Error("Target structure content does not match its declared hash")
+    }
     const content = canonicalJSON(artifact)
     const targetArtifactHash = sha256(content)
     const targetArtifactPath = targetPath(targetArtifactHash)
     const absolute = inside(workspace, targetArtifactPath)
+    const structureArtifactPath = artifact.structure
+      ? structurePath(targetArtifactHash, artifact.structure.format)
+      : undefined
     await fs.mkdir(path.dirname(absolute), { recursive: true })
     try {
       await fs.writeFile(absolute, content, { encoding: "utf8", mode: 0o600, flag: "wx" })
@@ -116,7 +144,25 @@ export namespace ResearchArtifacts {
         throw new Error(`Immutable target artifact collision at ${targetArtifactPath}`)
       }
     }
-    return { artifact, targetArtifactHash, targetArtifactPath }
+    if (structureArtifactPath && structureContent) {
+      const absoluteStructure = inside(workspace, structureArtifactPath)
+      try {
+        await fs.writeFile(absoluteStructure, structureContent, { mode: 0o600, flag: "wx" })
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error
+        const existing = await fs.readFile(absoluteStructure)
+        if (sha256(existing) !== artifact.structure?.contentHash) {
+          throw new Error(`Immutable target structure collision at ${structureArtifactPath}`)
+        }
+      }
+    }
+    return { artifact, targetArtifactHash, targetArtifactPath, structureArtifactPath }
+  }
+
+  export async function authorTargetInput(workspace: string, raw: AuthorTargetInput): Promise<StoredTarget> {
+    const input = AuthorTargetInput.parse(raw)
+    const structure = input.structureBase64 ? Buffer.from(input.structureBase64, "base64") : undefined
+    return authorTarget(workspace, input.artifact, structure)
   }
 
   export async function readTarget(workspace: string, targetArtifactHash: string): Promise<StoredTarget> {
@@ -126,6 +172,16 @@ export namespace ResearchArtifacts {
     if (sha256(content) !== targetArtifactHash) {
       throw new Error(`Target artifact no longer matches ${targetArtifactHash}`)
     }
-    return { artifact: TargetArtifact.parse(JSON.parse(content)), targetArtifactHash, targetArtifactPath }
+    const artifact = TargetArtifact.parse(JSON.parse(content))
+    const structureArtifactPath = artifact.structure
+      ? structurePath(targetArtifactHash, artifact.structure.format)
+      : undefined
+    if (structureArtifactPath) {
+      const structure = await fs.readFile(inside(workspace, structureArtifactPath))
+      if (sha256(structure) !== artifact.structure?.contentHash) {
+        throw new Error(`Target structure no longer matches ${artifact.structure?.contentHash}`)
+      }
+    }
+    return { artifact, targetArtifactHash, targetArtifactPath, structureArtifactPath }
   }
 }

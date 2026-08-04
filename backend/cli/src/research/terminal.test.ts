@@ -87,6 +87,10 @@ describe("research terminal", () => {
       bindingSite: { residues: [{ chainId: "A", position: 4 }] },
     }
     await fs.writeFile(path.join(workspace, "target.json"), JSON.stringify(target))
+    const structure = "data_cli_receptor\n#\n"
+    await fs.writeFile(path.join(workspace, "target.cif"), structure)
+    const structureHasher = new Bun.CryptoHasher("sha256")
+    structureHasher.update(structure)
     const calls: Array<{ url: string; init?: RequestInit }> = []
     try {
       const code = await ResearchTerminal.run(
@@ -98,6 +102,8 @@ describe("research terminal", () => {
           "Improve binding",
           "--target-file",
           "target.json",
+          "--target-structure",
+          "target.cif",
           "--evaluator",
           "peptide-panel",
           "--workspace",
@@ -112,7 +118,17 @@ describe("research terminal", () => {
               return new Response(
                 JSON.stringify([
                   { id: "mock-peptide-panel", version: "1", sourceHash: `sha256:${"a".repeat(64)}`, direction: "minimize" },
-                  { id: "peptide-panel", version: "1", sourceHash: `sha256:${"b".repeat(64)}`, direction: "minimize" },
+                  {
+                    id: "peptide-panel",
+                    version: "1",
+                    sourceHash: `sha256:${"b".repeat(64)}`,
+                    direction: "minimize",
+                    evidenceAdapter: {
+                      id: "boltz2",
+                      version: "2.2.1",
+                      sourceHash: `sha256:${"d".repeat(64)}`,
+                    },
+                  },
                 ]),
               )
             }
@@ -124,10 +140,21 @@ describe("research terminal", () => {
         },
       )
       expect(code).toBe(0)
-      expect(JSON.parse(String(calls[1]?.init?.body))).toEqual(target)
+      expect(JSON.parse(String(calls[1]?.init?.body))).toEqual({
+        artifact: {
+          ...target,
+          structure: { format: "mmcif", contentHash: `sha256:${structureHasher.digest("hex")}` },
+        },
+        structureBase64: Buffer.from(structure).toString("base64"),
+      })
       const contract = JSON.parse(String(calls[2]?.init?.body)).contract
       expect(contract.targetArtifactHash).toBe(`sha256:${"c".repeat(64)}`)
       expect(contract.evaluator.id).toBe("peptide-panel")
+      expect(contract.evaluator.evidenceAdapter).toEqual({
+        id: "boltz2",
+        version: "2.2.1",
+        sourceHash: `sha256:${"d".repeat(64)}`,
+      })
     } finally {
       await fs.rm(workspace, { recursive: true, force: true })
     }

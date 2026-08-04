@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 FORMATS = {
-    "bundles": {"autofold.trial-bundle.v1", "autofold.trial-bundle.v2"},
+    "bundles": {"autofold.trial-bundle.v1", "autofold.trial-bundle.v2", "autofold.trial-bundle.v3"},
     "candidates": "autofold.candidate-set.v1",
     "evaluation": "autofold.evaluation-result.v1",
     "manifest": "autofold.run-manifest.v1",
@@ -48,10 +48,22 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
     require_string(value, "runId", "run_")
     require_string(value, "trialId", "trl_")
     require_string(value, "contractHash", "sha256:")
-    if value["format"] == "autofold.trial-bundle.v2":
+    if value["format"] in {"autofold.trial-bundle.v2", "autofold.trial-bundle.v3"}:
         require_string(value, "targetArtifactHash", "sha256:")
         if "targetArtifactPath" in value:
             require_string(value, "targetArtifactPath")
+    if value["format"] == "autofold.trial-bundle.v3":
+        if value.get("designAdapter") != "proto" or not isinstance(value.get("proto"), dict):
+            raise ProtocolError("Scientific bundle v3 requires the pinned Proto runtime")
+        require_string(value, "targetArtifactPath")
+        if "targetStructurePath" in value:
+            require_string(value, "targetStructurePath")
+        adapter = value.get("evidenceAdapter")
+        if not isinstance(adapter, dict):
+            raise ProtocolError("Scientific bundle v3 requires an evidence adapter")
+        require_string(adapter, "id")
+        require_string(adapter, "version")
+        require_string(adapter, "sourceHash", "sha256:")
     if value.get("designAdapter") not in {"mock", "proto"}:
         raise ProtocolError("Unsupported design adapter")
     require_string(value, "programPath")

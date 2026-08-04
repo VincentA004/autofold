@@ -7,12 +7,15 @@ verification substrate, not yet evidence that Autofold designs real binders.
 ## Target Artifact v1
 
 `autofold.target-artifact.v1` contains canonical protein chains, a non-empty
-binding-site residue set, and an optional PDB or mmCIF content hash. The backend
+binding-site residue set, and an optional PDB or mmCIF content hash. When a
+structure is declared, the backend requires its bytes, verifies that hash, and
+stores the immutable blob beside the target JSON. The backend
 rejects duplicate chains, unknown binding-site chains, duplicate residues, and
 positions outside the declared sequence. It stores the canonical JSON at:
 
 ```text
 .autofold/targets/<sha256>/target.json
+.autofold/targets/<sha256>/structure.cif  # or structure.pdb
 ```
 
 The hash of that exact file is frozen into the experiment contract and copied
@@ -28,10 +31,20 @@ Scientific candidate sets use `autofold.candidate-set.v2`. Every candidate has:
 - aggregation and synthesis risk;
 - one or more versioned predictor artifact hashes.
 
-All evidence values are finite and bounded to `[0, 1]`. Model adapters are
-responsible for mapping native outputs to these locked semantics. An agent may
-choose models and parameters, but it cannot edit evidence after adapter
-normalization.
+All evidence values are finite and bounded to `[0, 1]`. Trial Bundle v3 makes
+the trust boundary explicit: agent-editable Proto returns only unscored
+sequences, while a source-hashed, worker-owned evidence adapter executes the
+models and maps native outputs to these locked semantics. A v3 trial that tries
+to provide its own generation provenance or evaluator evidence is rejected.
+The adapter identity, version, and source hash are frozen in the experiment
+contract, so changing normalization or model integration starts a new experiment.
+
+Each native model invocation produces `autofold.model-run.v1` with the frozen
+target hash, peptide sequence hash, model and adapter versions, proto-tools
+commit, parameters hash, seed, metrics, and output hashes. A model-run index
+links every record to its structure and metrics files. Finalization verifies
+all of these hashes, requires every candidate × fixed-seed run, and checks that
+candidate predictor references exactly match the indexed artifacts.
 
 ## Locked peptide panel v1
 
@@ -61,10 +74,16 @@ This deliberately rewards a reproducible panel rather than one lucky peptide.
 Changing weights, gates, or evidence normalization requires a new evaluator
 version and therefore a new experiment contract.
 
-## Current boundary
+## Current implementation boundary
 
-The repository includes a deterministic Proto integration fixture proving that
-target hashing, candidate evidence, evaluator sensitivity, replay, and manifest
-verification work end to end. Its evidence values are explicitly synthetic.
-The next milestone is a real model adapter that produces the same candidate
-contract from pinned structure-prediction outputs.
+The production evidence adapter is pinned to Boltz 2.2.1 through proto-tools. It
+cofolds each target/candidate complex at every frozen seed and normalizes native
+`protein_iptm`/`iptm` and `complex_plddt`/`ptm` outputs into the candidate
+contract. The deterministic fixture adapter exercises the identical trust and
+artifact path in CPU-only tests; its values and structures are explicitly
+synthetic.
+
+Actual Boltz inference requires the isolated proto-tools GPU environment, model
+weights, and CUDA compute. The local acceptance suite does not pretend a CPU
+fixture is biological validation. Independent Chai/Protenix validation and
+experimental assay ingestion remain later contract versions.

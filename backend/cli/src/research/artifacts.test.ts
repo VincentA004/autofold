@@ -39,4 +39,24 @@ describe("research scientific artifacts", () => {
       }),
     ).toThrow("exceeds chain A length")
   })
+
+  test("stores a declared structure blob and rejects mismatched content", async () => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "autofold-target-structure-"))
+    const structure = new TextEncoder().encode("data_test\n#\n")
+    const hash = new Bun.CryptoHasher("sha256").update(structure).digest("hex")
+    const structured = {
+      ...target,
+      structure: { format: "mmcif" as const, contentHash: `sha256:${hash}` },
+    }
+    try {
+      const stored = await ResearchArtifacts.authorTarget(workspace, structured, structure)
+      expect(stored.structureArtifactPath).toEndWith("structure.cif")
+      expect(await ResearchArtifacts.readTarget(workspace, stored.targetArtifactHash)).toEqual(stored)
+      await expect(
+        ResearchArtifacts.authorTarget(workspace, structured, new TextEncoder().encode("tampered")),
+      ).rejects.toThrow("does not match")
+    } finally {
+      await fs.rm(workspace, { recursive: true, force: true })
+    }
+  })
 })

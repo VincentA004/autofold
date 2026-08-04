@@ -12,6 +12,7 @@ const workerRoot = path.resolve(import.meta.dir, "../../../worker")
 const workerScript = path.join(workerRoot, "run_worker.py")
 const evaluatorSource = path.join(workerRoot, "autofold_worker", "evaluate.py")
 const peptideEvaluatorSource = path.join(workerRoot, "autofold_worker", "peptide_panel_v1.py")
+const fixtureEvidenceSource = path.join(workerRoot, "autofold_worker", "evidence_fixture_v1.py")
 const protoSmokeTrial = path.join(workerRoot, "tests", "fixtures", "proto_smoke_trial.py")
 const protoScientificTrial = path.join(workerRoot, "tests", "fixtures", "proto_scientific_trial.py")
 const protoRoot = path.join(os.homedir(), "Developer", "repo_store", "github.com-evo-design-proto-language")
@@ -23,9 +24,25 @@ async function hashFile(file: string): Promise<string> {
   return `sha256:${hash.digest("hex")}`
 }
 
-async function runWorker(bundle: string, output: string, python = "python3", evaluator = evaluatorSource) {
+async function runWorker(
+  bundle: string,
+  output: string,
+  python = "python3",
+  evaluator = evaluatorSource,
+  evidenceAdapter?: string,
+) {
   const process = Bun.spawn(
-    [python, workerScript, "--bundle", bundle, "--output", output, "--evaluator-source", evaluator],
+    [
+      python,
+      workerScript,
+      "--bundle",
+      bundle,
+      "--output",
+      output,
+      "--evaluator-source",
+      evaluator,
+      ...(evidenceAdapter ? ["--evidence-adapter-source", evidenceAdapter] : []),
+    ],
     {
       cwd: path.dirname(workerRoot),
       env: { ...Bun.env, PYTHONDONTWRITEBYTECODE: "1" },
@@ -60,6 +77,23 @@ describe("research execution worker", () => {
     })
     expect(legacy.format).toBe("autofold.trial-bundle.v1")
     expect("targetArtifactHash" in legacy).toBe(false)
+  })
+
+  test("rejects evidence authored by an agent-editable v3 trial", async () => {
+    const script = [
+      "from autofold_worker.adapters.proto import _normalize",
+      "bundle = {'format':'autofold.trial-bundle.v3','evaluator':{'id':'peptide-panel','version':'1'},'seeds':[7],'candidateBudget':1,'modality':'short_peptide','runId':'run_trust','trialId':'trl_trust','targetArtifactHash':'sha256:' + 'a' * 64}",
+      "_normalize([{'sequence':'ACDEFG','generation':{},'evidence':{}}], bundle)",
+    ].join("\n")
+    const process = Bun.spawn(["python3", "-c", script], {
+      cwd: workerRoot,
+      env: { ...Bun.env, PYTHONDONTWRITEBYTECODE: "1" },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [exitCode, stderr] = await Promise.all([process.exited, new Response(process.stderr).text()])
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toContain("Trial programs may not provide trusted generation or evaluator evidence")
   })
 
   test("replays identical bundles deterministically", async () => {
@@ -296,28 +330,39 @@ describe("research execution worker", () => {
     }
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "autofold-scientific-worker-"))
     try {
+      const structure = Buffer.from("data_deterministic_receptor\n#\n")
+      const structureHash = new Bun.CryptoHasher("sha256")
+      structureHash.update(structure)
       const target = await ResearchArtifacts.authorTarget(root, {
         format: "autofold.target-artifact.v1",
         name: "Deterministic receptor fixture",
         chains: [{ id: "A", sequence: "ACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY" }],
+        structure: { format: "mmcif", contentHash: `sha256:${structureHash.digest("hex")}` },
         bindingSite: {
           residues: [
             { chainId: "A", position: 8 },
             { chainId: "A", position: 13 },
           ],
         },
-      })
+      }, structure)
       const programPath = path.join(root, "trial.py")
       await fs.copyFile(protoScientificTrial, programPath)
       const languageCommit = (await Bun.$`git -C ${protoRoot} rev-parse HEAD`.text()).trim()
       const toolsCommit = (await Bun.$`git -C ${path.join(protoRoot, "proto-tools")} rev-parse HEAD`.text()).trim()
+      const evidenceAdapterHash = await hashFile(fixtureEvidenceSource)
       const bundle = ExecutionProtocol.TrialBundle.parse({
-        format: "autofold.trial-bundle.v2",
+        format: "autofold.trial-bundle.v3",
         runId: "run_scientific_panel",
         trialId: "trl_scientific_panel",
         contractHash: `sha256:${"d".repeat(64)}`,
         targetArtifactHash: target.targetArtifactHash,
         targetArtifactPath: path.join(root, target.targetArtifactPath),
+        targetStructurePath: path.join(root, target.structureArtifactPath!),
+        evidenceAdapter: {
+          id: "evidence-fixture",
+          version: "fixture-1",
+          sourceHash: evidenceAdapterHash,
+        },
         designAdapter: "proto",
         programPath,
         programHash: await hashFile(programPath),
@@ -336,9 +381,35 @@ describe("research execution worker", () => {
       const bundlePath = path.join(root, "bundle.json")
       await fs.writeFile(bundlePath, JSON.stringify(bundle))
 
-      const first = await runWorker(bundlePath, path.join(root, "one"), protoPython, peptideEvaluatorSource)
+      const mismatchedBundle = JSON.parse(JSON.stringify(bundle))
+      mismatchedBundle.evidenceAdapter.sourceHash = `sha256:${"f".repeat(64)}`
+      const mismatchedBundlePath = path.join(root, "mismatched-bundle.json")
+      await fs.writeFile(mismatchedBundlePath, JSON.stringify(mismatchedBundle))
+      const rejected = await runWorker(
+        mismatchedBundlePath,
+        path.join(root, "rejected"),
+        protoPython,
+        peptideEvaluatorSource,
+        fixtureEvidenceSource,
+      )
+      expect(rejected.exitCode).toBe(2)
+      expect(rejected.stderr).toContain("Evidence adapter hash mismatch")
+
+      const first = await runWorker(
+        bundlePath,
+        path.join(root, "one"),
+        protoPython,
+        peptideEvaluatorSource,
+        fixtureEvidenceSource,
+      )
       expect(first.exitCode, first.stderr).toBe(0)
-      const second = await runWorker(bundlePath, path.join(root, "two"), protoPython, peptideEvaluatorSource)
+      const second = await runWorker(
+        bundlePath,
+        path.join(root, "two"),
+        protoPython,
+        peptideEvaluatorSource,
+        fixtureEvidenceSource,
+      )
       expect(second.exitCode, second.stderr).toBe(0)
 
       const candidatesOne = await Bun.file(path.join(root, "one", "candidates.json")).text()
@@ -351,9 +422,18 @@ describe("research execution worker", () => {
       const candidates = ExecutionProtocol.CandidateSetV2.parse(JSON.parse(candidatesOne))
       expect(candidates.targetArtifactHash).toBe(target.targetArtifactHash)
       expect(candidates.candidates).toHaveLength(3)
-      expect(candidates.candidates[0]?.evidence.predictors).toHaveLength(1)
+      expect(candidates.candidates[0]?.evidence.predictors).toHaveLength(3)
+      const modelRuns = ExecutionProtocol.ModelRunIndex.parse(
+        await Bun.file(path.join(root, "one", "model-runs", "index.json")).json(),
+      )
+      expect(modelRuns.entries).toHaveLength(9)
+      const firstModelRun = ExecutionProtocol.ModelRunArtifact.parse(
+        await Bun.file(path.join(root, "one", modelRuns.entries[0]!.artifactPath)).json(),
+      )
+      expect(firstModelRun.model.adapterSourceHash).toBe(evidenceAdapterHash)
       const result = ExecutionProtocol.EvaluationResult.parse(JSON.parse(resultOne))
       expect(result.valid).toBe(true)
+      expect(result.evidenceAdapterHash).toBe(evidenceAdapterHash)
       expect(result.score).toBeGreaterThan(0)
       expect(result.score).toBeLessThan(1)
       expect(result.diagnostics.yield_fraction).toBe(1)
@@ -361,6 +441,9 @@ describe("research execution worker", () => {
         await Bun.file(path.join(root, "one", "manifest.json")).json(),
       )
       expect(manifest.files.target).toBe(target.targetArtifactHash)
+      expect(manifest.files.target_structure).toBe(target.artifact.structure!.contentHash)
+      expect(manifest.files.model_runs).toBe(await hashFile(path.join(root, "one", "model-runs", "index.json")))
+      expect(manifest.evidenceAdapterHash).toBe(evidenceAdapterHash)
       expect(manifest.files.candidates).toBe(await hashFile(path.join(root, "one", "candidates.json")))
     } finally {
       await fs.rm(root, { recursive: true, force: true })

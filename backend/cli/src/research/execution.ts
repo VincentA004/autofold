@@ -14,6 +14,7 @@ const workerRoot = path.resolve(import.meta.dir, "../../../worker")
 const workerScript = path.join(workerRoot, "run_worker.py")
 const mockEvaluatorSource = path.join(workerRoot, "autofold_worker", "evaluate.py")
 const peptideEvaluatorSource = path.join(workerRoot, "autofold_worker", "peptide_panel_v1.py")
+const boltzEvidenceSource = path.join(workerRoot, "autofold_worker", "evidence_boltz2_v1.py")
 const finalizers = new Map<string, Promise<void>>()
 
 async function fileHash(file: string): Promise<string> {
@@ -38,6 +39,87 @@ function inside(root: string, relative: string): string {
   return target
 }
 
+async function verifyModelRuns(
+  output: string,
+  bundle: ExecutionProtocol.TrialBundle,
+  candidates: ExecutionProtocol.CandidateSet,
+): Promise<ExecutionProtocol.ModelRunIndex | undefined> {
+  if (bundle.format !== "autofold.trial-bundle.v3") return undefined
+  if (candidates.format !== "autofold.candidate-set.v2") {
+    throw new Error(`Run ${bundle.runId} trusted evidence did not produce candidate-set.v2`)
+  }
+  const indexPath = path.join(output, "model-runs", "index.json")
+  const index = ExecutionProtocol.ModelRunIndex.parse(await Bun.file(indexPath).json())
+  if (index.runId !== bundle.runId) throw new Error(`Run ${bundle.runId} model-run index has another run identity`)
+
+  const candidateById = new Map(candidates.candidates.map((candidate) => [candidate.id, candidate]))
+  const artifactHashes = new Map<string, Set<string>>()
+  const identities = new Set<string>()
+  for (const entry of index.entries) {
+    if (!candidateById.has(entry.candidateId)) {
+      throw new Error(`Run ${bundle.runId} model evidence references unknown candidate ${entry.candidateId}`)
+    }
+    if (!bundle.seeds.includes(entry.seed)) {
+      throw new Error(`Run ${bundle.runId} model evidence uses unfrozen seed ${entry.seed}`)
+    }
+    const identity = `${entry.candidateId}:${entry.seed}`
+    if (identities.has(identity)) throw new Error(`Run ${bundle.runId} has duplicate model evidence ${identity}`)
+    identities.add(identity)
+
+    for (const relative of [entry.artifactPath, entry.structurePath, entry.metricsPath]) {
+      if (path.isAbsolute(relative)) throw new Error(`Run ${bundle.runId} model-run paths must be relative`)
+    }
+    const artifactPath = inside(output, entry.artifactPath)
+    const structurePath = inside(output, entry.structurePath)
+    const metricsPath = inside(output, entry.metricsPath)
+    const [artifactHash, structureHash, metricsHash] = await Promise.all([
+      fileHash(artifactPath),
+      fileHash(structurePath),
+      fileHash(metricsPath),
+    ])
+    if (artifactHash !== entry.artifactHash || structureHash !== entry.structureHash || metricsHash !== entry.metricsHash) {
+      throw new Error(`Run ${bundle.runId} model evidence no longer matches its index for ${identity}`)
+    }
+    const artifact = ExecutionProtocol.ModelRunArtifact.parse(await Bun.file(artifactPath).json())
+    const nativeMetrics = await Bun.file(metricsPath).json()
+    const candidate = candidateById.get(entry.candidateId)!
+    const sequenceHasher = new Bun.CryptoHasher("sha256")
+    sequenceHasher.update(candidate.sequence)
+    const sequenceHash = sequenceHasher.digest("hex")
+    if (
+      artifact.candidateId !== entry.candidateId ||
+      artifact.seed !== entry.seed ||
+      artifact.targetArtifactHash !== bundle.targetArtifactHash ||
+      artifact.peptideSequenceHash !== `sha256:${sequenceHash}` ||
+      artifact.model.adapterSourceHash !== bundle.evidenceAdapter.sourceHash ||
+      artifact.model.protoToolsCommit !== bundle.proto?.toolsCommit ||
+      artifact.outputs.structureHash !== structureHash ||
+      artifact.outputs.metricsHash !== metricsHash
+    ) {
+      throw new Error(`Run ${bundle.runId} model artifact provenance mismatch for ${identity}`)
+    }
+    if (JSON.stringify(artifact.metrics) !== JSON.stringify(nativeMetrics)) {
+      throw new Error(`Run ${bundle.runId} model artifact metrics mismatch for ${identity}`)
+    }
+    const hashes = artifactHashes.get(entry.candidateId) ?? new Set<string>()
+    hashes.add(entry.artifactHash)
+    artifactHashes.set(entry.candidateId, hashes)
+  }
+
+  const expectedCount = candidates.candidates.length * bundle.seeds.length
+  if (index.entries.length !== expectedCount) {
+    throw new Error(`Run ${bundle.runId} has ${index.entries.length} model runs; expected ${expectedCount}`)
+  }
+  for (const candidate of candidates.candidates) {
+    const declared = new Set(candidate.evidence.predictors.map((predictor) => predictor.artifactHash))
+    const indexed = artifactHashes.get(candidate.id) ?? new Set<string>()
+    if (declared.size !== indexed.size || [...declared].some((hash) => !indexed.has(hash))) {
+      throw new Error(`Run ${bundle.runId} candidate ${candidate.id} does not reference its complete model evidence`)
+    }
+  }
+  return index
+}
+
 export namespace ResearchExecution {
   export interface EvaluatorInfo {
     id: string
@@ -45,11 +127,13 @@ export namespace ResearchExecution {
     sourceHash: string
     direction: "minimize" | "maximize"
     implementation: string
+    evidenceAdapter?: { id: string; version: string; sourceHash: string }
   }
 
-  interface InstalledEvaluator extends EvaluatorInfo {
+  interface InstalledEvaluator extends Omit<EvaluatorInfo, "evidenceAdapter"> {
     sourcePath: string
     requiresTargetArtifact: boolean
+    evidenceAdapter?: { id: string; version: string; sourceHash: string; sourcePath: string }
   }
 
   async function installedEvaluators(): Promise<InstalledEvaluator[]> {
@@ -71,12 +155,22 @@ export namespace ResearchExecution {
         implementation: "python-stdlib-locked-evidence-panel",
         sourcePath: peptideEvaluatorSource,
         requiresTargetArtifact: true,
+        evidenceAdapter: {
+          id: "boltz2",
+          version: "2.2.1",
+          sourceHash: await fileHash(boltzEvidenceSource),
+          sourcePath: boltzEvidenceSource,
+        },
       },
     ]
   }
 
   export async function evaluators(): Promise<EvaluatorInfo[]> {
-    return (await installedEvaluators()).map(({ sourcePath: _sourcePath, requiresTargetArtifact: _required, ...info }) => info)
+    return (await installedEvaluators()).map(({ sourcePath: _sourcePath, requiresTargetArtifact: _required, ...info }) => {
+      if (!info.evidenceAdapter) return info
+      const { sourcePath: _adapterPath, ...evidenceAdapter } = info.evidenceAdapter
+      return { ...info, evidenceAdapter }
+    })
   }
 
   export async function start(input: { trialId: string; sessionId: string }): Promise<ResearchDomain.Run> {
@@ -106,6 +200,36 @@ export namespace ResearchExecution {
         message: "The installed evaluator source does not match the frozen experiment contract",
       })
     }
+    if (installed.evidenceAdapter && !adapter.proto) {
+      throw new ResearchService.ConflictError({
+        code: "scientific_adapter_requires_proto",
+        message: `${installed.id}@${installed.version} requires the pinned Proto design runtime`,
+      })
+    }
+    const frozenEvidenceAdapter = context.experiment.contract.evaluator.evidenceAdapter
+    if (installed.evidenceAdapter) {
+      if (!frozenEvidenceAdapter) {
+        throw new ResearchService.ConflictError({
+          code: "evidence_adapter_not_frozen",
+          message: "This legacy experiment does not freeze its evidence adapter; create a new experiment",
+        })
+      }
+      if (
+        frozenEvidenceAdapter.id !== installed.evidenceAdapter.id ||
+        frozenEvidenceAdapter.version !== installed.evidenceAdapter.version ||
+        frozenEvidenceAdapter.sourceHash !== installed.evidenceAdapter.sourceHash
+      ) {
+        throw new ResearchService.ConflictError({
+          code: "evidence_adapter_source_mismatch",
+          message: "The installed evidence adapter does not match the frozen experiment contract",
+        })
+      }
+    } else if (frozenEvidenceAdapter) {
+      throw new ResearchService.ConflictError({
+        code: "evidence_adapter_not_installed",
+        message: `Evidence adapter ${frozenEvidenceAdapter.id}@${frozenEvidenceAdapter.version} is not installed`,
+      })
+    }
     const storedTarget = installed.requiresTargetArtifact
       ? await ResearchArtifacts.readTarget(Instance.directory, context.experiment.contract.targetArtifactHash).catch(() => {
           throw new ResearchService.ConflictError({
@@ -129,15 +253,26 @@ export namespace ResearchExecution {
     const bundlePath = path.posix.join(root, "bundle.json")
     const programPath = path.posix.join(root, "trial.py")
     const targetPath = storedTarget ? path.posix.join(root, "target.json") : undefined
+    const targetStructurePath = storedTarget?.structureArtifactPath
+      ? path.posix.join(root, path.posix.basename(storedTarget.structureArtifactPath))
+      : undefined
     const outputPath = path.posix.join(root, "output")
     const run = await Research.beginRun(projectId, input.trialId, { runId, bundlePath, outputPath })
     const bundle = ExecutionProtocol.TrialBundle.parse({
-      format: "autofold.trial-bundle.v2",
+      format: installed.evidenceAdapter ? "autofold.trial-bundle.v3" : "autofold.trial-bundle.v2",
       runId,
       trialId: context.trial.id,
       contractHash: context.experiment.contractHash,
       targetArtifactHash: context.experiment.contract.targetArtifactHash,
       targetArtifactPath: targetPath ? inside(Instance.directory, targetPath) : undefined,
+      targetStructurePath: targetStructurePath ? inside(Instance.directory, targetStructurePath) : undefined,
+      evidenceAdapter: installed.evidenceAdapter
+        ? {
+            id: installed.evidenceAdapter.id,
+            version: installed.evidenceAdapter.version,
+            sourceHash: installed.evidenceAdapter.sourceHash,
+          }
+        : undefined,
       designAdapter: context.trial.designAdapter,
       programPath: inside(Instance.directory, programPath),
       programHash: context.trial.programHash,
@@ -157,6 +292,7 @@ export namespace ResearchExecution {
     const sourceProgram = inside(Instance.directory, context.trial.programPath)
     const absoluteProgram = inside(Instance.directory, programPath)
     const absoluteTarget = targetPath ? inside(Instance.directory, targetPath) : undefined
+    const absoluteTargetStructure = targetStructurePath ? inside(Instance.directory, targetStructurePath) : undefined
     const absoluteOutput = inside(Instance.directory, outputPath)
 
     try {
@@ -172,6 +308,9 @@ export namespace ResearchExecution {
       if (storedTarget && absoluteTarget) {
         await fs.copyFile(inside(Instance.directory, storedTarget.targetArtifactPath), absoluteTarget)
       }
+      if (storedTarget?.structureArtifactPath && absoluteTargetStructure) {
+        await fs.copyFile(inside(Instance.directory, storedTarget.structureArtifactPath), absoluteTargetStructure)
+      }
       await writeJSON(absoluteBundle, bundle)
       const command = [
         ComputeJobs.quote(adapter.python),
@@ -182,6 +321,9 @@ export namespace ResearchExecution {
         ComputeJobs.quote(absoluteOutput),
         "--evaluator-source",
         ComputeJobs.quote(installed.sourcePath),
+        ...(installed.evidenceAdapter
+          ? ["--evidence-adapter-source", ComputeJobs.quote(installed.evidenceAdapter.sourcePath)]
+          : []),
       ].join(" ")
       const job = await ComputeJobs.start({
         sessionID: input.sessionId,
@@ -191,7 +333,7 @@ export namespace ResearchExecution {
         target: { kind: "local" },
         resources: {
           cpus: 1,
-          gpus: 0,
+          gpus: installed.evidenceAdapter ? 1 : 0,
           time_minutes: Math.max(1, context.experiment.contract.budget.wallTimeMinutes),
         },
         artifacts: [path.posix.join(outputPath, "**", "*")],
@@ -250,6 +392,7 @@ export namespace ResearchExecution {
       Bun.file(resultPath).json().then(ExecutionProtocol.EvaluationResult.parse),
       Bun.file(manifestPath).json().then(ExecutionProtocol.RunManifest.parse),
     ])
+    const modelRuns = await verifyModelRuns(output, bundle, candidates)
     if (
       bundle.runId !== run.id ||
       candidates.runId !== run.id ||
@@ -268,17 +411,32 @@ export namespace ResearchExecution {
       candidates: await fileHash(candidatesPath),
       result: await fileHash(resultPath),
     }
-    if (bundle.format === "autofold.trial-bundle.v2" && bundle.targetArtifactPath) {
+    if (bundle.format !== "autofold.trial-bundle.v1" && bundle.targetArtifactPath) {
       expectedFiles.target = await fileHash(inside(workspace, bundle.targetArtifactPath))
       if (expectedFiles.target !== bundle.targetArtifactHash) {
         throw new Error(`Run ${run.id} target artifact no longer matches its frozen hash`)
       }
     }
+    if (bundle.format === "autofold.trial-bundle.v3") {
+      if (bundle.targetStructurePath) {
+        expectedFiles.target_structure = await fileHash(inside(workspace, bundle.targetStructurePath))
+      }
+      expectedFiles.model_runs = await fileHash(path.join(output, "model-runs", "index.json"))
+      if (manifest.evidenceAdapterHash !== bundle.evidenceAdapter.sourceHash) {
+        throw new Error(`Run ${run.id} manifest does not match its trusted evidence adapter`)
+      }
+      if (evaluation.evidenceAdapterHash !== bundle.evidenceAdapter.sourceHash) {
+        throw new Error(`Run ${run.id} evaluation does not match its trusted evidence adapter`)
+      }
+      if (bundle.evidenceAdapter.sourceHash !== context.experiment.contract.evaluator.evidenceAdapter?.sourceHash) {
+        throw new Error(`Run ${run.id} evidence adapter does not match its frozen experiment`)
+      }
+    }
     if (
-      (bundle.format === "autofold.trial-bundle.v2" &&
+      (bundle.format !== "autofold.trial-bundle.v1" &&
         bundle.targetArtifactHash !== context.experiment.contract.targetArtifactHash) ||
       (candidates.format === "autofold.candidate-set.v2" &&
-        (bundle.format !== "autofold.trial-bundle.v2" ||
+        (bundle.format === "autofold.trial-bundle.v1" ||
           candidates.targetArtifactHash !== context.experiment.contract.targetArtifactHash))
     ) {
       throw new Error(`Run ${run.id} artifacts do not match its frozen target`)
@@ -295,6 +453,7 @@ export namespace ResearchExecution {
       candidates,
       evaluation,
       manifest,
+      modelRuns,
       incumbent: context.experiment.incumbentTrialId === run.trialId,
     }
   }
@@ -347,6 +506,7 @@ export namespace ResearchExecution {
     const result = ExecutionProtocol.EvaluationResult.parse(await Bun.file(path.join(output, "result.json")).json())
     const manifestPath = path.join(output, "manifest.json")
     const manifest = ExecutionProtocol.RunManifest.parse(await Bun.file(manifestPath).json())
+    await verifyModelRuns(output, bundle, candidates)
     if (
       bundle.runId !== run.id ||
       candidates.runId !== run.id ||
@@ -361,7 +521,7 @@ export namespace ResearchExecution {
     }
     if (
       bundle.contractHash !== context.experiment.contractHash ||
-      (bundle.format === "autofold.trial-bundle.v2" &&
+      (bundle.format !== "autofold.trial-bundle.v1" &&
         bundle.targetArtifactHash !== context.experiment.contract.targetArtifactHash) ||
       bundle.programHash !== context.trial.programHash ||
       bundle.evaluator.sourceHash !== context.experiment.contract.evaluator.sourceHash ||
@@ -381,11 +541,26 @@ export namespace ResearchExecution {
       candidates: await fileHash(candidatesPath),
       result: await fileHash(resultPath),
     }
-    if (bundle.format === "autofold.trial-bundle.v2" && bundle.targetArtifactPath) {
+    if (bundle.format !== "autofold.trial-bundle.v1" && bundle.targetArtifactPath) {
       expectedFiles.target = await fileHash(inside(workspace, bundle.targetArtifactPath))
       if (expectedFiles.target !== bundle.targetArtifactHash) {
         throw new Error(`Run ${run.id} target artifact no longer matches its frozen hash`)
       }
+    }
+    if (bundle.format === "autofold.trial-bundle.v3") {
+      if (manifest.evidenceAdapterHash !== bundle.evidenceAdapter.sourceHash) {
+        throw new Error(`Run ${run.id} manifest does not match its trusted evidence adapter`)
+      }
+      if (result.evidenceAdapterHash !== bundle.evidenceAdapter.sourceHash) {
+        throw new Error(`Run ${run.id} evaluation does not match its trusted evidence adapter`)
+      }
+      if (bundle.evidenceAdapter.sourceHash !== context.experiment.contract.evaluator.evidenceAdapter?.sourceHash) {
+        throw new Error(`Run ${run.id} evidence adapter does not match its frozen experiment`)
+      }
+      if (bundle.targetStructurePath) {
+        expectedFiles.target_structure = await fileHash(inside(workspace, bundle.targetStructurePath))
+      }
+      expectedFiles.model_runs = await fileHash(path.join(output, "model-runs", "index.json"))
     }
     if (
       candidates.format === "autofold.candidate-set.v2" &&
