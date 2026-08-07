@@ -34,6 +34,12 @@ def _write_json(path: Path, value: Any) -> str:
     return _write(path, _canonical(value))
 
 
+def _structure_cif(structure: Any) -> str:
+    """Read CIF text across proto-tools Structure API revisions."""
+    value = structure.structure_cif
+    return value() if callable(value) else value
+
+
 def _clamp(value: float) -> float:
     return max(0.0, min(1.0, value))
 
@@ -103,7 +109,7 @@ def enrich(bundle: dict[str, Any], candidate_set: dict[str, Any], output: Path) 
             confidence.append((interface, fold))
             directory = output / "model-runs" / candidate_key / str(seed)
             structure_path = directory / "prediction.cif"
-            structure_hash = _write(structure_path, structure.structure_cif())
+            structure_hash = _write(structure_path, _structure_cif(structure))
             metrics_path = directory / "metrics.json"
             metrics_hash = _write_json(metrics_path, metrics)
             artifact = {
