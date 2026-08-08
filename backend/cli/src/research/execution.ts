@@ -1,6 +1,7 @@
 import crypto from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
+import z from "zod"
 import { ComputeJobs } from "@/compute/jobs"
 import { ExecutionAuthority } from "@/project/execution"
 import { Instance } from "@/project/instance"
@@ -49,13 +50,23 @@ async function verifyModelRuns(
   bundle: ExecutionProtocol.TrialBundle,
   candidates: ExecutionProtocol.CandidateSet,
 ): Promise<ExecutionProtocol.ModelRunIndex | undefined> {
-  if (bundle.format !== "autofold.trial-bundle.v3") return undefined
+  if (bundle.format !== "autofold.trial-bundle.v3" && bundle.format !== "autofold.trial-bundle.v4") return undefined
   if (candidates.format !== "autofold.candidate-set.v2") {
     throw new Error(`Run ${bundle.runId} trusted evidence did not produce candidate-set.v2`)
   }
   const indexPath = path.join(output, "model-runs", "index.json")
   const index = ExecutionProtocol.ModelRunIndex.parse(await Bun.file(indexPath).json())
   if (index.runId !== bundle.runId) throw new Error(`Run ${bundle.runId} model-run index has another run identity`)
+  if (bundle.format === "autofold.trial-bundle.v4") {
+    if (index.format !== "autofold.model-run-index.v2") {
+      throw new Error(`Run ${bundle.runId} pipeline bundle requires model-run-index.v2`)
+    }
+    await verifyModelRunsV2(output, bundle, candidates, index)
+    return index
+  }
+  if (index.format !== "autofold.model-run-index.v1") {
+    throw new Error(`Run ${bundle.runId} legacy scientific bundle requires model-run-index.v1`)
+  }
 
   const candidateById = new Map(candidates.candidates.map((candidate) => [candidate.id, candidate]))
   const artifactHashes = new Map<string, Set<string>>()
@@ -125,7 +136,130 @@ async function verifyModelRuns(
   return index
 }
 
+async function verifyModelRunsV2(
+  output: string,
+  bundle: z.infer<typeof ExecutionProtocol.TrialBundleV4>,
+  candidates: z.infer<typeof ExecutionProtocol.CandidateSetV2>,
+  index: z.infer<typeof ExecutionProtocol.ModelRunIndexV2>,
+): Promise<void> {
+  if (index.pipelineHash !== bundle.pipelineHash) throw new Error(`Run ${bundle.runId} model index uses another pipeline policy`)
+  const candidateById = new Map(candidates.candidates.map((candidate) => [candidate.id, candidate]))
+  const policies = new Map<string, { version: string; allowSkip: boolean; stageIndex: number }>()
+  for (const [stageIndex, stage] of bundle.pipeline.stages.entries()) {
+    for (const model of stage.models) {
+      policies.set(`${stage.id}:${model.id}`, { version: model.version, allowSkip: stage.allowSkip, stageIndex })
+    }
+  }
+  const identities = new Set<string>()
+  const artifactHashes = new Map<string, Map<string, { model: string; version: string }>>()
+  const completed = new Map<string, { candidateId: string; seed: number; stageIndex: number }>()
+  const parents: Array<{ identity: string; candidateId: string; seed: number; stageIndex: number; hashes: string[] }> = []
+
+  for (const entry of index.entries) {
+    const candidate = candidateById.get(entry.candidateId)
+    if (!candidate) throw new Error(`Run ${bundle.runId} model evidence references unknown candidate ${entry.candidateId}`)
+    if (!bundle.seeds.includes(entry.seed)) throw new Error(`Run ${bundle.runId} model evidence uses unfrozen seed ${entry.seed}`)
+    const policy = policies.get(`${entry.stage}:${entry.modelId}`)
+    if (!policy) throw new Error(`Run ${bundle.runId} model evidence references undeclared stage/model ${entry.stage}:${entry.modelId}`)
+    const identity = `${entry.candidateId}:${entry.stage}:${entry.modelId}:${entry.seed}`
+    if (identities.has(identity)) throw new Error(`Run ${bundle.runId} has duplicate model evidence ${identity}`)
+    identities.add(identity)
+    if (new Set(entry.parentArtifactHashes).size !== entry.parentArtifactHashes.length) {
+      throw new Error(`Run ${bundle.runId} repeats a parent artifact for ${identity}`)
+    }
+    parents.push({ identity, candidateId: entry.candidateId, seed: entry.seed, stageIndex: policy.stageIndex, hashes: entry.parentArtifactHashes })
+    if (entry.status === "skipped") {
+      if (!policy.allowSkip) throw new Error(`Run ${bundle.runId} skipped required model evidence ${identity}`)
+      continue
+    }
+
+    for (const relative of [entry.artifactPath, entry.structurePath, entry.metricsPath]) {
+      if (path.isAbsolute(relative)) throw new Error(`Run ${bundle.runId} model-run paths must be relative`)
+    }
+    const artifactPath = inside(output, entry.artifactPath)
+    const structurePath = inside(output, entry.structurePath)
+    const metricsPath = inside(output, entry.metricsPath)
+    const [artifactHash, structureHash, metricsHash] = await Promise.all([
+      fileHash(artifactPath),
+      fileHash(structurePath),
+      fileHash(metricsPath),
+    ])
+    if (artifactHash !== entry.artifactHash || structureHash !== entry.structureHash || metricsHash !== entry.metricsHash) {
+      throw new Error(`Run ${bundle.runId} model evidence no longer matches its index for ${identity}`)
+    }
+    const artifact = ExecutionProtocol.ModelRunArtifactV2.parse(await Bun.file(artifactPath).json())
+    const nativeMetrics = await Bun.file(metricsPath).json()
+    const sequenceHash = new Bun.CryptoHasher("sha256").update(candidate.sequence).digest("hex")
+    if (
+      artifact.candidateId !== entry.candidateId ||
+      artifact.stage !== entry.stage ||
+      artifact.seed !== entry.seed ||
+      artifact.targetArtifactHash !== bundle.targetArtifactHash ||
+      artifact.peptideSequenceHash !== `sha256:${sequenceHash}` ||
+      artifact.model.id !== entry.modelId ||
+      artifact.model.version !== policy.version ||
+      artifact.model.adapterSourceHash !== bundle.evidenceAdapter.sourceHash ||
+      artifact.model.protoToolsCommit !== bundle.proto!.toolsCommit ||
+      artifact.outputs.structureHash !== structureHash ||
+      artifact.outputs.metricsHash !== metricsHash ||
+      JSON.stringify(artifact.parentArtifactHashes) !== JSON.stringify(entry.parentArtifactHashes)
+    ) {
+      throw new Error(`Run ${bundle.runId} model artifact provenance mismatch for ${identity}`)
+    }
+    if (JSON.stringify(artifact.metrics) !== JSON.stringify(nativeMetrics)) {
+      throw new Error(`Run ${bundle.runId} model artifact metrics mismatch for ${identity}`)
+    }
+    if (completed.has(entry.artifactHash)) throw new Error(`Run ${bundle.runId} reuses model artifact ${entry.artifactHash}`)
+    completed.set(entry.artifactHash, { candidateId: entry.candidateId, seed: entry.seed, stageIndex: policy.stageIndex })
+    const hashes = artifactHashes.get(entry.candidateId) ?? new Map<string, { model: string; version: string }>()
+    hashes.set(entry.artifactHash, { model: artifact.model.id, version: artifact.model.version })
+    artifactHashes.set(entry.candidateId, hashes)
+  }
+
+  const expected = candidates.candidates.length * bundle.seeds.length * [...policies].length
+  if (index.entries.length !== expected || identities.size !== expected) {
+    throw new Error(`Run ${bundle.runId} has ${index.entries.length} staged model decisions; expected ${expected}`)
+  }
+  for (const candidate of candidates.candidates) {
+    for (const seed of bundle.seeds) {
+      for (const [key] of policies) {
+        const [stage, model] = key.split(":", 2)
+        if (!identities.has(`${candidate.id}:${stage}:${model}:${seed}`)) {
+          throw new Error(`Run ${bundle.runId} is missing staged model decision ${candidate.id}:${stage}:${model}:${seed}`)
+        }
+      }
+    }
+  }
+  for (const parent of parents) {
+    for (const hash of parent.hashes) {
+      const source = completed.get(hash)
+      if (
+        !source ||
+        source.candidateId !== parent.candidateId ||
+        source.seed !== parent.seed ||
+        source.stageIndex >= parent.stageIndex
+      ) {
+        throw new Error(`Run ${bundle.runId} has invalid parent artifact ${hash} for ${parent.identity}`)
+      }
+    }
+  }
+  for (const candidate of candidates.candidates) {
+    const indexed = artifactHashes.get(candidate.id) ?? new Map<string, { model: string; version: string }>()
+    if (
+      candidate.evidence.predictors.length !== indexed.size ||
+      candidate.evidence.predictors.some((predictor) => {
+        const model = indexed.get(predictor.artifactHash)
+        return !model || model.model !== predictor.model || model.version !== predictor.version
+      })
+    ) {
+      throw new Error(`Run ${bundle.runId} candidate ${candidate.id} does not reference its complete staged model evidence`)
+    }
+  }
+}
+
 export namespace ResearchExecution {
+  export const verifyModelEvidence = verifyModelRuns
+
   export interface EvaluatorInfo {
     id: string
     version: string
@@ -418,7 +552,7 @@ export namespace ResearchExecution {
         throw new Error(`Run ${run.id} target artifact no longer matches its frozen hash`)
       }
     }
-    if (bundle.format === "autofold.trial-bundle.v3") {
+    if (bundle.format === "autofold.trial-bundle.v3" || bundle.format === "autofold.trial-bundle.v4") {
       if (bundle.targetStructurePath) {
         expectedFiles.target_structure = await fileHash(bundleResource(workspace, bundlePath, bundle.targetStructurePath))
       }
@@ -549,7 +683,7 @@ export namespace ResearchExecution {
         throw new Error(`Run ${run.id} target artifact no longer matches its frozen hash`)
       }
     }
-    if (bundle.format === "autofold.trial-bundle.v3") {
+    if (bundle.format === "autofold.trial-bundle.v3" || bundle.format === "autofold.trial-bundle.v4") {
       if (manifest.evidenceAdapterHash !== bundle.evidenceAdapter.sourceHash) {
         throw new Error(`Run ${run.id} manifest does not match its trusted evidence adapter`)
       }

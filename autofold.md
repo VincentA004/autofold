@@ -104,9 +104,10 @@ publishes its sources and proposed claims. See
 [docs/literature-rsi-v1.md](docs/literature-rsi-v1.md).
 
 The complete budgeted generation and consensus-validation route is specified in
-[docs/peptide-pipeline-v2.md](docs/peptide-pipeline-v2.md). Its next code
-increment is Model Run Index v2 plus the trusted Boltz/Chai/Protenix consensus
-adapter.
+[docs/peptide-pipeline-v2.md](docs/peptide-pipeline-v2.md). Trial Bundle v4 and
+[Model Run Index v2](docs/model-run-index-v2.md) now represent and verify staged
+Boltz/Chai/Protenix evidence. The trusted GPU consensus adapter is the next
+execution increment.
 
 ## Bounded autoresearch v1
 

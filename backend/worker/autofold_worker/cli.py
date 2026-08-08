@@ -98,7 +98,7 @@ def run(
 
     evidence_adapter_hash = None
     enrich = None
-    if bundle["format"] == "autofold.trial-bundle.v3":
+    if bundle["format"] in {"autofold.trial-bundle.v3", "autofold.trial-bundle.v4"}:
         if evidence_adapter_source is None:
             raise ProtocolError("Trial bundle v3 requires a trusted evidence adapter source")
         evidence_adapter_hash = sha256(evidence_adapter_source)

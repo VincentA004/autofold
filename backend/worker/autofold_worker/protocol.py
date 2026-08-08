@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 from pathlib import Path
 from typing import Any
 
 FORMATS = {
-    "bundles": {"autofold.trial-bundle.v1", "autofold.trial-bundle.v2", "autofold.trial-bundle.v3"},
+    "bundles": {"autofold.trial-bundle.v1", "autofold.trial-bundle.v2", "autofold.trial-bundle.v3", "autofold.trial-bundle.v4"},
     "candidates": "autofold.candidate-set.v1",
     "evaluation": "autofold.evaluation-result.v1",
     "manifest": "autofold.run-manifest.v1",
@@ -48,11 +50,11 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
     require_string(value, "runId", "run_")
     require_string(value, "trialId", "trl_")
     require_string(value, "contractHash", "sha256:")
-    if value["format"] in {"autofold.trial-bundle.v2", "autofold.trial-bundle.v3"}:
+    if value["format"] in {"autofold.trial-bundle.v2", "autofold.trial-bundle.v3", "autofold.trial-bundle.v4"}:
         require_string(value, "targetArtifactHash", "sha256:")
         if "targetArtifactPath" in value:
             require_string(value, "targetArtifactPath")
-    if value["format"] == "autofold.trial-bundle.v3":
+    if value["format"] in {"autofold.trial-bundle.v3", "autofold.trial-bundle.v4"}:
         if value.get("designAdapter") != "proto" or not isinstance(value.get("proto"), dict):
             raise ProtocolError("Scientific bundle v3 requires the pinned Proto runtime")
         require_string(value, "targetArtifactPath")
@@ -64,6 +66,38 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
         require_string(adapter, "id")
         require_string(adapter, "version")
         require_string(adapter, "sourceHash", "sha256:")
+    if value["format"] == "autofold.trial-bundle.v4":
+        pipeline = value.get("pipeline")
+        if not isinstance(pipeline, dict) or not isinstance(pipeline.get("stages"), list) or not pipeline["stages"]:
+            raise ProtocolError("Scientific bundle v4 requires a pipeline policy")
+        require_string(pipeline, "id")
+        stage_ids: set[str] = set()
+        for stage in pipeline["stages"]:
+            if not isinstance(stage, dict):
+                raise ProtocolError("Pipeline stages must be objects")
+            stage_id = require_string(stage, "id")
+            if stage_id in stage_ids:
+                raise ProtocolError("Pipeline stage IDs must be unique")
+            stage_ids.add(stage_id)
+            models = stage.get("models")
+            if not isinstance(models, list) or not models or not all(isinstance(model, dict) for model in models):
+                raise ProtocolError("Pipeline stages require model declarations")
+            model_ids = [require_string(model, "id") for model in models]
+            if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_id) for model_id in model_ids):
+                raise ProtocolError("Pipeline model IDs contain unsupported characters")
+            for model in models:
+                require_string(model, "version")
+            if len(set(model_ids)) != len(model_ids):
+                raise ProtocolError("Pipeline stage model IDs must be unique")
+            if not isinstance(stage.get("required"), bool) or not isinstance(stage.get("allowSkip"), bool):
+                raise ProtocolError("Pipeline stage routing flags must be booleans")
+            if stage["required"] and stage["allowSkip"]:
+                raise ProtocolError("Required pipeline stages cannot allow skips")
+        require_string(value, "pipelineHash", "sha256:")
+        canonical = json.dumps(pipeline, sort_keys=True, separators=(",", ":"))
+        pipeline_hash = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        if pipeline_hash != value["pipelineHash"]:
+            raise ProtocolError("Pipeline policy hash does not match its canonical content")
     if value.get("designAdapter") not in {"mock", "proto"}:
         raise ProtocolError("Unsupported design adapter")
     require_string(value, "programPath")

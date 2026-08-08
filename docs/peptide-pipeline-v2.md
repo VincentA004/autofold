@@ -35,15 +35,17 @@ campaign literature + prior run knowledge
 The 4090 is only a worker host for these model calls. Replacing it with another
 GPU host or cluster does not change the campaign, trial, or knowledge model.
 
-## Required next artifact revision
+## Implemented artifact revision
 
-Model Run Index v1 assumes one predictor per candidate and seed. The full
-pipeline requires Model Run Index v2 with identity
+Model Run Index v1 assumed one predictor per candidate and seed. Trial Bundle
+v4 and Model Run Index v2 now use identity
 `candidate × stage × model × seed`, explicit routed/skipped status, native
 metrics, parameters, runtime cost, and parent artifact links. Candidate evidence
-must declare the exact set of required validators, and the verifier must reject
-missing required coverage while allowing budget-policy skips.
+declares the exact completed validators, and the verifier rejects missing
+required coverage while allowing only policy-authorized skips. See
+[model-run-index-v2.md](model-run-index-v2.md).
 
-This index and a multi-predictor evidence adapter are the next execution-layer
-increment. Until then, the current Boltz-only scientific adapter is an accepted
-vertical slice, not the complete peptide pipeline.
+The deterministic Boltz/Chai/Protenix fixture tests the topology without making
+biological claims. The trusted GPU consensus adapter and its budgeted routing
+policy are the next execution-layer increment. Until then, the production
+Boltz-only adapter remains a vertical slice, not the complete peptide pipeline.

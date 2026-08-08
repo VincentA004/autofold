@@ -7,12 +7,14 @@ import { ResearchDomain } from "./domain"
 import { ExecutionProtocol } from "./execution-protocol"
 import { ResearchService } from "./service"
 import { MemoryResearchStore } from "./store"
+import { ResearchExecution } from "./execution"
 
 const workerRoot = path.resolve(import.meta.dir, "../../../worker")
 const workerScript = path.join(workerRoot, "run_worker.py")
 const evaluatorSource = path.join(workerRoot, "autofold_worker", "evaluate.py")
 const peptideEvaluatorSource = path.join(workerRoot, "autofold_worker", "peptide_panel_v1.py")
 const fixtureEvidenceSource = path.join(workerRoot, "autofold_worker", "evidence_fixture_v1.py")
+const consensusFixtureSource = path.join(workerRoot, "autofold_worker", "evidence_consensus_fixture_v2.py")
 const protoSmokeTrial = path.join(workerRoot, "tests", "fixtures", "proto_smoke_trial.py")
 const protoScientificTrial = path.join(workerRoot, "tests", "fixtures", "proto_scientific_trial.py")
 const protoRoot = path.join(os.homedir(), "Developer", "repo_store", "github.com-evo-design-proto-language")
@@ -463,6 +465,8 @@ describe("research execution worker", () => {
       const modelRuns = ExecutionProtocol.ModelRunIndex.parse(
         await Bun.file(path.join(root, "one", "model-runs", "index.json")).json(),
       )
+      expect(modelRuns.format).toBe("autofold.model-run-index.v1")
+      if (modelRuns.format !== "autofold.model-run-index.v1") throw new Error("Expected fixture index v1")
       expect(modelRuns.entries).toHaveLength(9)
       const firstModelRun = ExecutionProtocol.ModelRunArtifact.parse(
         await Bun.file(path.join(root, "one", modelRuns.entries[0]!.artifactPath)).json(),
@@ -482,6 +486,106 @@ describe("research execution worker", () => {
       expect(manifest.files.model_runs).toBe(await hashFile(path.join(root, "one", "model-runs", "index.json")))
       expect(manifest.evidenceAdapterHash).toBe(evidenceAdapterHash)
       expect(manifest.files.candidates).toBe(await hashFile(path.join(root, "one", "candidates.json")))
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  test("verifies staged Boltz, Chai, and Protenix consensus evidence", async () => {
+    const protoInstalled = await Promise.all([fs.access(protoPython), fs.access(path.join(protoRoot, "proto_language"))]).then(
+      () => true,
+      () => false,
+    )
+    if (!protoInstalled) {
+      console.warn("Skipping consensus Proto test: pinned local runtime is not installed")
+      return
+    }
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "autofold-consensus-worker-"))
+    try {
+      const structure = Buffer.from("data_consensus_receptor\n#\n")
+      const structureHash = new Bun.CryptoHasher("sha256").update(structure).digest("hex")
+      const target = await ResearchArtifacts.authorTarget(
+        root,
+        {
+          format: "autofold.target-artifact.v1",
+          name: "Consensus receptor fixture",
+          chains: [{ id: "A", sequence: "ACDEFGHIKLMNPQRSTVWYACDEFGHIKLMNPQRSTVWY" }],
+          structure: { format: "mmcif", contentHash: `sha256:${structureHash}` },
+          bindingSite: { residues: [{ chainId: "A", position: 8 }] },
+        },
+        structure,
+      )
+      const programPath = path.join(root, "trial.py")
+      await fs.copyFile(protoScientificTrial, programPath)
+      const languageCommit = (await Bun.$`git -C ${protoRoot} rev-parse HEAD`.text()).trim()
+      const toolsCommit = (await Bun.$`git -C ${path.join(protoRoot, "proto-tools")} rev-parse HEAD`.text()).trim()
+      const pipeline = ExecutionProtocol.PipelinePolicy.parse({
+        id: "peptide-consensus-fixture-v1",
+        stages: [
+          { id: "primary_screen", models: [{ id: "boltz2", version: "2.2.1" }], required: true, allowSkip: false },
+          { id: "independent_validation", models: [{ id: "chai1", version: "0.6.1" }], required: true, allowSkip: false },
+          { id: "disagreement_resolution", models: [{ id: "protenix", version: "0.5.0" }], required: true, allowSkip: false },
+        ],
+      })
+      const bundle = ExecutionProtocol.TrialBundleV4.parse({
+        format: "autofold.trial-bundle.v4",
+        runId: "run_consensus_panel",
+        trialId: "trl_consensus_panel",
+        contractHash: `sha256:${"e".repeat(64)}`,
+        targetArtifactHash: target.targetArtifactHash,
+        targetArtifactPath: path.join(root, target.targetArtifactPath),
+        targetStructurePath: path.join(root, target.structureArtifactPath!),
+        evidenceAdapter: {
+          id: "consensus-fixture",
+          version: "fixture-2",
+          sourceHash: await hashFile(consensusFixtureSource),
+        },
+        designAdapter: "proto",
+        programPath,
+        programHash: await hashFile(programPath),
+        modality: "short_peptide",
+        evaluator: {
+          id: "peptide-panel",
+          version: "1",
+          sourceHash: await hashFile(peptideEvaluatorSource),
+          direction: "minimize",
+        },
+        proto: { root: protoRoot, languageCommit, toolsCommit },
+        pipeline,
+        pipelineHash: ExecutionProtocol.hashPipeline(pipeline),
+        seeds: [7],
+        candidateBudget: 8,
+        submissionSize: 3,
+      })
+      const bundlePath = path.join(root, "bundle.json")
+      const output = path.join(root, "output")
+      const tamperedBundle = structuredClone(bundle)
+      tamperedBundle.pipeline.stages[0]!.models[0]!.version = "tampered"
+      const tamperedBundlePath = path.join(root, "tampered-bundle.json")
+      await fs.writeFile(tamperedBundlePath, JSON.stringify(tamperedBundle))
+      const rejected = await runWorker(
+        tamperedBundlePath,
+        path.join(root, "tampered-output"),
+        protoPython,
+        peptideEvaluatorSource,
+        consensusFixtureSource,
+      )
+      expect(rejected.exitCode).toBe(2)
+      expect(rejected.stderr).toContain("Pipeline policy hash")
+
+      await fs.writeFile(bundlePath, JSON.stringify(bundle))
+      const run = await runWorker(bundlePath, output, protoPython, peptideEvaluatorSource, consensusFixtureSource)
+      expect(run.exitCode, run.stderr).toBe(0)
+      const candidates = ExecutionProtocol.CandidateSetV2.parse(await Bun.file(path.join(output, "candidates.json")).json())
+      const index = await ResearchExecution.verifyModelEvidence(output, bundle, candidates)
+      expect(index?.format).toBe("autofold.model-run-index.v2")
+      if (index?.format !== "autofold.model-run-index.v2") throw new Error("Expected model-run-index.v2")
+      expect(index.entries).toHaveLength(9)
+      expect(index.entries.every((entry) => entry.status === "completed")).toBe(true)
+      expect(new Set(index.entries.map((entry) => entry.modelId))).toEqual(new Set(["boltz2", "chai1", "protenix"]))
+      expect(candidates.candidates[0]?.evidence.predictors).toHaveLength(3)
+      const chained = index.entries.find((entry) => entry.stage === "independent_validation")
+      expect(chained?.parentArtifactHashes).toHaveLength(1)
     } finally {
       await fs.rm(root, { recursive: true, force: true })
     }

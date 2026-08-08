@@ -55,7 +55,7 @@ def _normalize(raw: Any, bundle: dict[str, Any]) -> dict[str, Any]:
         }
         evaluator = bundle["evaluator"]
         scientific = (evaluator["id"], evaluator["version"]) == SCIENTIFIC_EVALUATOR
-        trusted_evidence = bundle["format"] == "autofold.trial-bundle.v3"
+        trusted_evidence = bundle["format"] in {"autofold.trial-bundle.v3", "autofold.trial-bundle.v4"}
         if scientific and trusted_evidence:
             if isinstance(item, dict) and ("generation" in item or "evidence" in item):
                 raise ProtocolError("Trial programs may not provide trusted generation or evaluator evidence")
@@ -72,7 +72,7 @@ def _normalize(raw: Any, bundle: dict[str, Any]) -> dict[str, Any]:
             )
         candidates.append(candidate)
     scientific = (bundle["evaluator"]["id"], bundle["evaluator"]["version"]) == SCIENTIFIC_EVALUATOR
-    trusted_evidence = bundle["format"] == "autofold.trial-bundle.v3"
+    trusted_evidence = bundle["format"] in {"autofold.trial-bundle.v3", "autofold.trial-bundle.v4"}
     return {
         "format": "autofold.candidate-set.v2" if scientific and not trusted_evidence else "autofold.candidate-set.v1",
         "runId": bundle["runId"],
