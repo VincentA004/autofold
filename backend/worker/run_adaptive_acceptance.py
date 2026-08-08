@@ -63,7 +63,7 @@ def main() -> int:
             },
             {
                 "id": "independent",
-                "models": [model("chai1-prediction", {"use_msa": False, "use_esm_embeddings": True, "num_trunk_recycles": 1, "num_diffn_timesteps": 20, "num_diffn_samples": 1, "num_trunk_samples": 1})],
+                "models": [model("chai1-prediction", {"use_msa": False, "use_esm_embeddings": False, "num_trunk_recycles": 1, "num_diffn_timesteps": 20, "num_diffn_samples": 1, "num_trunk_samples": 1})],
                 "dependsOn": ["primary"],
                 "candidateRouting": {"source": "primary", "metric": "confidence_score", "direction": "maximize", "maximumCandidates": 1},
                 "budget": {"maximumCandidates": 1, "maximumGpuSeconds": 900},
