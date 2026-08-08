@@ -110,6 +110,32 @@ describe("research terminal", () => {
     })
   })
 
+  test("refreshes literature only when the knowledge watermark is due", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const code = await ResearchTerminal.run(["knowledge", "refresh", "cmp_one", "--session", "ses_parent"], {
+      output: () => undefined,
+      fetchFn: (async (input, init) => {
+        calls.push({ url: String(input), init })
+        if (String(input).endsWith("/knowledge/status")) {
+          return new Response(
+            JSON.stringify({ due: true, reasons: ["new_experiment_results"], unprocessedKnowledgeIds: ["knw_one"] }),
+          )
+        }
+        return new Response(JSON.stringify({ records: [], claims: [], alignments: [], unresolvedQuestions: [] }))
+      }) as typeof fetch,
+    })
+    expect(code).toBe(0)
+    expect(calls.map((call) => call.url)).toEqual([
+      "http://127.0.0.1:4096/research/campaigns/cmp_one/knowledge/status",
+      "http://127.0.0.1:4096/research/campaigns/cmp_one/literature/review",
+    ])
+    expect(JSON.parse(String(calls[1]?.init?.body))).toEqual({
+      sessionId: "ses_parent",
+      maxSources: 20,
+      maxClaims: 20,
+    })
+  })
+
   test("watches a run through completion and then prints verified artifacts", async () => {
     const output: string[] = []
     let reads = 0

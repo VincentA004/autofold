@@ -79,6 +79,72 @@ function conceptBody(concept: ResearchDomain.KnowledgeConcept): string {
   ].join("\n")
 }
 
+function experimentBody(experiment: ResearchDomain.Experiment): string {
+  return matter.stringify(
+    [
+      `# ${experiment.contract.objective}`,
+      "",
+      "This is the frozen experiment contract used to make trial results comparable.",
+      "",
+      "## Contract",
+      "",
+      "```json",
+      JSON.stringify(experiment.contract, null, 2),
+      "```",
+      "",
+    ].join("\n"),
+    {
+      type: "Research Experiment",
+      title: experiment.contract.objective,
+      description: `Frozen ${experiment.contract.modality} experiment contract.`,
+      resource: `autofold://experiments/${experiment.id}`,
+      tags: ["experiment", experiment.contract.modality],
+      status: experiment.status === "draft" ? "draft" : experiment.status === "archived" ? "deprecated" : "stable",
+      generated: { by: "process:autofold-research-service", at: experiment.createdAt },
+      campaign_id: experiment.campaignId,
+      experiment_id: experiment.id,
+      experiment_status: experiment.status,
+      contract_hash: experiment.contractHash,
+      ...(experiment.incumbentTrialId ? { incumbent_trial_id: experiment.incumbentTrialId } : {}),
+    },
+  )
+}
+
+function trialBody(trial: ResearchDomain.Trial): string {
+  const stable = trial.status === "succeeded" || trial.status === "failed" || trial.status === "cancelled"
+  return matter.stringify(
+    [
+      `# Trial ${trial.id}`,
+      "",
+      trial.hypothesis,
+      "",
+      "## Frozen implementation",
+      "",
+      `- Design adapter: \`${trial.designAdapter}\``,
+      `- Program path: \`${trial.programPath}\``,
+      `- Program hash: \`${trial.programHash}\``,
+      "",
+    ].join("\n"),
+    {
+      type: "Research Trial",
+      title: `Trial ${trial.id}: ${trial.hypothesis}`,
+      description: "A versioned trial configuration evaluated under its experiment contract.",
+      resource: `autofold://trials/${trial.id}`,
+      tags: ["trial", trial.designAdapter],
+      status: stable ? "stable" : "draft",
+      generated: { by: "process:autofold-research-service", at: trial.createdAt },
+      sources: [
+        { id: "experiment", resource: `/experiments/${trial.experimentId}.md` },
+        ...(trial.parentTrialId ? [{ id: "parent_trial", resource: `/trials/${trial.parentTrialId}.md` }] : []),
+      ],
+      experiment_id: trial.experimentId,
+      trial_id: trial.id,
+      trial_status: trial.status,
+      program_hash: trial.programHash,
+    },
+  )
+}
+
 function literatureBody(record: ResearchDomain.LiteratureRecord): string {
   return matter.stringify(
     [
@@ -90,6 +156,12 @@ function literatureBody(record: ResearchDomain.LiteratureRecord): string {
     ].join("\n"),
     {
       type: "Literature Source",
+      title: record.title,
+      description: record.summary ?? `Frozen ${record.database} literature record ${record.sourceId}.`,
+      resource: record.url ?? `autofold://literature/${record.id}`,
+      tags: ["literature", record.database],
+      status: "stable",
+      generated: { by: "process:autofold-literature-ingest", at: record.retrievedAt },
       campaign_id: record.campaignId,
       database: record.database,
       source_id: record.sourceId,
@@ -107,19 +179,120 @@ function claimBody(claim: ResearchDomain.KnowledgeClaim, records: Map<string, Re
     const suffix = item.excerpt ? ` — “${item.excerpt}”` : ""
     return `- [${source?.title ?? item.literatureId}](../sources/${item.literatureId}.md)${suffix}`
   })
+  const citations = claim.evidence.map((item) => {
+    const source = records.get(item.literatureId)
+    return `[^${item.literatureId}]: ${source?.title ?? item.literatureId}`
+  })
   return matter.stringify(
-    [`# ${claim.kind.replaceAll("_", " ")}`, "", claim.statement, "", "## Literature evidence", "", ...evidence, ""].join("\n"),
+    [
+      `# ${claim.kind.replaceAll("_", " ")}`,
+      "",
+      `${claim.statement}${claim.evidence.map((item) => `[^${item.literatureId}]`).join("")}`,
+      "",
+      "## Literature evidence",
+      "",
+      ...evidence,
+      "",
+      ...citations,
+      "",
+    ].join("\n"),
     {
       type: "Literature Claim",
+      title: claim.statement,
+      description: `${claim.kind.replaceAll("_", " ")} claim with ${claim.evidence.length} frozen literature source(s).`,
+      tags: ["literature-claim", claim.kind, claim.stance],
+      status: claim.status === "deprecated" ? "deprecated" : claim.status === "proposed" ? "draft" : "stable",
+      claim_status: claim.status,
+      sources: claim.evidence.map((item) => ({
+        id: item.literatureId,
+        resource: `/sources/${item.literatureId}.md`,
+        title: records.get(item.literatureId)?.title,
+      })),
       campaign_id: claim.campaignId,
       kind: claim.kind,
       stance: claim.stance,
       confidence: claim.confidence,
-      status: claim.status,
       generated: claim.generated,
-      ...(claim.reviewed ? { reviewed: claim.reviewed } : {}),
+      ...(claim.reviewed ? { verified: [claim.reviewed] } : {}),
       evidence: claim.evidence,
       created_at: claim.createdAt,
+    },
+  )
+}
+
+function alignmentBody(alignment: ResearchDomain.KnowledgeAlignment): string {
+  return matter.stringify(
+    [
+      `# ${alignment.relation} alignment`,
+      "",
+      alignment.rationale,
+      "",
+      "## Linked knowledge",
+      "",
+      `- Literature claim: [${alignment.claimId}](/claims/${alignment.claimId}.md)`,
+      `- Experiment outcome: [${alignment.knowledgeId}](/concepts/${alignment.knowledgeId}.md)`,
+      "",
+    ].join("\n"),
+    {
+      type: "Evidence Alignment",
+      title: `${alignment.relation}: ${alignment.claimId} ↔ ${alignment.knowledgeId}`,
+      description: "A typed relationship between a literature claim and an experiment outcome.",
+      tags: ["evidence-alignment", alignment.relation],
+      status: alignment.status === "deprecated" ? "deprecated" : alignment.status === "proposed" ? "draft" : "stable",
+      alignment_status: alignment.status,
+      relation: alignment.relation,
+      generated: alignment.generated,
+      ...(alignment.reviewed ? { verified: [alignment.reviewed] } : {}),
+      sources: [
+        { id: "claim", resource: `/claims/${alignment.claimId}.md` },
+        { id: "outcome", resource: `/concepts/${alignment.knowledgeId}.md` },
+      ],
+      campaign_id: alignment.campaignId,
+      claim_id: alignment.claimId,
+      knowledge_id: alignment.knowledgeId,
+      created_at: alignment.createdAt,
+    },
+  )
+}
+
+function cycleBody(cycle: ResearchDomain.KnowledgeCycle): string {
+  const unresolved = cycle.outputs.unresolvedQuestions.map((question) => `- ${question}`)
+  return matter.stringify(
+    [
+      `# Knowledge cycle ${cycle.id}`,
+      "",
+      cycle.question,
+      "",
+      "## Inputs",
+      "",
+      `- Experiment outcomes: ${cycle.inputs.knowledgeIds.length}`,
+      `- Existing claims: ${cycle.inputs.claimIds.length}`,
+      `- Existing literature records: ${cycle.inputs.literatureIds.length}`,
+      "",
+      "## Outputs",
+      "",
+      `- Literature records: ${cycle.outputs.literatureIds.length}`,
+      `- Claims: ${cycle.outputs.claimIds.length}`,
+      `- Evidence alignments: ${cycle.outputs.alignmentIds.length}`,
+      "",
+      "## Unresolved questions",
+      "",
+      ...(unresolved.length ? unresolved : ["No unresolved questions were recorded."]),
+      "",
+    ].join("\n"),
+    {
+      type: "Knowledge Cycle",
+      title: `Campaign knowledge cycle ${cycle.id}`,
+      description: "One bounded experiment-results and literature-alignment recursion step.",
+      tags: ["knowledge-cycle", cycle.trigger],
+      status: "stable",
+      generated: cycle.generated,
+      stale_after: cycle.nextReviewAt.slice(0, 10),
+      campaign_id: cycle.campaignId,
+      trigger: cycle.trigger,
+      inputs: cycle.inputs,
+      outputs: cycle.outputs,
+      next_review_at: cycle.nextReviewAt,
     },
   )
 }
@@ -139,12 +312,28 @@ export namespace ResearchKnowledge {
     concepts: ResearchDomain.KnowledgeConcept[],
     literature: ResearchDomain.LiteratureRecord[] = [],
     claims: ResearchDomain.KnowledgeClaim[] = [],
+    alignments: ResearchDomain.KnowledgeAlignment[] = [],
+    cycles: ResearchDomain.KnowledgeCycle[] = [],
+    experiments: ResearchDomain.Experiment[] = [],
+    trials: ResearchDomain.Trial[] = [],
   ): string {
     const entries = concepts
       .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id))
       .map((concept) => `* [${concept.title}](concepts/${concept.id}.md) - ${concept.description}`)
     const claimEntries = claims.map((claim) => `* [${claim.statement}](claims/${claim.id}.md) - ${claim.status}`)
     const sourceEntries = literature.map((record) => `* [${record.title}](sources/${record.id}.md) - ${record.database}`)
+    const alignmentEntries = alignments.map(
+      (alignment) => `* [${alignment.relation}: ${alignment.claimId} ↔ ${alignment.knowledgeId}](alignments/${alignment.id}.md) - ${alignment.status}`,
+    )
+    const cycleEntries = cycles.map(
+      (cycle) => `* [${cycle.question}](cycles/${cycle.id}.md) - ${cycle.trigger}; next review ${cycle.nextReviewAt}`,
+    )
+    const experimentEntries = experiments.map(
+      (experiment) => `* [${experiment.contract.objective}](experiments/${experiment.id}.md) - ${experiment.status}`,
+    )
+    const trialEntries = trials.map(
+      (trial) => `* [${trial.hypothesis}](trials/${trial.id}.md) - ${trial.status}`,
+    )
     const body = [
       `# ${campaign.objective}`,
       "",
@@ -154,6 +343,14 @@ export namespace ResearchKnowledge {
       "",
       ...(entries.length ? entries : ["No research outcomes yet."]),
       "",
+      "## Experiment contracts",
+      "",
+      ...(experimentEntries.length ? experimentEntries : ["No experiment contracts yet."]),
+      "",
+      "## Trial configurations",
+      "",
+      ...(trialEntries.length ? trialEntries : ["No trials yet."]),
+      "",
       "## Literature claims",
       "",
       ...(claimEntries.length ? claimEntries : ["No literature claims yet."]),
@@ -161,6 +358,14 @@ export namespace ResearchKnowledge {
       "## Literature sources",
       "",
       ...(sourceEntries.length ? sourceEntries : ["No literature sources yet."]),
+      "",
+      "## Evidence alignments",
+      "",
+      ...(alignmentEntries.length ? alignmentEntries : ["No literature-to-experiment alignments yet."]),
+      "",
+      "## Knowledge cycles",
+      "",
+      ...(cycleEntries.length ? cycleEntries : ["No recursive knowledge cycles yet."]),
       "",
     ].join("\n")
     return matter.stringify(body, { okf_version: "0.2" })
@@ -172,6 +377,10 @@ export namespace ResearchKnowledge {
     concepts: ResearchDomain.KnowledgeConcept[]
     literature?: ResearchDomain.LiteratureRecord[]
     claims?: ResearchDomain.KnowledgeClaim[]
+    alignments?: ResearchDomain.KnowledgeAlignment[]
+    cycles?: ResearchDomain.KnowledgeCycle[]
+    experiments?: ResearchDomain.Experiment[]
+    trials?: ResearchDomain.Trial[]
   }): Promise<string> {
     const root = bundleRoot(input.workspace, input.campaign.id)
     for (const concept of input.concepts) {
@@ -182,6 +391,11 @@ export namespace ResearchKnowledge {
     }
     const literature = input.literature ?? []
     const claims = input.claims ?? []
+    const alignments = input.alignments ?? []
+    const cycles = input.cycles ?? []
+    const experiments = input.experiments ?? []
+    const experimentIds = new Set(experiments.map((experiment) => experiment.id))
+    const trials = input.trials ?? []
     const records = new Map(literature.map((record) => [record.id, record]))
     for (const record of literature) {
       if (record.campaignId !== input.campaign.id) throw new Error(`Literature ${record.id} belongs to another campaign`)
@@ -191,7 +405,39 @@ export namespace ResearchKnowledge {
       if (claim.campaignId !== input.campaign.id) throw new Error(`Claim ${claim.id} belongs to another campaign`)
       await writeAtomic(path.join(root, "claims", `${claim.id}.md`), claimBody(claim, records))
     }
-    await writeAtomic(path.join(root, "index.md"), renderIndex(input.campaign, input.concepts, literature, claims))
+    for (const alignment of alignments) {
+      if (alignment.campaignId !== input.campaign.id) throw new Error(`Alignment ${alignment.id} belongs to another campaign`)
+      await writeAtomic(path.join(root, "alignments", `${alignment.id}.md`), alignmentBody(alignment))
+    }
+    for (const cycle of cycles) {
+      if (cycle.campaignId !== input.campaign.id) throw new Error(`Knowledge cycle ${cycle.id} belongs to another campaign`)
+      await writeAtomic(path.join(root, "cycles", `${cycle.id}.md`), cycleBody(cycle))
+    }
+    for (const experiment of experiments) {
+      if (experiment.campaignId !== input.campaign.id) throw new Error(`Experiment ${experiment.id} belongs to another campaign`)
+      await writeAtomic(path.join(root, "experiments", `${experiment.id}.md`), experimentBody(experiment))
+    }
+    for (const trial of trials) {
+      if (!experimentIds.has(trial.experimentId)) throw new Error(`Trial ${trial.id} belongs to another campaign`)
+      await writeAtomic(path.join(root, "trials", `${trial.id}.md`), trialBody(trial))
+    }
+    await writeAtomic(
+      path.join(root, "index.md"),
+      renderIndex(input.campaign, input.concepts, literature, claims, alignments, cycles, experiments, trials),
+    )
+    await writeAtomic(
+      path.join(root, "log.md"),
+      [
+        "# Campaign Knowledge Log",
+        "",
+        ...(cycles.length
+          ? cycles
+              .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt))
+              .map((cycle) => `## ${cycle.createdAt.slice(0, 10)}\n\n* **Knowledge cycle**: [${cycle.id}](cycles/${cycle.id}.md) produced ${cycle.outputs.claimIds.length} claim(s) and ${cycle.outputs.alignmentIds.length} alignment(s).`)
+          : ["No knowledge cycles yet."]),
+        "",
+      ].join("\n"),
+    )
     return root
   }
 }

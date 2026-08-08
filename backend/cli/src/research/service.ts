@@ -14,7 +14,21 @@ export namespace ResearchService {
 
   export const NotFoundError = NamedError.create(
     "ResearchNotFoundError",
-    z.object({ entity: z.enum(["campaign", "experiment", "trial", "evaluation", "run", "knowledge", "literature", "claim"]), id: z.string() }),
+    z.object({
+      entity: z.enum([
+        "campaign",
+        "experiment",
+        "trial",
+        "evaluation",
+        "run",
+        "knowledge",
+        "literature",
+        "claim",
+        "alignment",
+        "knowledge_cycle",
+      ]),
+      id: z.string(),
+    }),
   )
 
   export const ConflictError = NamedError.create(
@@ -72,7 +86,7 @@ export namespace ResearchService {
     stance: ResearchDomain.KnowledgeClaim.shape.stance,
     confidence: ResearchDomain.KnowledgeClaim.shape.confidence,
     evidence: ResearchDomain.KnowledgeClaim.shape.evidence,
-    generatedBy: z.string().trim().min(1).default("autofold-agent"),
+    generatedBy: z.string().trim().min(1).default("autofold-agent/v1"),
   })
   export type CreateClaimInput = z.infer<typeof CreateClaimInput>
 
@@ -81,6 +95,12 @@ export namespace ResearchService {
     reviewedBy: z.string().trim().min(1),
   })
   export type ReviewClaimInput = z.infer<typeof ReviewClaimInput>
+
+  export const ReviewAlignmentInput = z.object({
+    status: z.enum(["reviewed", "contested", "deprecated"]),
+    reviewedBy: z.string().trim().min(1),
+  })
+  export type ReviewAlignmentInput = z.infer<typeof ReviewAlignmentInput>
 
   export const LiteratureReviewInput = z
     .object({
@@ -109,10 +129,23 @@ export namespace ResearchService {
               )
               .min(1)
               .max(100),
+            alignments: z
+              .array(
+                z.object({
+                  knowledgeId: z.string().startsWith("knw_"),
+                  relation: ResearchDomain.KnowledgeAlignment.shape.relation,
+                  rationale: ResearchDomain.KnowledgeAlignment.shape.rationale,
+                }),
+              )
+              .max(100)
+              .optional(),
           }),
         )
         .max(50),
       unresolvedQuestions: z.array(z.string().trim().min(1).max(2_000)).max(50).default([]),
+      question: z.string().trim().min(1).max(2_000).optional(),
+      trigger: ResearchDomain.KnowledgeCycle.shape.trigger.default("literature_review"),
+      inputKnowledgeIds: z.array(z.string().startsWith("knw_")).max(1_000).default([]),
     })
     .superRefine((review, context) => {
       const keys = new Set(review.sources.map((source) => source.key))
@@ -138,11 +171,11 @@ export namespace ResearchService {
         })
       }
     })
-  export type LiteratureReviewInput = z.infer<typeof LiteratureReviewInput>
+  export type LiteratureReviewInput = z.input<typeof LiteratureReviewInput>
 
   export interface Options {
     now?: () => string
-    id?: (prefix: "cmp" | "exp" | "trl" | "evl" | "run" | "knw" | "lit" | "clm") => string
+    id?: (prefix: "cmp" | "exp" | "trl" | "evl" | "run" | "knw" | "lit" | "clm" | "aln" | "kcy") => string
   }
 
   export interface EvaluationResult {
@@ -155,7 +188,9 @@ export namespace ResearchService {
 
   export class Service {
     private readonly now: () => string
-    private readonly id: (prefix: "cmp" | "exp" | "trl" | "evl" | "run" | "knw" | "lit" | "clm") => string
+    private readonly id: (
+      prefix: "cmp" | "exp" | "trl" | "evl" | "run" | "knw" | "lit" | "clm" | "aln" | "kcy",
+    ) => string
 
     constructor(
       private readonly store: ResearchStore,
@@ -241,6 +276,75 @@ export namespace ResearchService {
         .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id))
     }
 
+    async listAlignments(projectId: string, campaignId: string): Promise<ResearchDomain.KnowledgeAlignment[]> {
+      const state = await this.store.read(projectId)
+      this.campaign(state, campaignId)
+      return Object.values(state.alignments)
+        .filter((alignment) => alignment.campaignId === campaignId)
+        .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id))
+    }
+
+    async listKnowledgeCycles(projectId: string, campaignId: string): Promise<ResearchDomain.KnowledgeCycle[]> {
+      const state = await this.store.read(projectId)
+      this.campaign(state, campaignId)
+      return Object.values(state.knowledgeCycles)
+        .filter((cycle) => cycle.campaignId === campaignId)
+        .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id))
+    }
+
+    async knowledgeRefreshStatus(projectId: string, campaignId: string): Promise<{
+      due: boolean
+      reasons: string[]
+      unprocessedKnowledgeIds: string[]
+      nextReviewAt?: string
+    }> {
+      const state = await this.store.read(projectId)
+      this.campaign(state, campaignId)
+      const cycles = Object.values(state.knowledgeCycles)
+        .filter((cycle) => cycle.campaignId === campaignId)
+        .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt))
+      const processed = new Set(cycles.flatMap((cycle) => cycle.inputs.knowledgeIds))
+      const unprocessedKnowledgeIds = Object.values(state.knowledge)
+        .filter((concept) => concept.campaignId === campaignId && !processed.has(concept.id))
+        .map((concept) => concept.id)
+        .toSorted()
+      const latest = cycles[0]
+      const reasons = [
+        ...(!latest ? ["no_prior_knowledge_cycle"] : []),
+        ...(unprocessedKnowledgeIds.length ? ["new_experiment_results"] : []),
+        ...(latest && this.now() >= latest.nextReviewAt ? ["scheduled_refresh_due"] : []),
+      ]
+      return {
+        due: reasons.length > 0,
+        reasons,
+        unprocessedKnowledgeIds,
+        ...(latest ? { nextReviewAt: latest.nextReviewAt } : {}),
+      }
+    }
+
+    async reviewAlignment(
+      projectId: string,
+      campaignId: string,
+      alignmentId: string,
+      raw: ReviewAlignmentInput,
+    ): Promise<ResearchDomain.KnowledgeAlignment> {
+      const input = ReviewAlignmentInput.parse(raw)
+      return this.store.mutate(projectId, (state) => {
+        this.campaign(state, campaignId)
+        const alignment = state.alignments[alignmentId]
+        if (!alignment || alignment.campaignId !== campaignId) {
+          throw new NotFoundError({ entity: "alignment", id: alignmentId })
+        }
+        const updated = ResearchDomain.KnowledgeAlignment.parse({
+          ...alignment,
+          status: input.status,
+          reviewed: { by: input.reviewedBy, at: this.now() },
+        })
+        state.alignments[alignment.id] = updated
+        return updated
+      })
+    }
+
     async createClaim(
       projectId: string,
       campaignId: string,
@@ -310,11 +414,27 @@ export namespace ResearchService {
     ): Promise<{
       records: ResearchDomain.LiteratureRecord[]
       claims: ResearchDomain.KnowledgeClaim[]
+      alignments: ResearchDomain.KnowledgeAlignment[]
+      cycle: ResearchDomain.KnowledgeCycle
       unresolvedQuestions: string[]
     }> {
       const input = LiteratureReviewInput.parse(raw)
       return this.store.mutate(projectId, (state) => {
-        this.campaign(state, campaignId)
+        const campaign = this.campaign(state, campaignId)
+        for (const knowledgeId of input.inputKnowledgeIds) {
+          const concept = state.knowledge[knowledgeId]
+          if (!concept || concept.campaignId !== campaignId) {
+            throw new NotFoundError({ entity: "knowledge", id: knowledgeId })
+          }
+        }
+        const inputClaimIds = Object.values(state.claims)
+          .filter((claim) => claim.campaignId === campaignId)
+          .map((claim) => claim.id)
+          .toSorted()
+        const inputLiteratureIds = Object.values(state.literature)
+          .filter((record) => record.campaignId === campaignId)
+          .map((record) => record.id)
+          .toSorted()
         const records: ResearchDomain.LiteratureRecord[] = []
         const recordByKey = new Map<string, ResearchDomain.LiteratureRecord>()
         for (const source of input.sources) {
@@ -349,6 +469,7 @@ export namespace ResearchService {
           records.push(record)
           recordByKey.set(source.key, record)
         }
+        const alignments: ResearchDomain.KnowledgeAlignment[] = []
         const claims = input.claims.map((proposal) => {
           const evidence = proposal.evidence.map((item) => {
             const record = recordByKey.get(item.sourceKey)!
@@ -378,9 +499,52 @@ export namespace ResearchService {
             createdAt,
           })
           state.claims[claim.id] = claim
+          for (const proposedAlignment of proposal.alignments ?? []) {
+            const concept = state.knowledge[proposedAlignment.knowledgeId]
+            if (!concept || concept.campaignId !== campaignId) {
+              throw new NotFoundError({ entity: "knowledge", id: proposedAlignment.knowledgeId })
+            }
+            const alignment = ResearchDomain.KnowledgeAlignment.parse({
+              id: this.id("aln"),
+              campaignId,
+              claimId: claim.id,
+              knowledgeId: concept.id,
+              relation: proposedAlignment.relation,
+              rationale: proposedAlignment.rationale,
+              status: "proposed",
+              generated: claim.generated,
+              createdAt,
+            })
+            state.alignments[alignment.id] = alignment
+            alignments.push(alignment)
+          }
           return claim
         })
-        return { records, claims, unresolvedQuestions: input.unresolvedQuestions }
+        const createdAt = this.now()
+        const nextReview = new Date(createdAt)
+        nextReview.setUTCDate(nextReview.getUTCDate() + 7)
+        const cycle = ResearchDomain.KnowledgeCycle.parse({
+          id: this.id("kcy"),
+          campaignId,
+          trigger: input.trigger,
+          question: input.question ?? campaign.objective,
+          inputs: {
+            knowledgeIds: [...new Set(input.inputKnowledgeIds)].toSorted(),
+            claimIds: inputClaimIds,
+            literatureIds: inputLiteratureIds,
+          },
+          outputs: {
+            literatureIds: [...new Set(records.map((record) => record.id))].toSorted(),
+            claimIds: claims.map((claim) => claim.id).toSorted(),
+            alignmentIds: alignments.map((alignment) => alignment.id).toSorted(),
+            unresolvedQuestions: input.unresolvedQuestions,
+          },
+          generated: { by: input.generatedBy, at: createdAt },
+          createdAt,
+          nextReviewAt: nextReview.toISOString(),
+        })
+        state.knowledgeCycles[cycle.id] = cycle
+        return { records, claims, alignments, cycle, unresolvedQuestions: input.unresolvedQuestions }
       })
     }
 
@@ -882,7 +1046,22 @@ export namespace ResearchService {
       const concepts = Object.values(state.knowledge).filter((concept) => concept.campaignId === campaignId)
       const literature = Object.values(state.literature).filter((record) => record.campaignId === campaignId)
       const claims = Object.values(state.claims).filter((claim) => claim.campaignId === campaignId)
-      await ResearchKnowledge.writeBundle({ workspace, campaign, concepts, literature, claims })
+      const alignments = Object.values(state.alignments).filter((alignment) => alignment.campaignId === campaignId)
+      const cycles = Object.values(state.knowledgeCycles).filter((cycle) => cycle.campaignId === campaignId)
+      const experiments = Object.values(state.experiments).filter((experiment) => experiment.campaignId === campaignId)
+      const experimentIds = new Set(experiments.map((experiment) => experiment.id))
+      const trials = Object.values(state.trials).filter((trial) => experimentIds.has(trial.experimentId))
+      await ResearchKnowledge.writeBundle({
+        workspace,
+        campaign,
+        concepts,
+        literature,
+        claims,
+        alignments,
+        cycles,
+        experiments,
+        trials,
+      })
     }
 
     private campaign(state: ResearchState, id: string): ResearchDomain.Campaign {

@@ -25,6 +25,10 @@ const ClaimParam = z.object({
   campaignId: z.string().startsWith("cmp_"),
   claimId: z.string().regex(/^clm_[A-Za-z0-9_-]+$/),
 })
+const AlignmentParam = z.object({
+  campaignId: z.string().startsWith("cmp_"),
+  alignmentId: z.string().regex(/^aln_[A-Za-z0-9_-]+$/),
+})
 const ExperimentParam = z.object({ experimentId: z.string().startsWith("exp_") })
 const TrialParam = z.object({ trialId: z.string().startsWith("trl_") })
 const RunParam = z.object({ runId: z.string().startsWith("run_") })
@@ -109,6 +113,57 @@ export const ResearchRoutes = lazy(() =>
       }),
       validator("param", CampaignParam),
       async (c) => c.json(await Research.listKnowledge(Instance.project.id, c.req.valid("param").campaignId)),
+    )
+    .get(
+      "/campaigns/:campaignId/knowledge/status",
+      describeRoute({
+        summary: "Inspect the campaign knowledge refresh watermark",
+        operationId: "research.knowledge.status",
+        responses: { 200: { description: "Whether literature alignment is due and which outcomes are unprocessed" } },
+      }),
+      validator("param", CampaignParam),
+      async (c) => c.json(await Research.knowledgeRefreshStatus(Instance.project.id, c.req.valid("param").campaignId)),
+    )
+    .get(
+      "/campaigns/:campaignId/knowledge/alignments",
+      describeRoute({
+        summary: "List literature-to-experiment evidence alignments",
+        operationId: "research.knowledge.alignment.list",
+        responses: { 200: { description: "Typed campaign evidence alignments" } },
+      }),
+      validator("param", CampaignParam),
+      async (c) => c.json(await Research.listAlignments(Instance.project.id, c.req.valid("param").campaignId)),
+    )
+    .get(
+      "/campaigns/:campaignId/knowledge/cycles",
+      describeRoute({
+        summary: "List recursive campaign knowledge cycles",
+        operationId: "research.knowledge.cycle.list",
+        responses: { 200: { description: "Campaign knowledge cycle history" } },
+      }),
+      validator("param", CampaignParam),
+      async (c) => c.json(await Research.listKnowledgeCycles(Instance.project.id, c.req.valid("param").campaignId)),
+    )
+    .post(
+      "/campaigns/:campaignId/knowledge/alignments/:alignmentId/review",
+      describeRoute({
+        summary: "Review a proposed literature-to-experiment alignment",
+        operationId: "research.knowledge.alignment.review",
+        responses: { 200: { description: "Reviewed, contested, or deprecated evidence alignment" } },
+      }),
+      validator("param", AlignmentParam),
+      validator("json", ResearchService.ReviewAlignmentInput),
+      async (c) => {
+        const params = c.req.valid("param")
+        const alignment = await Research.reviewAlignment(
+          Instance.project.id,
+          params.campaignId,
+          params.alignmentId,
+          c.req.valid("json"),
+        )
+        await Research.publishCampaignKnowledge(Instance.project.id, params.campaignId, Instance.directory)
+        return c.json(alignment)
+      },
     )
     .get(
       "/campaigns/:campaignId/literature",

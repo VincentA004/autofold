@@ -73,6 +73,9 @@ describe("bounded literature review", () => {
           runKnowledge: [],
           literature: [],
           claims: [],
+          alignments: [],
+          cycles: [],
+          newRunKnowledge: [],
         }),
         propose: async () => {
           events.push("propose")
@@ -138,6 +141,18 @@ describe("bounded literature review", () => {
                 createdAt: timestamp,
               }),
             ],
+            alignments: [],
+            cycle: ResearchDomain.KnowledgeCycle.parse({
+              id: "kcy_1",
+              campaignId: "cmp_review",
+              trigger: "literature_review",
+              question: "Which interface constraints improve peptide selectivity?",
+              inputs: { knowledgeIds: [], claimIds: [], literatureIds: [] },
+              outputs: { literatureIds: ["lit_1"], claimIds: ["clm_1"], alignmentIds: [], unresolvedQuestions: proposal.artifact.unresolvedQuestions },
+              generated: { by: "autofold-literature-review/ses_child", at: timestamp },
+              createdAt: timestamp,
+              nextReviewAt: "2026-08-14T12:00:00.000Z",
+            }),
             unresolvedQuestions: proposal.artifact.unresolvedQuestions,
           }
         },
@@ -147,6 +162,7 @@ describe("bounded literature review", () => {
     expect(result.childSessionId).toBe("ses_child")
     expect(result.records).toHaveLength(1)
     expect(result.claims[0]?.status).toBe("proposed")
+    expect(result.cycle.id).toBe("kcy_1")
     expect(result.unresolvedQuestions).toEqual(["Does the effect transfer across target families?"])
   })
 
@@ -162,6 +178,9 @@ describe("bounded literature review", () => {
             runKnowledge: [],
             literature: [],
             claims: [],
+            alignments: [],
+            cycles: [],
+            newRunKnowledge: [],
           }),
           propose: async () => ({
             childSessionId: "ses_child",
@@ -189,7 +208,23 @@ describe("bounded literature review", () => {
           }),
           persist: async () => {
             persisted = true
-            return { records: [], claims: [], unresolvedQuestions: [] }
+            return {
+              records: [],
+              claims: [],
+              alignments: [],
+              cycle: ResearchDomain.KnowledgeCycle.parse({
+                id: "kcy_unused",
+                campaignId: "cmp_review",
+                trigger: "literature_review",
+                question: "unused",
+                inputs: { knowledgeIds: [], claimIds: [], literatureIds: [] },
+                outputs: { literatureIds: [], claimIds: [], alignmentIds: [], unresolvedQuestions: [] },
+                generated: { by: "autofold-literature-review/test", at: timestamp },
+                createdAt: timestamp,
+                nextReviewAt: "2026-08-14T12:00:00.000Z",
+              }),
+              unresolvedQuestions: [],
+            }
           },
         },
       ),

@@ -125,6 +125,7 @@ export namespace ResearchAutoresearch {
     knowledge: ResearchDomain.KnowledgeConcept[]
     literatureClaims: ResearchDomain.KnowledgeClaim[]
     literatureRecords: ResearchDomain.LiteratureRecord[]
+    evidenceAlignments?: ResearchDomain.KnowledgeAlignment[]
     incumbentCandidates: unknown[]
     protoToolCatalog: unknown[]
   }
@@ -213,11 +214,12 @@ export namespace ResearchAutoresearch {
       throw new Error(`Experiment ${experimentId} must be active for autoresearch`)
     }
     const campaignId = history.experiment.campaignId
-    const [target, knowledge, literatureClaims, literatureRecords, protoToolCatalog] = await Promise.all([
+    const [target, knowledge, literatureClaims, literatureRecords, evidenceAlignments, protoToolCatalog] = await Promise.all([
       ResearchArtifacts.readTarget(Instance.directory, history.experiment.contract.targetArtifactHash),
       Research.listKnowledge(projectId, campaignId),
       Research.listClaims(projectId, campaignId),
       Research.listLiterature(projectId, campaignId),
+      Research.listAlignments(projectId, campaignId),
       loadProtoToolCatalog(),
     ])
     const incumbent = history.experiment.incumbentTrialId
@@ -252,6 +254,7 @@ export namespace ResearchAutoresearch {
       knowledge: knowledge.slice(0, 20),
       literatureClaims: literatureClaims.slice(0, 30),
       literatureRecords: literatureRecords.slice(0, 30),
+      evidenceAlignments: evidenceAlignments.slice(0, 50),
       incumbentCandidates,
       protoToolCatalog,
     }
@@ -317,6 +320,7 @@ export namespace ResearchAutoresearch {
       verifiedKnowledge: input.context.knowledge,
       literatureClaims: input.context.literatureClaims,
       literatureRecords: input.context.literatureRecords,
+      evidenceAlignments: input.context.evidenceAlignments ?? [],
       incumbentCandidates: input.context.incumbentCandidates,
       availableProtoTools: input.context.protoToolCatalog,
     }

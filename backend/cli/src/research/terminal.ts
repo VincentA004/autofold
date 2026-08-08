@@ -184,7 +184,7 @@ export namespace ResearchTerminal {
             stance: stringFlag(parsed, "stance") ?? "context",
             confidence: numberFlag(parsed, "confidence", 0.5),
             evidence,
-            generatedBy: stringFlag(parsed, "by") ?? "autofold-agent",
+            generatedBy: stringFlag(parsed, "by") ?? "autofold-agent/v1",
           }),
         )
         return 0
@@ -330,6 +330,58 @@ export namespace ResearchTerminal {
         outputJSON(output, await client.get(`/runs/${requiredPosition(parsed, 1, "run id")}/artifacts`))
         return 0
       }
+      if (command === "knowledge" && noun === "status") {
+        outputJSON(
+          output,
+          await client.get(`/campaigns/${requiredPosition(parsed, 2, "campaign id")}/knowledge/status`),
+        )
+        return 0
+      }
+      if (command === "knowledge" && noun === "alignments") {
+        outputJSON(
+          output,
+          await client.get(`/campaigns/${requiredPosition(parsed, 2, "campaign id")}/knowledge/alignments`),
+        )
+        return 0
+      }
+      if (command === "knowledge" && noun === "cycles") {
+        outputJSON(
+          output,
+          await client.get(`/campaigns/${requiredPosition(parsed, 2, "campaign id")}/knowledge/cycles`),
+        )
+        return 0
+      }
+      if (command === "alignment" && noun === "review") {
+        outputJSON(
+          output,
+          await client.post(
+            `/campaigns/${requiredPosition(parsed, 2, "campaign id")}/knowledge/alignments/${requiredPosition(parsed, 3, "alignment id")}/review`,
+            {
+              status: stringFlag(parsed, "status") ?? "reviewed",
+              reviewedBy: requiredFlag(parsed, "by"),
+            },
+          ),
+        )
+        return 0
+      }
+      if (command === "knowledge" && noun === "refresh") {
+        const campaignId = requiredPosition(parsed, 2, "campaign id")
+        const status = await client.get<{ due: boolean; reasons: string[] }>(`/campaigns/${campaignId}/knowledge/status`)
+        if (!status.due && parsed.flags.force !== true) {
+          outputJSON(output, { refreshed: false, ...status })
+          return 0
+        }
+        outputJSON(
+          output,
+          await client.post(`/campaigns/${campaignId}/literature/review`, {
+            sessionId: requiredFlag(parsed, "session"),
+            ...(stringFlag(parsed, "question") ? { question: stringFlag(parsed, "question") } : {}),
+            maxSources: integerFlag(parsed, "max-sources", 20),
+            maxClaims: integerFlag(parsed, "max-claims", 20),
+          }),
+        )
+        return 0
+      }
       if (command === "knowledge") {
         outputJSON(output, await client.get(`/campaigns/${requiredPosition(parsed, 1, "campaign id")}/knowledge`))
         return 0
@@ -427,6 +479,11 @@ Commands:
   run watch RUN_ID
   artifacts RUN_ID
   knowledge CMP_ID
+  knowledge status CMP_ID
+  knowledge alignments CMP_ID
+  knowledge cycles CMP_ID
+  knowledge refresh CMP_ID --session SES_ID [--question TEXT] [--max-sources N] [--max-claims N] [--force]
+  alignment review CMP_ID ALN_ID --by REVIEWER [--status reviewed|contested|deprecated]
 
 Typical flow: create + activate campaign, create + activate experiment, author a
 trial from a template, start it with a live session ID, then watch the run.`

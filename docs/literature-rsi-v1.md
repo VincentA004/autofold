@@ -13,7 +13,8 @@ campaign objective or knowledge gap
   -> selected-record fetch
   -> exact evidence excerpts
   -> schema and transcript verification
-  -> atomic source + proposed-claim ingestion
+  -> atomic source + proposed-claim + outcome-alignment ingestion
+  -> durable knowledge cycle + next-review watermark
   -> campaign OKF publication
   -> experiment RSI context
 ```
@@ -45,3 +46,8 @@ bun run research:cli -- literature review CMP_ID \
 
 Accepted claims remain `proposed` until a separate reviewer marks them
 `reviewed`, `contested`, or `deprecated`.
+
+Each proposed alignment points to an exact `KnowledgeConcept` rather than an
+experiment in general. Its relation is `supports`, `refutes`, `context`, or
+`unresolved`, and it has an independent review lifecycle. This prevents a
+literature interpretation from silently becoming machine-verified evidence.

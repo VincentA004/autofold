@@ -233,6 +233,48 @@ export namespace ResearchDomain {
     })
   export type KnowledgeClaim = z.infer<typeof KnowledgeClaim>
 
+  export const KnowledgeAlignment = z
+    .object({
+      id: z.string().regex(/^aln_[A-Za-z0-9_-]+$/),
+      campaignId: z.string().startsWith("cmp_"),
+      claimId: z.string().startsWith("clm_"),
+      knowledgeId: z.string().startsWith("knw_"),
+      relation: z.enum(["supports", "refutes", "context", "unresolved"]),
+      rationale: z.string().trim().min(1).max(4_000),
+      status: z.enum(["proposed", "reviewed", "contested", "deprecated"]),
+      generated: KnowledgeActor,
+      reviewed: KnowledgeActor.optional(),
+      createdAt: Timestamp,
+    })
+    .superRefine((alignment, context) => {
+      if (alignment.status !== "proposed" && !alignment.reviewed) {
+        context.addIssue({ code: "custom", path: ["reviewed"], message: "Resolved alignments require a reviewer" })
+      }
+    })
+  export type KnowledgeAlignment = z.infer<typeof KnowledgeAlignment>
+
+  export const KnowledgeCycle = z.object({
+    id: z.string().regex(/^kcy_[A-Za-z0-9_-]+$/),
+    campaignId: z.string().startsWith("cmp_"),
+    trigger: z.enum(["manual", "run_completed", "scheduled", "literature_review"]),
+    question: z.string().trim().min(1).max(2_000),
+    inputs: z.object({
+      knowledgeIds: z.array(z.string().startsWith("knw_")).max(1_000),
+      claimIds: z.array(z.string().startsWith("clm_")).max(1_000),
+      literatureIds: z.array(z.string().startsWith("lit_")).max(1_000),
+    }),
+    outputs: z.object({
+      literatureIds: z.array(z.string().startsWith("lit_")).max(1_000),
+      claimIds: z.array(z.string().startsWith("clm_")).max(1_000),
+      alignmentIds: z.array(z.string().startsWith("aln_")).max(1_000),
+      unresolvedQuestions: z.array(z.string().trim().min(1).max(2_000)).max(100),
+    }),
+    generated: KnowledgeActor,
+    createdAt: Timestamp,
+    nextReviewAt: Timestamp,
+  })
+  export type KnowledgeCycle = z.infer<typeof KnowledgeCycle>
+
   const trialTransitions: Record<TrialStatus, ReadonlySet<TrialStatus>> = {
     proposed: new Set(["queued", "cancelled"]),
     queued: new Set(["running", "cancelled", "failed"]),

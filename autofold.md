@@ -100,6 +100,13 @@ proposed until reviewed; they are published as separate OKF source and claim
 nodes and supplied to experiment RSI without being mislabeled as verified run
 evidence.
 
+The first knowledge-plane recursion is now explicit: every bounded review records
+the experiment outcomes it consumed, new literature and claims, typed
+claim-to-outcome alignments, unresolved questions, and a next-review watermark.
+Frozen experiment contracts and trial configurations are projected alongside
+results so the OKF graph is navigable end to end. See
+[docs/knowledge-plane-v1.md](docs/knowledge-plane-v1.md).
+
 The bounded literature-RSI loop now creates a dynamic `literature-review`
 child, restricts it to scientific search/fetch tools and one proposal artifact,
 verifies every cited excerpt against the exact fetch transcript, and atomically

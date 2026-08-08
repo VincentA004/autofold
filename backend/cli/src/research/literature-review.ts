@@ -6,7 +6,12 @@ import { Instance } from "@/project/instance"
 import { ResearchDomain } from "./domain"
 import { Research, ResearchService } from "./service"
 
-const ProposalArtifact = ResearchService.LiteratureReviewInput.omit({ generatedBy: true })
+const ProposalArtifact = ResearchService.LiteratureReviewInput.omit({
+  generatedBy: true,
+  trigger: true,
+  question: true,
+  inputKnowledgeIds: true,
+})
 
 export namespace ResearchLiteratureReview {
   export const Input = z.object({
@@ -24,6 +29,8 @@ export namespace ResearchLiteratureReview {
     proposalPath: z.string(),
     records: z.array(ResearchDomain.LiteratureRecord),
     claims: z.array(ResearchDomain.KnowledgeClaim),
+    alignments: z.array(ResearchDomain.KnowledgeAlignment),
+    cycle: ResearchDomain.KnowledgeCycle,
     unresolvedQuestions: z.array(z.string()),
   })
   export type Result = z.infer<typeof Result>
@@ -34,6 +41,9 @@ export namespace ResearchLiteratureReview {
     runKnowledge: ResearchDomain.KnowledgeConcept[]
     literature: ResearchDomain.LiteratureRecord[]
     claims: ResearchDomain.KnowledgeClaim[]
+    alignments: ResearchDomain.KnowledgeAlignment[]
+    cycles: ResearchDomain.KnowledgeCycle[]
+    newRunKnowledge: ResearchDomain.KnowledgeConcept[]
   }
 
   export interface Proposal {
@@ -45,9 +55,11 @@ export namespace ResearchLiteratureReview {
   export interface Dependencies {
     context(campaignId: string): Promise<Context>
     propose(input: { context: Context; request: Input }): Promise<Proposal>
-    persist(input: { campaignId: string; proposal: Proposal }): Promise<{
+    persist(input: { campaignId: string; proposal: Proposal; context: Context; request: Input }): Promise<{
       records: ResearchDomain.LiteratureRecord[]
       claims: ResearchDomain.KnowledgeClaim[]
+      alignments: ResearchDomain.KnowledgeAlignment[]
+      cycle: ResearchDomain.KnowledgeCycle
       unresolvedQuestions: string[]
     }>
   }
@@ -87,7 +99,7 @@ export namespace ResearchLiteratureReview {
     if (proposal.artifact.claims.length > request.maxClaims) {
       throw new Error(`Literature agent proposed ${proposal.artifact.claims.length} claims; maximum is ${request.maxClaims}`)
     }
-    const persisted = await dependencies.persist({ campaignId: request.campaignId, proposal })
+    const persisted = await dependencies.persist({ campaignId: request.campaignId, proposal, context, request })
     return Result.parse({
       campaignId: request.campaignId,
       childSessionId: proposal.childSessionId,
@@ -105,18 +117,24 @@ export namespace ResearchLiteratureReview {
     const campaigns = await Research.listCampaigns(projectId)
     const campaign = campaigns.find((item) => item.id === campaignId)
     if (!campaign) throw new ResearchService.NotFoundError({ entity: "campaign", id: campaignId })
-    const [experiments, runKnowledge, literature, claims] = await Promise.all([
+    const [experiments, runKnowledge, literature, claims, alignments, cycles] = await Promise.all([
       Research.listExperiments(projectId, campaignId),
       Research.listKnowledge(projectId, campaignId),
       Research.listLiterature(projectId, campaignId),
       Research.listClaims(projectId, campaignId),
+      Research.listAlignments(projectId, campaignId),
+      Research.listKnowledgeCycles(projectId, campaignId),
     ])
+    const processedKnowledge = new Set(cycles.flatMap((cycle) => cycle.inputs.knowledgeIds))
     return {
       campaign,
       experiments: experiments.slice(0, 20),
       runKnowledge: runKnowledge.slice(0, 30),
       literature: literature.slice(0, 50),
       claims: claims.slice(0, 50),
+      alignments: alignments.slice(0, 100),
+      cycles: cycles.slice(0, 20),
+      newRunKnowledge: runKnowledge.filter((concept) => !processedKnowledge.has(concept.id)).slice(0, 30),
     }
   }
 
@@ -158,6 +176,9 @@ export namespace ResearchLiteratureReview {
       verifiedRunKnowledge: input.context.runKnowledge,
       existingLiterature: input.context.literature,
       existingClaims: input.context.claims,
+      existingAlignments: input.context.alignments,
+      priorKnowledgeCycles: input.context.cycles,
+      newExperimentOutcomes: input.context.newRunKnowledge,
       limits: { sources: input.request.maxSources, claims: input.request.maxClaims },
     }
     const prompt = [
@@ -189,6 +210,13 @@ export namespace ResearchLiteratureReview {
               stance: "supports",
               confidence: 0.7,
               evidence: [{ sourceKey: "pubmed:123", excerpt: "Exact passage copied from fetched record" }],
+              alignments: [
+                {
+                  knowledgeId: "knw_exact_id_from_campaign_context",
+                  relation: "supports",
+                  rationale: "Why this source-backed claim bears on that exact experiment outcome",
+                },
+              ],
             },
           ],
           unresolvedQuestions: ["Important remaining uncertainty"],
@@ -198,6 +226,8 @@ export namespace ResearchLiteratureReview {
       ),
       "Allowed claim kinds: mechanism, design_rule, assay_fact, limitation, hypothesis.",
       "Allowed stances: supports, refutes, context. Confidence is an agent estimate from 0 to 1, not an experimental score.",
+      "Align claims only to exact knowledge IDs present in campaign_context. Use relation supports, refutes, context, or unresolved.",
+      "An alignment is proposed interpretation, never experimental verification. Record contradictions rather than averaging them away.",
       "Finish only after the JSON file exists and parses.",
       "",
       "<campaign_context>",
@@ -225,9 +255,12 @@ export namespace ResearchLiteratureReview {
     return { childSessionId: child.id, proposalPath: relative, artifact }
   }
 
-  async function persist(input: { campaignId: string; proposal: Proposal }) {
+  async function persist(input: { campaignId: string; proposal: Proposal; context: Context; request: Input }) {
     const result = await Research.ingestLiteratureReview(Instance.project.id, input.campaignId, {
-      generatedBy: `literature-review:${input.proposal.childSessionId}`,
+      generatedBy: `autofold-literature-review/${input.proposal.childSessionId}`,
+      question: input.request.question ?? input.context.campaign.objective,
+      trigger: input.context.newRunKnowledge.length ? "run_completed" : "literature_review",
+      inputKnowledgeIds: input.context.newRunKnowledge.map((concept) => concept.id),
       ...input.proposal.artifact,
     })
     await Research.publishCampaignKnowledge(Instance.project.id, input.campaignId, Instance.directory)

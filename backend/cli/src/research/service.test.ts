@@ -92,6 +92,7 @@ describe("research service", () => {
     expect(result.records).toHaveLength(1)
     expect(result.claims[0]?.evidence[0]?.literatureId).toBe(result.records[0]?.id)
     expect(result.claims[0]?.status).toBe("proposed")
+    expect(result.cycle.outputs.claimIds).toEqual([result.claims[0]?.id])
 
     await expect(
       service.ingestLiteratureReview(projectId, campaign.id, {
@@ -118,9 +119,137 @@ describe("research service", () => {
         unresolvedQuestions: [],
       }),
     ).rejects.toBeInstanceOf(ResearchService.ConflictError)
+    await expect(
+      service.ingestLiteratureReview(projectId, campaign.id, {
+        generatedBy: "literature-review:ses_bad_alignment",
+        sources: [
+          {
+            key: "pubmed:9",
+            database: "pubmed",
+            sourceId: "9",
+            title: "Alignment study",
+            excerpts: ["A valid frozen excerpt."],
+            query: "alignment query",
+          },
+        ],
+        claims: [
+          {
+            kind: "hypothesis",
+            statement: "A claim with an invalid graph edge.",
+            stance: "supports",
+            confidence: 0.5,
+            evidence: [{ sourceKey: "pubmed:9", excerpt: "A valid frozen excerpt." }],
+            alignments: [
+              {
+                knowledgeId: "knw_missing",
+                relation: "supports",
+                rationale: "This edge must not survive validation.",
+              },
+            ],
+          },
+        ],
+        unresolvedQuestions: [],
+      }),
+    ).rejects.toBeInstanceOf(ResearchService.NotFoundError)
     const state = await store.read(projectId)
     expect(Object.values(state.literature)).toHaveLength(1)
     expect(Object.values(state.claims)).toHaveLength(1)
+    expect(Object.values(state.knowledgeCycles)).toHaveLength(1)
+  })
+
+  test("aligns new experiment outcomes with literature inside one durable knowledge cycle", async () => {
+    const { service, store, projectId } = fixture()
+    const experiment = await activeExperiment(service, projectId)
+    const trial = await evaluatingTrial(service, projectId, experiment.id, "baseline")
+    const evaluation = await service.recordEvaluation(projectId, trial.id, {
+      contractHash: experiment.contractHash,
+      evaluatorHash: experiment.contract.evaluator.sourceHash,
+      valid: true,
+      score: 0.42,
+      diagnostics: { agreement: 0.81 },
+    })
+
+    const before = await service.knowledgeRefreshStatus(projectId, experiment.campaignId)
+    expect(before.due).toBe(true)
+    expect(before.unprocessedKnowledgeIds).toEqual([evaluation.knowledge.id])
+
+    const result = await service.ingestLiteratureReview(projectId, experiment.campaignId, {
+      generatedBy: "autofold-literature-review/ses_alignment",
+      trigger: "run_completed",
+      question: "Does published evidence explain the observed model agreement?",
+      inputKnowledgeIds: [evaluation.knowledge.id],
+      sources: [
+        {
+          key: "pubmed:alignment",
+          database: "pubmed",
+          sourceId: "alignment",
+          title: "Independent predictor agreement study",
+          excerpts: ["Independent predictors reduced false-positive selection."],
+          query: "protein binder independent predictor agreement",
+        },
+      ],
+      claims: [
+        {
+          kind: "design_rule",
+          statement: "Independent predictors may reduce false-positive binder selection.",
+          stance: "supports",
+          confidence: 0.75,
+          evidence: [
+            { sourceKey: "pubmed:alignment", excerpt: "Independent predictors reduced false-positive selection." },
+          ],
+          alignments: [
+            {
+              knowledgeId: evaluation.knowledge.id,
+              relation: "context",
+              rationale: "The paper provides context for the locked evaluator's predictor-agreement diagnostic.",
+            },
+          ],
+        },
+      ],
+      unresolvedQuestions: ["Does agreement correlate with measured affinity for this target?"],
+    })
+
+    expect(result.alignments).toHaveLength(1)
+    expect(result.alignments[0]).toMatchObject({
+      claimId: result.claims[0]?.id,
+      knowledgeId: evaluation.knowledge.id,
+      relation: "context",
+      status: "proposed",
+    })
+    expect(result.cycle.inputs.knowledgeIds).toEqual([evaluation.knowledge.id])
+    expect(result.cycle.outputs.alignmentIds).toEqual([result.alignments[0]?.id])
+    const after = await service.knowledgeRefreshStatus(projectId, experiment.campaignId)
+    expect(after.unprocessedKnowledgeIds).toEqual([])
+    expect(after.due).toBe(false)
+    const state = await store.read(projectId)
+    expect(Object.values(state.alignments)).toEqual(result.alignments)
+    expect(Object.values(state.knowledgeCycles)).toEqual([result.cycle])
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "autofold-knowledge-cycle-"))
+    try {
+      await service.publishCampaignKnowledge(projectId, experiment.campaignId, workspace)
+      const root = path.join(workspace, ".autofold", "campaigns", experiment.campaignId, "knowledge")
+      const alignment = matter(await Bun.file(path.join(root, "alignments", `${result.alignments[0]?.id}.md`)).text())
+      const cycle = matter(await Bun.file(path.join(root, "cycles", `${result.cycle.id}.md`)).text())
+      const claim = matter(await Bun.file(path.join(root, "claims", `${result.claims[0]?.id}.md`)).text())
+      const renderedExperiment = matter(await Bun.file(path.join(root, "experiments", `${experiment.id}.md`)).text())
+      const renderedTrial = matter(await Bun.file(path.join(root, "trials", `${trial.id}.md`)).text())
+      expect(alignment.data.type).toBe("Evidence Alignment")
+      expect(alignment.data.sources).toEqual([
+        { id: "claim", resource: `/claims/${result.claims[0]?.id}.md` },
+        { id: "outcome", resource: `/concepts/${evaluation.knowledge.id}.md` },
+      ])
+      expect(cycle.data.type).toBe("Knowledge Cycle")
+      expect(cycle.data.stale_after).toBe("2026-08-09")
+      expect(claim.data.status).toBe("draft")
+      expect(claim.data.claim_status).toBe("proposed")
+      expect(claim.data.sources[0].resource).toBe(`/sources/${result.records[0]?.id}.md`)
+      expect(renderedExperiment.data.contract_hash).toBe(experiment.contractHash)
+      expect(JSON.parse(renderedExperiment.content.match(/```json\n([\s\S]+?)\n```/)?.[1] ?? "{}")).toEqual(experiment.contract)
+      expect(renderedTrial.data.sources[0].resource).toBe(`/experiments/${experiment.id}.md`)
+      expect(renderedTrial.data.program_hash).toBe(trial.programHash)
+    } finally {
+      await fs.rm(workspace, { recursive: true, force: true })
+    }
   })
 
   test("compounds immutable literature records into evidence-linked campaign claims", async () => {
