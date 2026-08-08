@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from .adapters import MockDesignAdapter, ProtoDesignAdapter
 from .manifest import create, sha256, timestamp
-from .protocol import ProtocolError, read_json, validate_bundle, write_json
+from .protocol import ProtocolError, read_json, validate_bundle, validate_workflow_source, write_json
 
 
 def parser() -> argparse.ArgumentParser:
@@ -77,6 +77,7 @@ def run(
     program_hash = sha256(program_path)
     if program_hash != bundle["programHash"]:
         raise ProtocolError(f"Program hash mismatch: expected {bundle['programHash']}, received {program_hash}")
+    validate_workflow_source(program_path, bundle)
     target_path = Path(runtime_bundle["targetArtifactPath"]) if runtime_bundle.get("targetArtifactPath") else None
     if target_path is not None:
         target_hash = sha256(target_path)

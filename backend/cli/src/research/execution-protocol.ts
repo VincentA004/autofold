@@ -56,8 +56,29 @@ export namespace ExecutionProtocol {
     .object({
       id: z.string().regex(/^[a-z][a-z0-9_-]*$/),
       models: z
-        .array(z.object({ id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/), version: z.string().trim().min(1) }))
+        .array(
+          z.object({
+            id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+            version: z.string().trim().min(1),
+            toolKey: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/).optional(),
+          }),
+        )
         .min(1),
+      dependsOn: z.array(z.string().regex(/^[a-z][a-z0-9_-]*$/)).default([]),
+      condition: z
+        .object({
+          source: z.string().regex(/^[a-z][a-z0-9_-]*$/),
+          metric: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+          operator: z.enum(["lt", "lte", "gt", "gte"]),
+          value: z.number().finite(),
+        })
+        .optional(),
+      budget: z
+        .object({
+          maximumCandidates: z.number().int().positive().optional(),
+          maximumGpuSeconds: z.number().finite().positive().optional(),
+        })
+        .optional(),
       required: z.boolean(),
       allowSkip: z.boolean(),
     })
@@ -68,6 +89,8 @@ export namespace ExecutionProtocol {
   export const PipelinePolicy = z
     .object({
       id: z.string().trim().min(1),
+      sourceHash: Digest.optional(),
+      protoToolsCommit: z.string().regex(/^[a-f0-9]{40}$/).optional(),
       stages: z.array(PipelineStage).min(1),
     })
     .superRefine((policy, context) => {
@@ -80,6 +103,38 @@ export namespace ExecutionProtocol {
         if (models.size !== stage.models.length) {
           context.addIssue({ code: "custom", path: ["stages", index, "models"], message: "Stage model IDs must be unique" })
         }
+        for (const dependency of stage.dependsOn) {
+          if (!stages.has(dependency) || dependency === stage.id) {
+            context.addIssue({ code: "custom", path: ["stages", index, "dependsOn"], message: `Invalid stage dependency: ${dependency}` })
+          }
+        }
+        if (new Set(stage.dependsOn).size !== stage.dependsOn.length) {
+          context.addIssue({ code: "custom", path: ["stages", index, "dependsOn"], message: "Stage dependencies must be unique" })
+        }
+        if (stage.condition && !stage.dependsOn.includes(stage.condition.source)) {
+          context.addIssue({ code: "custom", path: ["stages", index, "condition", "source"], message: "Condition source must be a direct dependency" })
+        }
+      }
+      const visiting = new Set<string>()
+      const visited = new Set<string>()
+      const byId = new Map(policy.stages.map((stage) => [stage.id, stage]))
+      const positions = new Map(policy.stages.map((stage, index) => [stage.id, index]))
+      for (const [index, stage] of policy.stages.entries()) {
+        if (stage.dependsOn.some((dependency) => (positions.get(dependency) ?? Number.POSITIVE_INFINITY) >= index)) {
+          context.addIssue({ code: "custom", path: ["stages", index, "dependsOn"], message: "Frozen pipeline stages must be topologically ordered" })
+        }
+      }
+      const visit = (id: string): boolean => {
+        if (visiting.has(id)) return false
+        if (visited.has(id)) return true
+        visiting.add(id)
+        for (const dependency of byId.get(id)?.dependsOn ?? []) if (!visit(dependency)) return false
+        visiting.delete(id)
+        visited.add(id)
+        return true
+      }
+      if (policy.stages.some((stage) => !visit(stage.id))) {
+        context.addIssue({ code: "custom", path: ["stages"], message: "Pipeline dependencies must be acyclic" })
       }
     })
   export type PipelinePolicy = z.infer<typeof PipelinePolicy>

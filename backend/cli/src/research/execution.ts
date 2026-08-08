@@ -11,12 +11,15 @@ import { ExecutionProtocol } from "./execution-protocol"
 import { ResearchDomain } from "./domain"
 import { DesignAdapters } from "./adapters"
 import { ResearchRemoteCompute } from "./remote-compute"
+import { ResearchWorkflow } from "./workflow"
 
 const workerRoot = path.resolve(import.meta.dir, "../../../worker")
 const workerScript = path.join(workerRoot, "run_worker.py")
 const mockEvaluatorSource = path.join(workerRoot, "autofold_worker", "evaluate.py")
 const peptideEvaluatorSource = path.join(workerRoot, "autofold_worker", "peptide_panel_v1.py")
-const boltzEvidenceSource = path.join(workerRoot, "autofold_worker", "evidence_boltz2_v1.py")
+// This bridge retains the legacy filename because v3 bundles still consume its
+// Boltz-only artifact contract; v4 dispatches the compiled Proto registry graph.
+const structureEvidenceSource = path.join(workerRoot, "autofold_worker", "evidence_boltz2_v1.py")
 const finalizers = new Map<string, Promise<void>>()
 
 async function fileHash(file: string): Promise<string> {
@@ -144,16 +147,20 @@ async function verifyModelRunsV2(
 ): Promise<void> {
   if (index.pipelineHash !== bundle.pipelineHash) throw new Error(`Run ${bundle.runId} model index uses another pipeline policy`)
   const candidateById = new Map(candidates.candidates.map((candidate) => [candidate.id, candidate]))
-  const policies = new Map<string, { version: string; allowSkip: boolean; stageIndex: number }>()
-  for (const [stageIndex, stage] of bundle.pipeline.stages.entries()) {
+  const policies = new Map<string, { version: string; allowSkip: boolean; dependsOn: Set<string> }>()
+  for (const stage of bundle.pipeline.stages) {
     for (const model of stage.models) {
-      policies.set(`${stage.id}:${model.id}`, { version: model.version, allowSkip: stage.allowSkip, stageIndex })
+      policies.set(`${stage.id}:${model.id}`, {
+        version: model.version,
+        allowSkip: stage.allowSkip,
+        dependsOn: new Set(stage.dependsOn),
+      })
     }
   }
   const identities = new Set<string>()
   const artifactHashes = new Map<string, Map<string, { model: string; version: string }>>()
-  const completed = new Map<string, { candidateId: string; seed: number; stageIndex: number }>()
-  const parents: Array<{ identity: string; candidateId: string; seed: number; stageIndex: number; hashes: string[] }> = []
+  const completed = new Map<string, { candidateId: string; seed: number; stage: string }>()
+  const parents: Array<{ identity: string; candidateId: string; seed: number; dependencies: Set<string>; hashes: string[] }> = []
 
   for (const entry of index.entries) {
     const candidate = candidateById.get(entry.candidateId)
@@ -167,7 +174,7 @@ async function verifyModelRunsV2(
     if (new Set(entry.parentArtifactHashes).size !== entry.parentArtifactHashes.length) {
       throw new Error(`Run ${bundle.runId} repeats a parent artifact for ${identity}`)
     }
-    parents.push({ identity, candidateId: entry.candidateId, seed: entry.seed, stageIndex: policy.stageIndex, hashes: entry.parentArtifactHashes })
+    parents.push({ identity, candidateId: entry.candidateId, seed: entry.seed, dependencies: policy.dependsOn, hashes: entry.parentArtifactHashes })
     if (entry.status === "skipped") {
       if (!policy.allowSkip) throw new Error(`Run ${bundle.runId} skipped required model evidence ${identity}`)
       continue
@@ -210,7 +217,7 @@ async function verifyModelRunsV2(
       throw new Error(`Run ${bundle.runId} model artifact metrics mismatch for ${identity}`)
     }
     if (completed.has(entry.artifactHash)) throw new Error(`Run ${bundle.runId} reuses model artifact ${entry.artifactHash}`)
-    completed.set(entry.artifactHash, { candidateId: entry.candidateId, seed: entry.seed, stageIndex: policy.stageIndex })
+    completed.set(entry.artifactHash, { candidateId: entry.candidateId, seed: entry.seed, stage: entry.stage })
     const hashes = artifactHashes.get(entry.candidateId) ?? new Map<string, { model: string; version: string }>()
     hashes.set(entry.artifactHash, { model: artifact.model.id, version: artifact.model.version })
     artifactHashes.set(entry.candidateId, hashes)
@@ -231,16 +238,16 @@ async function verifyModelRunsV2(
     }
   }
   for (const parent of parents) {
-    for (const hash of parent.hashes) {
-      const source = completed.get(hash)
-      if (
-        !source ||
-        source.candidateId !== parent.candidateId ||
-        source.seed !== parent.seed ||
-        source.stageIndex >= parent.stageIndex
-      ) {
-        throw new Error(`Run ${bundle.runId} has invalid parent artifact ${hash} for ${parent.identity}`)
-      }
+    const expected = [...completed]
+      .filter(([, source]) =>
+        source.candidateId === parent.candidateId &&
+        source.seed === parent.seed &&
+        parent.dependencies.has(source.stage),
+      )
+      .map(([hash]) => hash)
+    const declared = new Set(parent.hashes)
+    if (declared.size !== expected.length || expected.some((hash) => !declared.has(hash))) {
+      throw new Error(`Run ${bundle.runId} has incomplete or invalid parents for ${parent.identity}`)
     }
   }
   for (const candidate of candidates.candidates) {
@@ -295,10 +302,10 @@ export namespace ResearchExecution {
         sourcePath: peptideEvaluatorSource,
         requiresTargetArtifact: true,
         evidenceAdapter: {
-          id: "boltz2",
-          version: "2.2.1",
-          sourceHash: await fileHash(boltzEvidenceSource),
-          sourcePath: boltzEvidenceSource,
+          id: "proto-structure-pipeline",
+          version: "1",
+          sourceHash: await fileHash(structureEvidenceSource),
+          sourcePath: structureEvidenceSource,
         },
       },
     ]
@@ -377,6 +384,25 @@ export namespace ResearchExecution {
           })
         })
       : undefined
+    const sourceProgram = inside(Instance.directory, context.trial.programPath)
+    const actualProgramHash = await fileHash(sourceProgram)
+    if (actualProgramHash !== context.trial.programHash) {
+      throw new ResearchService.ConflictError({
+        code: "program_hash_mismatch",
+        message: `Trial program does not match its recorded hash: ${context.trial.programPath}`,
+      })
+    }
+    const workflowPlan = adapter.proto && installed.evidenceAdapter
+      ? await ResearchWorkflow.extract(sourceProgram, adapter.python)
+      : undefined
+    const pipeline = workflowPlan && adapter.proto
+      ? ResearchWorkflow.compile({
+          plan: workflowPlan,
+          tools: await ResearchWorkflow.discover(adapter.python, adapter.proto.root),
+          contract: context.experiment.contract,
+          protoToolsCommit: adapter.proto.toolsCommit,
+        })
+      : undefined
 
     // Authorization is a precondition, not a run outcome. Check it before
     // beginRun mutates the proposed trial into a running state so a denied
@@ -399,7 +425,11 @@ export namespace ResearchExecution {
     const outputPath = path.posix.join(root, "output")
     const run = await Research.beginRun(projectId, input.trialId, { runId, bundlePath, outputPath })
     const bundle = ExecutionProtocol.TrialBundle.parse({
-      format: installed.evidenceAdapter ? "autofold.trial-bundle.v3" : "autofold.trial-bundle.v2",
+      format: pipeline
+        ? "autofold.trial-bundle.v4"
+        : installed.evidenceAdapter
+          ? "autofold.trial-bundle.v3"
+          : "autofold.trial-bundle.v2",
       runId,
       trialId: context.trial.id,
       contractHash: context.experiment.contractHash,
@@ -424,25 +454,19 @@ export namespace ResearchExecution {
         direction: installed.direction,
       },
       proto: adapter.proto,
+      pipeline,
+      pipelineHash: pipeline ? ExecutionProtocol.hashPipeline(pipeline) : undefined,
       seeds: context.experiment.contract.evaluator.fixedSeeds,
       candidateBudget: context.experiment.contract.budget.maximumCandidates,
       submissionSize: context.experiment.contract.evaluator.submissionSize,
     })
     const absoluteBundle = inside(Instance.directory, bundlePath)
-    const sourceProgram = inside(Instance.directory, context.trial.programPath)
     const absoluteProgram = inside(Instance.directory, programPath)
     const absoluteTarget = targetPath ? inside(Instance.directory, targetPath) : undefined
     const absoluteTargetStructure = targetStructurePath ? inside(Instance.directory, targetStructurePath) : undefined
     const absoluteOutput = inside(Instance.directory, outputPath)
 
     try {
-      const actualProgramHash = await fileHash(sourceProgram)
-      if (actualProgramHash !== context.trial.programHash) {
-        throw new ResearchService.ConflictError({
-          code: "program_hash_mismatch",
-          message: `Trial program does not match its recorded hash: ${context.trial.programPath}`,
-        })
-      }
       await fs.mkdir(path.dirname(absoluteProgram), { recursive: true })
       await fs.copyFile(sourceProgram, absoluteProgram)
       if (storedTarget && absoluteTarget) {

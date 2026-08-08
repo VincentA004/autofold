@@ -31,7 +31,7 @@ Each loop has a bounded mutable object, a fixed promotion rule, a budget, proven
 
 - **Autofold backend:** campaign, experiment, trial, budget, evaluation, promotion, provenance, and knowledge control plane.
 - **Skills:** research strategy, hypothesis generation, model selection, failure analysis, and reusable procedures.
-- **Proto:** trial-level biological execution substrate for generators, constraints, predictors, optimizers, and artifacts.
+- **Proto:** trial-level substrate for generators, constraints, optimizers, registry-based model discovery, and local or remote tool dispatch.
 - **Model adapters:** pinned, typed access to RFdiffusion3, MPNNs, Boltz, Chai, Protenix, and future models.
 - **Locked evaluator:** produces the authoritative comparable score; it is outside the agent-editable program.
 - **OKF:** campaign-scoped claims, evidence, relationships, and accumulated scientific knowledge.
@@ -64,7 +64,7 @@ The experiment score measures quality-adjusted discovery yield and diversity und
 
 The terminal research client runs the complete control-plane path for the deterministic mock and pinned Proto adapters: campaign creation and activation, frozen experiment contracts, immutable `trial.py` authoring, sandbox-authorized run launch, manifest-verified candidates, locked evaluation and promotion, and campaign-scoped OKF v0.2 concepts. Research state is authoritative; the readable bundle is published under `.autofold/campaigns/<campaign-id>/knowledge`.
 
-The first scientific contract is also implemented: content-addressed Target Artifact v1 JSON plus verified PDB/mmCIF blobs, worker-owned Model Run Artifact v1 evidence, and the deterministic `peptide-panel@1` evaluator. Agent-editable Proto proposes sequences but cannot author trusted evidence. The first production adapter is pinned to Boltz 2.2.1 through proto-tools; a deterministic CPU fixture tests the same provenance path without claiming biological validity. See [docs/scientific-contract-v1.md](docs/scientific-contract-v1.md).
+The first scientific contract is also implemented: content-addressed Target Artifact v1 JSON plus verified PDB/mmCIF blobs, worker-owned model evidence, and the deterministic `peptide-panel@1` evaluator. Agent-editable Proto proposes sequences and validation topology but cannot author trusted evidence. The trusted structure bridge invokes frozen tools through proto-tools; deterministic CPU fixtures test provenance without claiming biological validity. See [docs/scientific-contract-v1.md](docs/scientific-contract-v1.md).
 
 Start with `bun run research:cli -- help`. The current scientific acceptance loop is:
 
@@ -106,12 +106,13 @@ publishes its sources and proposed claims. See
 The complete budgeted generation and consensus-validation route is specified in
 [docs/peptide-pipeline-v2.md](docs/peptide-pipeline-v2.md). Trial Bundle v4 and
 [Model Run Index v2](docs/model-run-index-v2.md) now represent and verify staged
-Boltz/Chai/Protenix evidence. The trusted GPU consensus adapter is the next
-execution increment.
+model evidence. [Dynamic Proto workflow v1](docs/dynamic-proto-workflow-v1.md)
+lets the autoresearch agent compose the graph from the pinned Proto registry;
+each run freezes the resolved topology before trusted execution.
 
 ## Bounded autoresearch v1
 
-The first experiment-RSI controller is implemented through the existing child-session harness. Each iteration creates a biology, ML, or general child agent; injects the frozen contract, target, incumbent program, verified candidates, recent evaluations, campaign OKF concepts, and a compact pinned Proto tool catalog; then grants write access to exactly one mutable draft `trial.py`. The draft is preserved under `.autofold/autoresearch`, statically preflighted without importing it, frozen by content hash, executed, and promoted or rejected by the locked evaluator. A rejected trial does not stop the loop; the next iteration still starts from the current incumbent.
+The first experiment-RSI controller is implemented through the existing child-session harness. Each iteration creates a biology, ML, or general child agent; injects the frozen contract, target, incumbent program, verified candidates, recent evaluations, campaign OKF concepts, and a compact pinned Proto tool catalog; then grants write access to exactly one mutable draft `trial.py`. The agent authors both the native Proto `Program` and a literal `AUTOFOLD_WORKFLOW` validation manifest in that file. The draft is preserved under `.autofold/autoresearch`, statically preflighted without importing it, compiled against the live pinned registry, frozen by content hash, executed, and promoted or rejected by the locked evaluator. A rejected trial does not stop the loop; the next iteration still starts from the current incumbent.
 
 ```text
 bun run research:cli -- autoresearch EXP_ID --session SES_ID --iterations 3

@@ -9,6 +9,7 @@ import { ResearchDomain } from "./domain"
 import { ResearchExecution } from "./execution"
 import { ResearchPrograms } from "./programs"
 import { Research } from "./service"
+import { ResearchWorkflow } from "./workflow"
 
 const MAX_ITERATIONS = 10
 const TERMINAL_RUN_STATES = new Set(["succeeded", "failed", "cancelled"])
@@ -75,6 +76,7 @@ for key in keys:
         "configModel": spec.config_model.__name__,
         "inputFields": list(spec.input_model.model_fields),
         "configFields": list(spec.config_model.model_fields),
+        "usesGpu": spec.uses_gpu,
     })
 print(json.dumps(items))
 `
@@ -137,7 +139,7 @@ export namespace ResearchAutoresearch {
   export interface Dependencies {
     context(experimentId: string): Promise<Context>
     propose(input: { context: Context; iteration: number; sessionId: string; agent: Input["agent"] }): Promise<Proposal>
-    preflight(program: string, draftPath: string): Promise<void>
+    preflight(program: string, draftPath: string, context: Context): Promise<void>
     execute(input: {
       context: Context
       proposal: Proposal
@@ -159,7 +161,7 @@ export namespace ResearchAutoresearch {
           sessionId: input.sessionId,
           agent: input.agent,
         })
-        await dependencies.preflight(proposal.program, proposal.draftPath)
+        await dependencies.preflight(proposal.program, proposal.draftPath, context)
         let outcome: Omit<Iteration, "iteration">
         try {
           outcome = await dependencies.execute({ context, proposal, iteration: index, sessionId: input.sessionId })
@@ -323,6 +325,9 @@ export namespace ResearchAutoresearch {
       `Write the complete revised Python program directly to: ${draftPath}`,
       "Your mutable object is only that file. Do not modify any other file.",
       "The file must define build_program(bundle), return a Proto Program, remain deterministic under bundle seeds, and respect candidateBudget/submissionSize.",
+      "The file must also assign one literal AUTOFOLD_WORKFLOW dictionary in autofold.proto-workflow.v1 format.",
+      "Use exact proto-tools ToolRegistry keys from availableProtoTools. The workflow may change stages, tools, dependencies, conditions, and budgets between iterations.",
+      "Every GPU stage must declare maximumGpuSeconds; the workflow total must stay within contract.budget.gpuHours. Conditional stages must be optional.",
       "The completed Program must expose canonical peptide sequences through program.constructs and each construct's joined_sequences so the trusted adapter can collect them.",
       "Improve the incumbent using verified diagnostics and knowledge. You may compose registered proto_language/proto_tools components.",
       "Literature claims are advisory and retain their proposed/reviewed/contested status; do not treat them as locked experimental verification.",
@@ -359,10 +364,22 @@ export namespace ResearchAutoresearch {
     }
   }
 
-  async function preflight(program: string, relativeDraft: string): Promise<void> {
+  async function preflight(program: string, relativeDraft: string, context: Context): Promise<void> {
     const adapter = await DesignAdapters.get("proto", Instance.directory)
     if (!adapter.available) throw new Error(adapter.reason ?? "Pinned Proto runtime is unavailable")
-    await preflightFile(program, insideWorkspace(relativeDraft), adapter.python)
+    const draftPath = insideWorkspace(relativeDraft)
+    await preflightFile(program, draftPath, adapter.python)
+    const workflow = await ResearchWorkflow.extract(draftPath, adapter.python)
+    if (!workflow) {
+      throw new Error("Proto autoresearch trial must define a literal AUTOFOLD_WORKFLOW manifest")
+    }
+    if (!adapter.proto) throw new Error("Pinned Proto metadata is unavailable")
+    ResearchWorkflow.compile({
+      plan: workflow,
+      tools: await ResearchWorkflow.discover(adapter.python, adapter.proto.root),
+      contract: context.experiment.contract,
+      protoToolsCommit: adapter.proto.toolsCommit,
+    })
   }
 
   export async function preflightFile(program: string, draftPath: string, python = "python3"): Promise<void> {

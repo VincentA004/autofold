@@ -46,6 +46,7 @@ required coverage while allowing only policy-authorized skips. See
 [model-run-index-v2.md](model-run-index-v2.md).
 
 The deterministic Boltz/Chai/Protenix fixture tests the topology without making
-biological claims. The trusted GPU consensus adapter and its budgeted routing
-policy are the next execution-layer increment. Until then, the production
-Boltz-only adapter remains a vertical slice, not the complete peptide pipeline.
+biological claims. Dynamic Proto workflow compilation and the trusted registry
+dispatch bridge are implemented. A real multi-model 4090 acceptance run is
+still required before treating the route as biologically operational. See
+[dynamic-proto-workflow-v1.md](dynamic-proto-workflow-v1.md).

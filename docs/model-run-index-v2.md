@@ -1,9 +1,9 @@
 # Model Run Index v2
 
 Model Run Index v2 is the trusted artifact graph for a staged peptide pipeline.
-Trial Bundle v4 freezes a content-hashed pipeline policy containing ordered
-stages, pinned model identities and versions, and whether each stage may be
-skipped.
+Trial Bundle v4 freezes a content-hashed pipeline policy compiled from the
+agent-authored Proto workflow. It contains DAG dependencies, conditions,
+budgets, selected registry tools, pinned versions, and skip policy.
 
 Every candidate, stage, model, and frozen seed has exactly one index decision:
 
@@ -22,7 +22,7 @@ Model Run Artifact v2 adds:
 
 The verifier rejects undeclared models, missing decisions, illegal skips,
 duplicate identities or artifacts, unfrozen seeds, cross-candidate parents,
-same/later-stage parents, hash changes, metric changes, and candidate predictor
+parents outside declared dependencies, hash changes, metric changes, and candidate predictor
 lists that omit completed evidence.
 
 The deterministic CPU consensus fixture emits the topology:
@@ -33,6 +33,6 @@ Boltz-2 primary screen
   -> Protenix disagreement resolution
 ```
 
-Its synthetic metrics exercise provenance and verification only. The next
-increment replaces that fixture with the trusted GPU consensus adapter and a
-budgeted routing policy.
+Its synthetic metrics exercise provenance and verification only. The trusted
+Proto structure bridge now dispatches tools selected by the compiled graph;
+the next hardware increment is a real multi-model 4090 acceptance run.

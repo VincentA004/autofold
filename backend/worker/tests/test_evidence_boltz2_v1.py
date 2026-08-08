@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import unittest
+import json
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
 
-from autofold_worker.evidence_boltz2_v1 import _structure_cif
+from autofold_worker.evidence_boltz2_v1 import _enrich_v4, _structure_cif
 
 
 class StructureCifCompatibilityTest(unittest.TestCase):
@@ -20,6 +24,85 @@ class StructureCifCompatibilityTest(unittest.TestCase):
                 return "data_legacy\n#\n"
 
         self.assertEqual(_structure_cif(LegacyStructure()), "data_legacy\n#\n")
+
+    def test_executes_a_frozen_proto_registry_graph_and_records_a_conditional_skip(self) -> None:
+        class Model:
+            model_fields = {"seed": object(), "timeout": object()}
+
+            def __init__(self, **values: object) -> None:
+                self.values = values
+
+            def model_dump(self, mode: str) -> dict[str, object]:
+                return self.values
+
+        class Input:
+            def __init__(self, **values: object) -> None:
+                self.values = values
+
+        class Metrics:
+            def model_dump(self, mode: str) -> dict[str, float]:
+                return {"iptm": 0.8, "ptm": 0.7}
+
+        class Structure:
+            structure_cif = "data_dynamic\n#\n"
+            metrics = Metrics()
+
+        spec = SimpleNamespace(
+            category="structure_prediction",
+            config_model=Model,
+            input_model=Input,
+            function=lambda inputs, config: SimpleNamespace(success=True, structures=[Structure()]),
+        )
+
+        class Registry:
+            @staticmethod
+            def get(key: str) -> object:
+                self.assertEqual(key, "boltz2-prediction")
+                return spec
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target.json"
+            target.write_text(json.dumps({"chains": [{"sequence": "ACDEFG"}]}), encoding="utf-8")
+            bundle = {
+                "format": "autofold.trial-bundle.v4",
+                "runId": "run_dynamic",
+                "trialId": "trl_dynamic",
+                "targetArtifactHash": "sha256:" + "a" * 64,
+                "targetArtifactPath": str(target),
+                "evidenceAdapter": {"sourceHash": "sha256:" + "b" * 64},
+                "proto": {"languageCommit": "c" * 40, "toolsCommit": "d" * 40},
+                "programHash": "sha256:" + "e" * 64,
+                "pipelineHash": "sha256:" + "f" * 64,
+                "modality": "short_peptide",
+                "seeds": [7],
+                "pipeline": {
+                    "stages": [
+                        {
+                            "id": "primary",
+                            "models": [{"id": "boltz2-prediction", "toolKey": "boltz2-prediction", "version": "d" * 40}],
+                            "dependsOn": [],
+                            "required": True,
+                            "allowSkip": False,
+                            "budget": {"maximumGpuSeconds": 10},
+                        },
+                        {
+                            "id": "resolve",
+                            "models": [{"id": "boltz2-prediction", "toolKey": "boltz2-prediction", "version": "d" * 40}],
+                            "dependsOn": ["primary"],
+                            "condition": {"source": "primary", "metric": "iptm", "operator": "gt", "value": 0.9},
+                            "required": False,
+                            "allowSkip": True,
+                            "budget": {"maximumGpuSeconds": 10},
+                        },
+                    ]
+                },
+            }
+            candidates = {"format": "autofold.candidate-set.v1", "candidates": [{"id": "cand_one", "sequence": "ACDEFGHIK"}]}
+            enriched = _enrich_v4(bundle, candidates, root / "output", Registry)
+            index = json.loads((root / "output" / "model-runs" / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual([entry["status"] for entry in index["entries"]], ["completed", "skipped"])
+            self.assertEqual(len(enriched["candidates"][0]["evidence"]["predictors"]), 1)
 
 
 if __name__ == "__main__":

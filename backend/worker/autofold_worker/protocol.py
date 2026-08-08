@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import ast
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,11 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(pipeline, dict) or not isinstance(pipeline.get("stages"), list) or not pipeline["stages"]:
             raise ProtocolError("Scientific bundle v4 requires a pipeline policy")
         require_string(pipeline, "id")
+        if "sourceHash" in pipeline:
+            require_string(pipeline, "sourceHash", "sha256:")
+        if "protoToolsCommit" in pipeline:
+            if require_string(pipeline, "protoToolsCommit") != value["proto"]["toolsCommit"]:
+                raise ProtocolError("Pipeline policy uses another proto-tools commit")
         stage_ids: set[str] = set()
         for stage in pipeline["stages"]:
             if not isinstance(stage, dict):
@@ -87,12 +93,61 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
                 raise ProtocolError("Pipeline model IDs contain unsupported characters")
             for model in models:
                 require_string(model, "version")
+                if "toolKey" in model:
+                    tool_key = require_string(model, "toolKey")
+                    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", tool_key):
+                        raise ProtocolError("Pipeline tool keys contain unsupported characters")
+                    if pipeline.get("protoToolsCommit") and model["version"] != pipeline["protoToolsCommit"]:
+                        raise ProtocolError("Resolved Proto tool version does not match the frozen registry commit")
             if len(set(model_ids)) != len(model_ids):
                 raise ProtocolError("Pipeline stage model IDs must be unique")
             if not isinstance(stage.get("required"), bool) or not isinstance(stage.get("allowSkip"), bool):
                 raise ProtocolError("Pipeline stage routing flags must be booleans")
             if stage["required"] and stage["allowSkip"]:
                 raise ProtocolError("Required pipeline stages cannot allow skips")
+        dependencies: dict[str, list[str]] = {}
+        for stage in pipeline["stages"]:
+            depends_on = stage.get("dependsOn", [])
+            if not isinstance(depends_on, list) or not all(isinstance(item, str) for item in depends_on):
+                raise ProtocolError("Pipeline stage dependencies must be string arrays")
+            if len(set(depends_on)) != len(depends_on) or any(item not in stage_ids or item == stage["id"] for item in depends_on):
+                raise ProtocolError("Pipeline stage dependencies are invalid")
+            dependencies[stage["id"]] = depends_on
+            condition = stage.get("condition")
+            if condition is not None:
+                if not isinstance(condition, dict) or condition.get("source") not in depends_on:
+                    raise ProtocolError("Pipeline condition must reference a direct dependency")
+                if condition.get("operator") not in {"lt", "lte", "gt", "gte"} or not isinstance(condition.get("value"), (int, float)):
+                    raise ProtocolError("Pipeline condition is invalid")
+                require_string(condition, "metric")
+            budget = stage.get("budget")
+            if budget is not None and not isinstance(budget, dict):
+                raise ProtocolError("Pipeline stage budget must be an object")
+            if budget is not None:
+                candidates = budget.get("maximumCandidates")
+                gpu_seconds = budget.get("maximumGpuSeconds")
+                if candidates is not None and (not isinstance(candidates, int) or candidates <= 0):
+                    raise ProtocolError("Pipeline candidate budget must be positive")
+                if gpu_seconds is not None and (not isinstance(gpu_seconds, (int, float)) or gpu_seconds <= 0):
+                    raise ProtocolError("Pipeline GPU budget must be positive")
+        visiting: set[str] = set()
+        visited: set[str] = set()
+        def visit(stage_id: str) -> None:
+            if stage_id in visiting:
+                raise ProtocolError("Pipeline stage dependencies must be acyclic")
+            if stage_id in visited:
+                return
+            visiting.add(stage_id)
+            for dependency in dependencies[stage_id]:
+                visit(dependency)
+            visiting.remove(stage_id)
+            visited.add(stage_id)
+        for stage_id in stage_ids:
+            visit(stage_id)
+        positions = {stage["id"]: index for index, stage in enumerate(pipeline["stages"])}
+        for stage in pipeline["stages"]:
+            if any(positions[dependency] >= positions[stage["id"]] for dependency in dependencies[stage["id"]]):
+                raise ProtocolError("Frozen pipeline stages must be topologically ordered")
         require_string(value, "pipelineHash", "sha256:")
         canonical = json.dumps(pipeline, sort_keys=True, separators=(",", ":"))
         pipeline_hash = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -131,3 +186,35 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(value.get(key), int) or value[key] <= 0:
             raise ProtocolError(f"{key} must be a positive integer")
     return value
+
+
+def validate_workflow_source(path: Path, bundle: dict[str, Any]) -> None:
+    """Bind a compiled v4 policy to the literal manifest in immutable trial.py."""
+    pipeline = bundle.get("pipeline", {})
+    expected = pipeline.get("sourceHash")
+    if bundle.get("format") != "autofold.trial-bundle.v4" or not expected:
+        return
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    assignments = []
+    for node in tree.body:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AnnAssign) else []
+        if any(isinstance(target, ast.Name) and target.id == "AUTOFOLD_WORKFLOW" for target in targets):
+            assignments.append(node)
+    if len(assignments) != 1:
+        raise ProtocolError("Compiled workflow requires exactly one literal AUTOFOLD_WORKFLOW")
+    try:
+        workflow = ast.literal_eval(assignments[0].value)
+    except (ValueError, TypeError) as error:
+        raise ProtocolError("AUTOFOLD_WORKFLOW must be a literal") from error
+    if not isinstance(workflow, dict) or not isinstance(workflow.get("stages"), list):
+        raise ProtocolError("AUTOFOLD_WORKFLOW must be an object with stages")
+    for stage in workflow["stages"]:
+        if not isinstance(stage, dict):
+            raise ProtocolError("AUTOFOLD_WORKFLOW stages must be objects")
+        stage.setdefault("selection", "all")
+        stage.setdefault("dependsOn", [])
+        stage.setdefault("optional", False)
+    canonical = json.dumps(workflow, sort_keys=True, separators=(",", ":"))
+    actual = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if actual != expected:
+        raise ProtocolError("Compiled pipeline does not match AUTOFOLD_WORKFLOW")

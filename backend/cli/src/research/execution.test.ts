@@ -523,8 +523,8 @@ describe("research execution worker", () => {
         id: "peptide-consensus-fixture-v1",
         stages: [
           { id: "primary_screen", models: [{ id: "boltz2", version: "2.2.1" }], required: true, allowSkip: false },
-          { id: "independent_validation", models: [{ id: "chai1", version: "0.6.1" }], required: true, allowSkip: false },
-          { id: "disagreement_resolution", models: [{ id: "protenix", version: "0.5.0" }], required: true, allowSkip: false },
+          { id: "independent_validation", models: [{ id: "chai1", version: "0.6.1" }], dependsOn: ["primary_screen"], required: true, allowSkip: false },
+          { id: "disagreement_resolution", models: [{ id: "protenix", version: "0.5.0" }], dependsOn: ["independent_validation"], required: true, allowSkip: false },
         ],
       })
       const bundle = ExecutionProtocol.TrialBundleV4.parse({

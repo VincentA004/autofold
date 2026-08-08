@@ -10,7 +10,8 @@ contract, evidence adapter, evaluator, seeds, and budget remain frozen.
 fresh verified experiment context
 → child biology/ML/task session
 → one scoped draft trial.py
-→ static source preflight
+→ static source and workflow-manifest preflight
+→ compile against the pinned Proto registry
 → immutable program hash and trial
 → sandboxed scientific run
 → trusted model evidence
@@ -25,10 +26,12 @@ rules deny all mutations except the assigned draft. Child sessions and draft
 files remain available for audit.
 
 Preflight parses the Python AST without importing or executing the proposal. It
-requires `build_program(bundle)`, requires the source to derive work from both
+requires `build_program(bundle)` and a literal `AUTOFOLD_WORKFLOW`, requires the source to derive work from both
 `candidateBudget` and `submissionSize`, permits only a small standard-library
 and Proto import set, blocks obvious dynamic execution and direct file calls, and
-rejects attempts to author trusted `evidence` or `generation` fields.
+rejects attempts to author trusted `evidence` or `generation` fields. The
+workflow compiler then resolves registry tools, DAG dependencies, conditions,
+and budgets before a trial is recorded.
 
 ## Command
 
@@ -49,11 +52,11 @@ as a structured iteration result.
 - The local HTTP request remains open while the bounded loop runs; completed
   trials and child sessions make a stopped client resumable, but the controller
   itself is not yet a durable background job.
-- Production Boltz execution still requires the proto-tools CUDA environment
-  and model weights.
+- Production structure-model execution still requires each selected
+  proto-tools CUDA environment and model weights.
 - Proto generation-tool calls are pinned indirectly by the immutable program
   hash. A future execution-receipt contract should preserve their native
   generation artifacts as deeply as predictor model-run artifacts are preserved
   today.
-- Capability/skill refinement remains a separate, later loop. This controller
-  changes experiment programs only.
+- Capability/skill refinement remains a separate loop. This controller consumes
+  workflow knowledge and changes experiment programs and validation manifests.

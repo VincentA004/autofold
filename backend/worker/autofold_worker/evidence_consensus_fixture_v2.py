@@ -71,8 +71,9 @@ def enrich(bundle: dict[str, Any], candidate_set: dict[str, Any], output: Path) 
         predictors: list[dict[str, str]] = []
         confidence: list[tuple[float, float]] = []
         for seed in bundle["seeds"]:
-            parents: list[str] = []
+            stage_artifacts: dict[str, list[str]] = {}
             for stage in bundle["pipeline"]["stages"]:
+                parents = [artifact for dependency in stage.get("dependsOn", []) for artifact in stage_artifacts[dependency]]
                 stage_hashes: list[str] = []
                 for model in stage["models"]:
                     model_id = model["id"]
@@ -135,7 +136,7 @@ def enrich(bundle: dict[str, Any], candidate_set: dict[str, Any], output: Path) 
                     )
                     stage_hashes.append(artifact_hash)
                     predictors.append({"model": model_id, "version": version, "artifactHash": artifact_hash})
-                parents = stage_hashes
+                stage_artifacts[stage["id"]] = stage_hashes
 
         solubility, aggregation, synthesis = _sequence_metrics(sequence)
         enriched.append(

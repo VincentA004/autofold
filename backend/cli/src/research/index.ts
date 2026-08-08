@@ -1,6 +1,7 @@
 export { ResearchDomain } from "./domain"
 export { ResearchArtifacts } from "./artifacts"
 export { ExecutionProtocol } from "./execution-protocol"
+export { ResearchWorkflow } from "./workflow"
 export { DesignAdapters } from "./adapters"
 export { ResearchExecution } from "./execution"
 export { ResearchAutoresearch } from "./autoresearch"
