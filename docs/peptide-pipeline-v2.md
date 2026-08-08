@@ -13,6 +13,7 @@ campaign literature + prior run knowledge
      - RFdiffusion3 -> ProteinMPNN/SolubleMPNN
      - BindCraft/FreeBindCraft
      - BoltzGen/direct peptide generation
+     - PXDesign diffusion binder generation
   -> deterministic sequence and geometry gates
   -> Boltz-2 primary cofold screen
   -> Chai-1 independent validation for survivors
@@ -58,6 +59,15 @@ each candidate before validation begins.
 
 The deterministic Boltz/Chai/Protenix fixture tests the topology without making
 biological claims. Dynamic Proto workflow compilation and the trusted registry
-dispatch bridge are implemented. A bounded 4090 run has verified real model
-dispatch and top-k routing, but it is not biological calibration. See
+dispatch bridge are implemented. Bounded 4090 runs have verified the integrated
+RFdiffusion3/ProteinMPNN generation artifact path, Chai with ESM embeddings,
+Protenix v2, and real one-design executions of both BoltzGen and PXDesign. These
+are execution acceptance tests, not biological calibration. See
 [dynamic-proto-workflow-v1.md](dynamic-proto-workflow-v1.md).
+
+Current developability fields are deliberately provisional sequence heuristics.
+Their replacement boundary is tool-backed structural measurements (including
+SAP, SASA, interface, and geometry metrics), followed by versioned observations
+from binding, solubility, aggregation, protease/serum stability, cytotoxicity,
+and hemolysis assays. Computed predictions and physical assay observations must
+remain separate evidence types in the campaign knowledge graph.

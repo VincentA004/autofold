@@ -107,10 +107,20 @@ budget allocation. Successful trajectories can refine those skills and the
 next manifest; the evidence bridge and evaluator remain trusted runtime
 components.
 
-The installed bridge accepts Proto `structure_prediction` tools with
-the common typed structure interface. A real multi-model 4090 acceptance run is
-complete for Boltz, Chai, and Protenix Tiny; full-model scientific calibration is
-still required.
+The installed bridge accepts Proto `structure_prediction` tools with the common
+typed structure interface. Real 4090 acceptance runs now cover Boltz, Chai with
+ESM embeddings enabled, and Protenix v2. These prove execution and artifact
+integrity, not biological calibration. The pinned runtime snapshot and repaired
+environment constraints are recorded in
+[4090 execution acceptance](gpu-acceptance-2026-08-08.md).
+
+Autofold also registers `boltzgen-binder` and `pxdesign-binder` as optional Proto
+generators when their isolated CLIs and model caches are configured. This keeps
+them as competing, agent-selectable generation lanes rather than hard-coding a
+single peptide pipeline. The PXDesign adapter forwards the frozen Proto seed.
+BoltzGen's current upstream CLI exposes no seed option, so its artifact metadata
+records `seedControl: upstream_cli_unavailable`; promotion experiments should use
+replicate distributions until that upstream boundary is patched.
 
 The bounded hardware probe runs two primary predictions and routes one survivor
 through Chai and Protenix:
@@ -118,5 +128,16 @@ through Chai and Protenix:
 ```text
 PYTHONPATH=backend/worker python backend/worker/run_adaptive_acceptance.py \
   --proto-root /path/to/proto-language \
+  --output /new/output/directory \
+  --chai-esm \
+  --protenix-model protenix-v2
+```
+
+The complete generation-to-evidence artifact path has a separate bounded probe:
+
+```text
+PYTHONPATH=backend/worker python backend/worker/run_generation_acceptance.py \
+  --proto-root /path/to/proto-language \
+  --target-structure /path/to/target.pdb \
   --output /new/output/directory
 ```

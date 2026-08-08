@@ -52,7 +52,10 @@ target preparation
 → OKF evidence update
 ```
 
-BoltzGen becomes a competing generation lane after the initial evaluator is stable, especially for short, cyclic, disulfide-rich, and modified peptides. Predictor disagreement remains visible and is penalized rather than averaged away.
+BoltzGen and PXDesign are optional, competing Proto generation lanes alongside
+RFdiffusion3/MPNN. The agent can select and compare them under a frozen budget;
+predictor disagreement remains visible and is penalized rather than averaged
+away.
 
 ## Core invariant
 

@@ -83,7 +83,8 @@ contract. The deterministic fixture adapter exercises the identical trust and
 artifact path in CPU-only tests; its values and structures are explicitly
 synthetic.
 
-Actual Boltz inference requires the isolated proto-tools GPU environment, model
-weights, and CUDA compute. The local acceptance suite does not pretend a CPU
-fixture is biological validation. Independent Chai/Protenix validation and
-experimental assay ingestion remain later contract versions.
+Actual model inference requires isolated GPU environments, pinned weights, and
+CUDA compute. The local acceptance suite does not pretend a CPU fixture is
+biological validation. Boltz, Chai with ESM enabled, and Protenix v2 have passed
+runtime acceptance on the 4090; experimental assay ingestion and biological
+calibration remain later contract versions.

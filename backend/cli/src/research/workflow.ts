@@ -1,3 +1,4 @@
+import path from "node:path"
 import z from "zod"
 import { ResearchDomain } from "./domain"
 import { ExecutionProtocol } from "./execution-protocol"
@@ -284,7 +285,11 @@ print(json.dumps([
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...Bun.env, PYTHONDONTWRITEBYTECODE: "1" },
+      env: {
+        ...Bun.env,
+        PYTHONDONTWRITEBYTECODE: "1",
+        PYTHONPATH: [path.resolve(import.meta.dir, "../../../worker"), Bun.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+      },
     })
     const [code, stdout, stderr] = await Promise.all([
       process.exited,
@@ -299,6 +304,11 @@ print(json.dumps([
     const source = String.raw`
 import json
 from proto_language.generator import GeneratorRegistry
+try:
+    import autofold_worker.proto_generators  # registers optional external generator lanes
+except ModuleNotFoundError as error:
+    if error.name != "autofold_worker":
+        raise
 print(json.dumps([
     {"key": spec.key, "usesGpu": spec.uses_gpu, "toolsCalled": spec.tools_called}
     for spec in GeneratorRegistry.list_all()
@@ -309,7 +319,11 @@ print(json.dumps([
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...Bun.env, PYTHONDONTWRITEBYTECODE: "1" },
+      env: {
+        ...Bun.env,
+        PYTHONDONTWRITEBYTECODE: "1",
+        PYTHONPATH: [path.resolve(import.meta.dir, "../../../worker"), Bun.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+      },
     })
     const [code, stdout, stderr] = await Promise.all([
       process.exited,

@@ -170,10 +170,13 @@ describe("dynamic Proto workflow compiler", () => {
     await ResearchWorkflow.validateConfigs(plan!, protoPython, protoRoot)
     const languageCommit = (await Bun.$`git -C ${protoRoot} rev-parse HEAD`.text()).trim()
     const toolsCommit = (await Bun.$`git -C ${path.join(protoRoot, "proto-tools")} rev-parse HEAD`.text()).trim()
+    const discoveredGenerators = await ResearchWorkflow.discoverGenerators(protoPython, protoRoot)
+    expect(discoveredGenerators.map((generator) => generator.key)).toContain("boltzgen-binder")
+    expect(discoveredGenerators.map((generator) => generator.key)).toContain("pxdesign-binder")
     const pipeline = ResearchWorkflow.compile({
       plan: plan!,
       tools: await ResearchWorkflow.discover(protoPython, protoRoot),
-      generators: await ResearchWorkflow.discoverGenerators(protoPython, protoRoot),
+      generators: discoveredGenerators,
       contract: {
         budget: { maximumCandidates: 16, gpuHours: 2, wallTimeMinutes: 180 },
         evaluator: { submissionSize: 2 },

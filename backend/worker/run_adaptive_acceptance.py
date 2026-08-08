@@ -30,6 +30,17 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--target-sequence", default="ACDEFGHIKLMNPQRSTVWY")
     parser.add_argument("--candidate", action="append")
+    parser.add_argument(
+        "--chai-esm",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable Chai-1 ESM embeddings (requires enough host RAM for ESM2-3B)",
+    )
+    parser.add_argument(
+        "--protenix-model",
+        default="protenix_tiny_default_v0.5.0",
+        help="Pinned Protenix model name, for example protenix-v2",
+    )
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
 
@@ -63,7 +74,7 @@ def main() -> int:
             },
             {
                 "id": "independent",
-                "models": [model("chai1-prediction", {"use_msa": False, "use_esm_embeddings": False, "num_trunk_recycles": 1, "num_diffn_timesteps": 20, "num_diffn_samples": 1, "num_trunk_samples": 1})],
+                "models": [model("chai1-prediction", {"use_msa": False, "use_esm_embeddings": args.chai_esm, "low_memory": True, "num_trunk_recycles": 1, "num_diffn_timesteps": 20, "num_diffn_samples": 1, "num_trunk_samples": 1})],
                 "dependsOn": ["primary"],
                 "candidateRouting": {"source": "primary", "metric": "confidence_score", "direction": "maximize", "maximumCandidates": 1},
                 "budget": {"maximumCandidates": 1, "maximumGpuSeconds": 900},
@@ -73,7 +84,7 @@ def main() -> int:
             },
             {
                 "id": "resolution",
-                "models": [model("protenix-prediction", {"use_msa": False, "model_name": "protenix_tiny_default_v0.5.0", "num_diffusion_samples": 1, "num_diffusion_steps": 5, "num_pairformer_cycles": 2})],
+                "models": [model("protenix-prediction", {"use_msa": False, "model_name": args.protenix_model, "num_diffusion_samples": 1, "num_diffusion_steps": 5, "num_pairformer_cycles": 2})],
                 "dependsOn": ["independent"],
                 "candidateRouting": {"source": "independent", "metric": "confidence_score", "direction": "maximize", "maximumCandidates": 1},
                 "budget": {"maximumCandidates": 1, "maximumGpuSeconds": 900},

@@ -36,4 +36,6 @@ Boltz-2 primary screen
 
 Its synthetic metrics exercise provenance and verification only. The trusted
 Proto structure bridge now dispatches tools selected by the compiled graph;
-the next hardware increment is a real multi-model 4090 acceptance run.
+real multi-model 4090 acceptance has completed for Boltz, Chai with ESM enabled,
+and Protenix v2. Scientific calibration against experimental observations remains
+separate from this runtime acceptance.
