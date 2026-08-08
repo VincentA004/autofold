@@ -106,7 +106,10 @@ def main() -> int:
             for index, sequence in enumerate(sequences[:2], start=1)
         ],
     }
+    (args.output / "bundle.json").write_bytes(canonical(bundle))
+    (args.output / "candidates.input.json").write_bytes(canonical(candidates))
     enriched = _enrich_v4(bundle, candidates, args.output, ToolRegistry)
+    (args.output / "candidates.enriched.json").write_bytes(canonical(enriched))
     index = json.loads((args.output / "model-runs" / "index.json").read_text(encoding="utf-8"))
     summary = {
         "candidates": len(enriched["candidates"]),
@@ -115,6 +118,7 @@ def main() -> int:
         "models": sorted({entry["modelId"] for entry in index["entries"] if entry["status"] == "completed"}),
         "output": str(args.output),
     }
+    (args.output / "summary.json").write_bytes(canonical(summary))
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 
