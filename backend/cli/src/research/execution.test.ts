@@ -143,6 +143,43 @@ describe("research execution worker", () => {
     }
   })
 
+  test("resolves portable bundle resources beside bundle.json", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "autofold-portable-bundle-"))
+    try {
+      const programPath = path.join(root, "trial.py")
+      await fs.writeFile(programPath, "# portable mock trial\n")
+      const bundle = ExecutionProtocol.TrialBundle.parse({
+        format: "autofold.trial-bundle.v2",
+        runId: "run_portable",
+        trialId: "trl_portable",
+        contractHash: `sha256:${"a".repeat(64)}`,
+        targetArtifactHash: `sha256:${"c".repeat(64)}`,
+        designAdapter: "mock",
+        programPath: "trial.py",
+        programHash: await hashFile(programPath),
+        modality: "short_peptide",
+        evaluator: {
+          id: "mock-peptide-panel",
+          version: "1",
+          sourceHash: await hashFile(evaluatorSource),
+          direction: "minimize",
+        },
+        seeds: [7],
+        candidateBudget: 4,
+        submissionSize: 2,
+      })
+      const bundlePath = path.join(root, "bundle.json")
+      const output = path.join(root, "output")
+      await fs.writeFile(bundlePath, JSON.stringify(bundle))
+      expect((await runWorker(bundlePath, output)).exitCode).toBe(0)
+      const manifest = ExecutionProtocol.RunManifest.parse(await Bun.file(path.join(output, "manifest.json")).json())
+      expect(manifest.files.bundle).toBe(await hashFile(bundlePath))
+      expect(manifest.files.program).toBe(await hashFile(programPath))
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
   test("refuses to run when the evaluator source is not frozen by the contract", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "autofold-worker-"))
     try {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -86,7 +87,9 @@ class ProtoDesignAdapter:
         proto = bundle.get("proto")
         if not isinstance(proto, dict):
             raise ProtocolError("Proto adapter requires pinned Proto runtime metadata")
-        root = Path(proto["root"]).resolve()
+        # Checkout location is host-specific runtime configuration. Scientific
+        # identity remains frozen by the two commits below.
+        root = Path(os.environ.get("AUTOFOLD_PROTO_ROOT", proto["root"])).resolve()
         language_commit = _commit(root)
         tools_commit = _commit(root / "proto-tools")
         if language_commit != proto["languageCommit"]:

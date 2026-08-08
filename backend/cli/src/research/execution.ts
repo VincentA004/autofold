@@ -9,6 +9,7 @@ import { ResearchArtifacts } from "./artifacts"
 import { ExecutionProtocol } from "./execution-protocol"
 import { ResearchDomain } from "./domain"
 import { DesignAdapters } from "./adapters"
+import { ResearchRemoteCompute } from "./remote-compute"
 
 const workerRoot = path.resolve(import.meta.dir, "../../../worker")
 const workerScript = path.join(workerRoot, "run_worker.py")
@@ -37,6 +38,10 @@ function inside(root: string, relative: string): string {
     throw new Error(`Research run path escapes the project: ${relative}`)
   }
   return target
+}
+
+function bundleResource(workspace: string, bundlePath: string, resource: string): string {
+  return path.isAbsolute(resource) ? inside(workspace, resource) : inside(path.dirname(bundlePath), resource)
 }
 
 async function verifyModelRuns(
@@ -242,13 +247,14 @@ export namespace ResearchExecution {
     // Authorization is a precondition, not a run outcome. Check it before
     // beginRun mutates the proposed trial into a running state so a denied
     // launch can be retried after trust or sandbox remediation.
+    const runId = `run_${crypto.randomUUID().replaceAll("-", "")}`
+    const compute = ResearchRemoteCompute.profile(runId, !!adapter.proto)
     await ExecutionAuthority.require({
       projectID: projectId,
       sessionID: input.sessionId,
-      capability: "local_job",
+      capability: compute.kind === "local" ? "local_job" : "remote_job",
     })
 
-    const runId = `run_${crypto.randomUUID().replaceAll("-", "")}`
     const root = path.posix.join(".autofold", "runs", runId)
     const bundlePath = path.posix.join(root, "bundle.json")
     const programPath = path.posix.join(root, "trial.py")
@@ -264,8 +270,8 @@ export namespace ResearchExecution {
       trialId: context.trial.id,
       contractHash: context.experiment.contractHash,
       targetArtifactHash: context.experiment.contract.targetArtifactHash,
-      targetArtifactPath: targetPath ? inside(Instance.directory, targetPath) : undefined,
-      targetStructurePath: targetStructurePath ? inside(Instance.directory, targetStructurePath) : undefined,
+      targetArtifactPath: targetPath ? path.posix.basename(targetPath) : undefined,
+      targetStructurePath: targetStructurePath ? path.posix.basename(targetStructurePath) : undefined,
       evidenceAdapter: installed.evidenceAdapter
         ? {
             id: installed.evidenceAdapter.id,
@@ -274,7 +280,7 @@ export namespace ResearchExecution {
           }
         : undefined,
       designAdapter: context.trial.designAdapter,
-      programPath: inside(Instance.directory, programPath),
+      programPath: path.posix.basename(programPath),
       programHash: context.trial.programHash,
       modality: context.experiment.contract.modality,
       evaluator: {
@@ -312,32 +318,27 @@ export namespace ResearchExecution {
         await fs.copyFile(inside(Instance.directory, storedTarget.structureArtifactPath), absoluteTargetStructure)
       }
       await writeJSON(absoluteBundle, bundle)
-      const command = [
-        ComputeJobs.quote(adapter.python),
-        ComputeJobs.quote(workerScript),
-        "--bundle",
-        ComputeJobs.quote(absoluteBundle),
-        "--output",
-        ComputeJobs.quote(absoluteOutput),
-        "--evaluator-source",
-        ComputeJobs.quote(installed.sourcePath),
-        ...(installed.evidenceAdapter
-          ? ["--evidence-adapter-source", ComputeJobs.quote(installed.evidenceAdapter.sourcePath)]
-          : []),
-      ].join(" ")
+      if (compute.kind === "ssh") await ResearchRemoteCompute.stage(compute, path.dirname(absoluteBundle), workerRoot)
+      const launch = ResearchRemoteCompute.command(compute, {
+        python: adapter.python,
+        bundle: absoluteBundle,
+        output: absoluteOutput,
+        evaluator: installed.sourcePath,
+        evidence: installed.evidenceAdapter?.sourcePath,
+      })
       const job = await ComputeJobs.start({
         sessionID: input.sessionId,
         name: `Autofold trial ${context.trial.id}`,
-        command,
-        cwd: ".",
-        target: { kind: "local" },
+        command: launch.command,
+        cwd: launch.cwd,
+        target: launch.target,
         resources: {
           cpus: 1,
           gpus: installed.evidenceAdapter ? 1 : 0,
           time_minutes: Math.max(1, context.experiment.contract.budget.wallTimeMinutes),
         },
         artifacts: [path.posix.join(outputPath, "**", "*")],
-      })
+      }, { hosts: launch.hosts })
       const running = await Research.attachRunJob(projectId, run.id, job.id)
       scheduleFinalization(
         projectId,
@@ -407,19 +408,19 @@ export namespace ResearchExecution {
     }
     const expectedFiles: Record<string, string> = {
       bundle: await fileHash(bundlePath),
-      program: await fileHash(inside(workspace, bundle.programPath)),
+      program: await fileHash(bundleResource(workspace, bundlePath, bundle.programPath)),
       candidates: await fileHash(candidatesPath),
       result: await fileHash(resultPath),
     }
     if (bundle.format !== "autofold.trial-bundle.v1" && bundle.targetArtifactPath) {
-      expectedFiles.target = await fileHash(inside(workspace, bundle.targetArtifactPath))
+      expectedFiles.target = await fileHash(bundleResource(workspace, bundlePath, bundle.targetArtifactPath))
       if (expectedFiles.target !== bundle.targetArtifactHash) {
         throw new Error(`Run ${run.id} target artifact no longer matches its frozen hash`)
       }
     }
     if (bundle.format === "autofold.trial-bundle.v3") {
       if (bundle.targetStructurePath) {
-        expectedFiles.target_structure = await fileHash(inside(workspace, bundle.targetStructurePath))
+        expectedFiles.target_structure = await fileHash(bundleResource(workspace, bundlePath, bundle.targetStructurePath))
       }
       expectedFiles.model_runs = await fileHash(path.join(output, "model-runs", "index.json"))
       if (manifest.evidenceAdapterHash !== bundle.evidenceAdapter.sourceHash) {
@@ -498,8 +499,9 @@ export namespace ResearchExecution {
     const context = await Research.getTrialContext(projectId, run.trialId)
     const bundlePath = inside(workspace, run.bundlePath)
     const output = inside(workspace, run.outputPath)
+    await ResearchRemoteCompute.retrieve(job, output)
     const bundle = ExecutionProtocol.TrialBundle.parse(await Bun.file(bundlePath).json())
-    const programPath = inside(workspace, bundle.programPath)
+    const programPath = bundleResource(workspace, bundlePath, bundle.programPath)
     const candidatesPath = path.join(output, "candidates.json")
     const resultPath = path.join(output, "result.json")
     const candidates = ExecutionProtocol.CandidateSet.parse(await Bun.file(candidatesPath).json())
@@ -542,7 +544,7 @@ export namespace ResearchExecution {
       result: await fileHash(resultPath),
     }
     if (bundle.format !== "autofold.trial-bundle.v1" && bundle.targetArtifactPath) {
-      expectedFiles.target = await fileHash(inside(workspace, bundle.targetArtifactPath))
+      expectedFiles.target = await fileHash(bundleResource(workspace, bundlePath, bundle.targetArtifactPath))
       if (expectedFiles.target !== bundle.targetArtifactHash) {
         throw new Error(`Run ${run.id} target artifact no longer matches its frozen hash`)
       }
@@ -558,7 +560,7 @@ export namespace ResearchExecution {
         throw new Error(`Run ${run.id} evidence adapter does not match its frozen experiment`)
       }
       if (bundle.targetStructurePath) {
-        expectedFiles.target_structure = await fileHash(inside(workspace, bundle.targetStructurePath))
+        expectedFiles.target_structure = await fileHash(bundleResource(workspace, bundlePath, bundle.targetStructurePath))
       }
       expectedFiles.model_runs = await fileHash(path.join(output, "model-runs", "index.json"))
     }

@@ -84,6 +84,12 @@ bun run research:cli -- knowledge CMP_ID
 
 The trial fixture proposes deterministic sequences only. Production runs use the worker-owned Boltz adapter; the test suite substitutes a source-hashed deterministic evidence adapter so it can verify the full artifact and evaluator path without GPU inference.
 
+Scientific runs may also cross the first remote-compute boundary: Autofold
+stages the byte-identical frozen bundle and source-hashed worker to an explicit
+SSH GPU profile, retrieves the resulting artifact tree, and verifies it locally
+before recording any result or knowledge. Local execution remains the default.
+See [docs/remote-compute-v1.md](docs/remote-compute-v1.md).
+
 ## Bounded autoresearch v1
 
 The first experiment-RSI controller is implemented through the existing child-session harness. Each iteration creates a biology, ML, or general child agent; injects the frozen contract, target, incumbent program, verified candidates, recent evaluations, campaign OKF concepts, and a compact pinned Proto tool catalog; then grants write access to exactly one mutable draft `trial.py`. The draft is preserved under `.autofold/autoresearch`, statically preflighted without importing it, frozen by content hash, executed, and promoted or rejected by the locked evaluator. A rejected trial does not stop the loop; the next iteration still starts from the current incumbent.

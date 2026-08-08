@@ -54,23 +54,39 @@ def run(
 ) -> None:
     started_at = timestamp()
     bundle = validate_bundle(read_json(bundle_path))
+    # Bundle resources are portable: relative paths resolve beside bundle.json.
+    # Keep the serialized bundle unchanged so its manifest hash is identical on
+    # the authoring machine and a remote compute host.
+    bundle_root = bundle_path.resolve().parent
+    runtime_bundle = dict(bundle)
+    for key in ("programPath", "targetArtifactPath", "targetStructurePath"):
+        value = runtime_bundle.get(key)
+        if isinstance(value, str) and not Path(value).is_absolute():
+            resolved = (bundle_root / value).resolve()
+            try:
+                resolved.relative_to(bundle_root)
+            except ValueError as error:
+                raise ProtocolError(f"{key} escapes the portable bundle directory") from error
+            runtime_bundle[key] = str(resolved)
     evaluator_hash = sha256(evaluator_source)
     expected_hash = bundle["evaluator"]["sourceHash"]
     if evaluator_hash != expected_hash:
         raise ProtocolError(f"Evaluator hash mismatch: expected {expected_hash}, received {evaluator_hash}")
     evaluate = load_evaluator(evaluator_source)
-    program_path = Path(bundle["programPath"])
+    program_path = Path(runtime_bundle["programPath"])
     program_hash = sha256(program_path)
     if program_hash != bundle["programHash"]:
         raise ProtocolError(f"Program hash mismatch: expected {bundle['programHash']}, received {program_hash}")
-    target_path = Path(bundle["targetArtifactPath"]) if bundle.get("targetArtifactPath") else None
+    target_path = Path(runtime_bundle["targetArtifactPath"]) if runtime_bundle.get("targetArtifactPath") else None
     if target_path is not None:
         target_hash = sha256(target_path)
         if target_hash != bundle["targetArtifactHash"]:
             raise ProtocolError(
                 f"Target artifact hash mismatch: expected {bundle['targetArtifactHash']}, received {target_hash}"
             )
-    target_structure_path = Path(bundle["targetStructurePath"]) if bundle.get("targetStructurePath") else None
+    target_structure_path = (
+        Path(runtime_bundle["targetStructurePath"]) if runtime_bundle.get("targetStructurePath") else None
+    )
     if target_structure_path is not None:
         target_structure_hash = sha256(target_structure_path)
         target = read_json(target_path) if target_path is not None else {}
@@ -99,11 +115,11 @@ def run(
     manifest_path = output / "manifest.json"
 
     adapter = MockDesignAdapter() if bundle["designAdapter"] == "mock" else ProtoDesignAdapter()
-    candidate_set = adapter.generate(bundle)
+    candidate_set = adapter.generate(runtime_bundle)
     if enrich is not None:
-        candidate_set = enrich(bundle, candidate_set, output)
+        candidate_set = enrich(runtime_bundle, candidate_set, output)
     write_json(candidates_path, candidate_set)
-    result = evaluate(bundle, candidate_set)
+    result = evaluate(runtime_bundle, candidate_set)
     if evidence_adapter_hash is not None:
         result["evidenceAdapterHash"] = evidence_adapter_hash
     write_json(result_path, result)
