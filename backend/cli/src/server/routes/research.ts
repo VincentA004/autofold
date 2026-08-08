@@ -196,10 +196,10 @@ export const ResearchRoutes = lazy(() =>
     .post(
       "/campaigns/:campaignId/literature/review",
       describeRoute({
-        summary: "Run a bounded dynamic campaign literature review",
-        description: "Spawns a literature subagent that searches and fetches sources, then atomically records proposed evidence-linked claims.",
+        summary: "Refresh campaign evidence and recommend the next experiment",
+        description: "Runs one bounded literature review, records evidence alignment, summarizes the campaign, and returns one advisory next experiment.",
         operationId: "research.literature.review",
-        responses: { 200: { description: "Persisted literature records, proposed claims, and unresolved questions" } },
+        responses: { 200: { description: "Persisted evidence cycle, compact campaign summary, and next-experiment proposal" } },
       }),
       validator("param", CampaignParam),
       validator(

@@ -262,6 +262,7 @@ function cycleBody(cycle: ResearchDomain.KnowledgeCycle): string {
       `# Knowledge cycle ${cycle.id}`,
       "",
       cycle.question,
+      ...(cycle.campaignSummary ? ["", "## Campaign summary", "", cycle.campaignSummary] : []),
       "",
       "## Inputs",
       "",
@@ -278,6 +279,18 @@ function cycleBody(cycle: ResearchDomain.KnowledgeCycle): string {
       "## Unresolved questions",
       "",
       ...(unresolved.length ? unresolved : ["No unresolved questions were recorded."]),
+      ...(cycle.nextExperiment
+        ? [
+            "",
+            "## Recommended next experiment",
+            "",
+            `- Action: **${cycle.nextExperiment.action}**`,
+            ...(cycle.nextExperiment.experimentId ? [`- Experiment: \`${cycle.nextExperiment.experimentId}\``] : []),
+            `- Hypothesis: ${cycle.nextExperiment.hypothesis}`,
+            `- Rationale: ${cycle.nextExperiment.rationale}`,
+            `- Success criterion: ${cycle.nextExperiment.successCriterion}`,
+          ]
+        : []),
       "",
     ].join("\n"),
     {
@@ -292,6 +305,8 @@ function cycleBody(cycle: ResearchDomain.KnowledgeCycle): string {
       trigger: cycle.trigger,
       inputs: cycle.inputs,
       outputs: cycle.outputs,
+      ...(cycle.campaignSummary ? { campaign_summary: cycle.campaignSummary } : {}),
+      ...(cycle.nextExperiment ? { next_experiment: cycle.nextExperiment } : {}),
       next_review_at: cycle.nextReviewAt,
     },
   )

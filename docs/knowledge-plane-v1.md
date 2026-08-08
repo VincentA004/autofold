@@ -32,6 +32,20 @@ A citation never verifies an experimental result, and a model score never verifi
 
 A refresh becomes due when the campaign has no prior knowledge cycle, a new run outcome has not been consumed by a cycle, or the latest cycle's `nextReviewAt` watermark has passed. The bounded literature child receives the new outcomes and current graph, searches and fetches within explicit budgets, then submits one artifact. The backend validates exact excerpts and graph references before atomically recording the entire cycle.
 
+The product-facing loop is deliberately smaller than the storage model:
+
+```text
+run one trial
+  -> refresh only when new evidence is due
+  -> return one compact campaign summary
+  -> return one advisory next-experiment proposal
+  -> user or parent agent decides whether to execute it
+```
+
+The proposal contains an action, hypothesis, rationale, and success criterion.
+It cannot create an experiment, change a contract, or change an evaluator. A
+`continue_experiment` proposal must name an exact experiment in the campaign.
+
 ```text
 bun run research:cli -- knowledge status CMP_ID
 bun run research:cli -- knowledge refresh CMP_ID --session SES_ID

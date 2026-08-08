@@ -39,6 +39,13 @@ describe("bounded literature review", () => {
         },
       ],
       unresolvedQuestions: [],
+      campaignSummary: "One source supports testing hotspot constraints.",
+      nextExperiment: {
+        action: "new_experiment" as const,
+        hypothesis: "Hotspot constraints improve selective recovery.",
+        rationale: "This directly tests the source-backed design rule.",
+        successCriterion: "The locked score improves over the baseline.",
+      },
     }
     expect(() =>
       ResearchLiteratureReview.verifyFetchedExcerpts(artifact, [
@@ -105,6 +112,13 @@ describe("bounded literature review", () => {
                 },
               ],
               unresolvedQuestions: ["Does the effect transfer across target families?"],
+              campaignSummary: "Hotspot constraints are promising, but transfer remains unresolved.",
+              nextExperiment: {
+                action: "new_experiment",
+                hypothesis: "Hotspot constraints improve selective peptide recovery.",
+                rationale: "It is the strongest source-backed unresolved design rule.",
+                successCriterion: "The locked evaluator improves over the current baseline.",
+              },
             },
           }
         },
@@ -150,6 +164,8 @@ describe("bounded literature review", () => {
               inputs: { knowledgeIds: [], claimIds: [], literatureIds: [] },
               outputs: { literatureIds: ["lit_1"], claimIds: ["clm_1"], alignmentIds: [], unresolvedQuestions: proposal.artifact.unresolvedQuestions },
               generated: { by: "autofold-literature-review/ses_child", at: timestamp },
+              campaignSummary: proposal.artifact.campaignSummary,
+              nextExperiment: proposal.artifact.nextExperiment,
               createdAt: timestamp,
               nextReviewAt: "2026-08-14T12:00:00.000Z",
             }),
@@ -163,6 +179,8 @@ describe("bounded literature review", () => {
     expect(result.records).toHaveLength(1)
     expect(result.claims[0]?.status).toBe("proposed")
     expect(result.cycle.id).toBe("kcy_1")
+    expect(result.campaignSummary).toBe("Hotspot constraints are promising, but transfer remains unresolved.")
+    expect(result.nextExperiment.action).toBe("new_experiment")
     expect(result.unresolvedQuestions).toEqual(["Does the effect transfer across target families?"])
   })
 
@@ -204,6 +222,13 @@ describe("bounded literature review", () => {
                 },
               ],
               unresolvedQuestions: [],
+              campaignSummary: "Two sources inform one bounded hypothesis.",
+              nextExperiment: {
+                action: "new_experiment",
+                hypothesis: "Test the bounded hypothesis.",
+                rationale: "It would resolve the main uncertainty.",
+                successCriterion: "The locked evaluator improves.",
+              },
             },
           }),
           persist: async () => {

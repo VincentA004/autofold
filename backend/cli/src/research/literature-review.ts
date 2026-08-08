@@ -11,6 +11,9 @@ const ProposalArtifact = ResearchService.LiteratureReviewInput.omit({
   trigger: true,
   question: true,
   inputKnowledgeIds: true,
+}).extend({
+  campaignSummary: z.string().trim().min(1).max(4_000),
+  nextExperiment: ResearchDomain.NextExperimentProposal,
 })
 
 export namespace ResearchLiteratureReview {
@@ -31,6 +34,8 @@ export namespace ResearchLiteratureReview {
     claims: z.array(ResearchDomain.KnowledgeClaim),
     alignments: z.array(ResearchDomain.KnowledgeAlignment),
     cycle: ResearchDomain.KnowledgeCycle,
+    campaignSummary: z.string(),
+    nextExperiment: ResearchDomain.NextExperimentProposal,
     unresolvedQuestions: z.array(z.string()),
   })
   export type Result = z.infer<typeof Result>
@@ -104,6 +109,8 @@ export namespace ResearchLiteratureReview {
       campaignId: request.campaignId,
       childSessionId: proposal.childSessionId,
       proposalPath: proposal.proposalPath,
+      campaignSummary: proposal.artifact.campaignSummary,
+      nextExperiment: proposal.artifact.nextExperiment,
       ...persisted,
     })
   }
@@ -220,6 +227,14 @@ export namespace ResearchLiteratureReview {
             },
           ],
           unresolvedQuestions: ["Important remaining uncertainty"],
+          campaignSummary: "Compact current campaign state, including the strongest result and the main uncertainty.",
+          nextExperiment: {
+            action: "continue_experiment",
+            experimentId: "exp_exact_id_from_campaign_context",
+            hypothesis: "One falsifiable next hypothesis",
+            rationale: "Why this is the highest-information next step given the outcomes and literature",
+            successCriterion: "The locked evaluator result that would support the hypothesis",
+          },
         },
         null,
         2,
@@ -228,6 +243,8 @@ export namespace ResearchLiteratureReview {
       "Allowed stances: supports, refutes, context. Confidence is an agent estimate from 0 to 1, not an experimental score.",
       "Align claims only to exact knowledge IDs present in campaign_context. Use relation supports, refutes, context, or unresolved.",
       "An alignment is proposed interpretation, never experimental verification. Record contradictions rather than averaging them away.",
+      "End with one compact campaign summary and exactly one advisory nextExperiment. Prefer the experiment that maximizes information gain, not merely score.",
+      "Use continue_experiment only with an exact active experiment ID from campaign_context. This proposal cannot create or modify an experiment.",
       "Finish only after the JSON file exists and parses.",
       "",
       "<campaign_context>",

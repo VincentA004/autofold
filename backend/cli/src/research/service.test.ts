@@ -207,6 +207,14 @@ describe("research service", () => {
         },
       ],
       unresolvedQuestions: ["Does agreement correlate with measured affinity for this target?"],
+      campaignSummary: "The baseline has promising predictor agreement, but experimental affinity remains unknown.",
+      nextExperiment: {
+        action: "continue_experiment",
+        experimentId: experiment.id,
+        hypothesis: "Improved predictor agreement increases quality-adjusted binder yield.",
+        rationale: "This tests the strongest result while preserving the locked contract.",
+        successCriterion: "The locked evaluator improves over the baseline score.",
+      },
     })
 
     expect(result.alignments).toHaveLength(1)
@@ -218,6 +226,8 @@ describe("research service", () => {
     })
     expect(result.cycle.inputs.knowledgeIds).toEqual([evaluation.knowledge.id])
     expect(result.cycle.outputs.alignmentIds).toEqual([result.alignments[0]?.id])
+    expect(result.cycle.campaignSummary).toContain("predictor agreement")
+    expect(result.cycle.nextExperiment?.experimentId).toBe(experiment.id)
     const after = await service.knowledgeRefreshStatus(projectId, experiment.campaignId)
     expect(after.unprocessedKnowledgeIds).toEqual([])
     expect(after.due).toBe(false)

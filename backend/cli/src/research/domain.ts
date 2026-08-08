@@ -253,6 +253,32 @@ export namespace ResearchDomain {
     })
   export type KnowledgeAlignment = z.infer<typeof KnowledgeAlignment>
 
+  export const NextExperimentProposal = z
+    .object({
+      action: z.enum(["continue_experiment", "new_experiment", "stop_campaign"]),
+      experimentId: z.string().startsWith("exp_").optional(),
+      hypothesis: z.string().trim().min(1).max(2_000),
+      rationale: z.string().trim().min(1).max(4_000),
+      successCriterion: z.string().trim().min(1).max(2_000),
+    })
+    .superRefine((proposal, context) => {
+      if (proposal.action === "continue_experiment" && !proposal.experimentId) {
+        context.addIssue({
+          code: "custom",
+          path: ["experimentId"],
+          message: "Continuing an experiment requires its exact ID",
+        })
+      }
+      if (proposal.action !== "continue_experiment" && proposal.experimentId) {
+        context.addIssue({
+          code: "custom",
+          path: ["experimentId"],
+          message: "Only continue_experiment may reference an existing experiment",
+        })
+      }
+    })
+  export type NextExperimentProposal = z.infer<typeof NextExperimentProposal>
+
   export const KnowledgeCycle = z.object({
     id: z.string().regex(/^kcy_[A-Za-z0-9_-]+$/),
     campaignId: z.string().startsWith("cmp_"),
@@ -270,6 +296,8 @@ export namespace ResearchDomain {
       unresolvedQuestions: z.array(z.string().trim().min(1).max(2_000)).max(100),
     }),
     generated: KnowledgeActor,
+    campaignSummary: z.string().trim().min(1).max(4_000).optional(),
+    nextExperiment: NextExperimentProposal.optional(),
     createdAt: Timestamp,
     nextReviewAt: Timestamp,
   })

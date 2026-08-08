@@ -143,6 +143,8 @@ export namespace ResearchService {
         )
         .max(50),
       unresolvedQuestions: z.array(z.string().trim().min(1).max(2_000)).max(50).default([]),
+      campaignSummary: z.string().trim().min(1).max(4_000).optional(),
+      nextExperiment: ResearchDomain.NextExperimentProposal.optional(),
       question: z.string().trim().min(1).max(2_000).optional(),
       trigger: ResearchDomain.KnowledgeCycle.shape.trigger.default("literature_review"),
       inputKnowledgeIds: z.array(z.string().startsWith("knw_")).max(1_000).default([]),
@@ -427,6 +429,12 @@ export namespace ResearchService {
             throw new NotFoundError({ entity: "knowledge", id: knowledgeId })
           }
         }
+        if (input.nextExperiment?.experimentId) {
+          const proposedExperiment = state.experiments[input.nextExperiment.experimentId]
+          if (!proposedExperiment || proposedExperiment.campaignId !== campaignId) {
+            throw new NotFoundError({ entity: "experiment", id: input.nextExperiment.experimentId })
+          }
+        }
         const inputClaimIds = Object.values(state.claims)
           .filter((claim) => claim.campaignId === campaignId)
           .map((claim) => claim.id)
@@ -540,6 +548,8 @@ export namespace ResearchService {
             unresolvedQuestions: input.unresolvedQuestions,
           },
           generated: { by: input.generatedBy, at: createdAt },
+          campaignSummary: input.campaignSummary,
+          nextExperiment: input.nextExperiment,
           createdAt,
           nextReviewAt: nextReview.toISOString(),
         })
