@@ -99,12 +99,25 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
                         raise ProtocolError("Pipeline tool keys contain unsupported characters")
                     if pipeline.get("protoToolsCommit") and model["version"] != pipeline["protoToolsCommit"]:
                         raise ProtocolError("Resolved Proto tool version does not match the frozen registry commit")
+                config = model.get("config", {})
+                if not isinstance(config, dict):
+                    raise ProtocolError("Resolved Proto tool config must be an object")
+                if any(key in config for key in {"seed", "seeds", "timeout", "device"}):
+                    raise ProtocolError("Resolved Proto tool config overrides an Autofold runtime setting")
             if len(set(model_ids)) != len(model_ids):
                 raise ProtocolError("Pipeline stage model IDs must be unique")
             if not isinstance(stage.get("required"), bool) or not isinstance(stage.get("allowSkip"), bool):
                 raise ProtocolError("Pipeline stage routing flags must be booleans")
             if stage["required"] and stage["allowSkip"]:
                 raise ProtocolError("Required pipeline stages cannot allow skips")
+            allowed_skips = stage.get("allowedSkips", [])
+            if not isinstance(allowed_skips, list) or any(
+                item not in {"condition_false", "candidate_filtered", "optional_tool_failure"}
+                for item in allowed_skips
+            ):
+                raise ProtocolError("Pipeline allowed skips are invalid")
+            if allowed_skips and not stage["allowSkip"]:
+                raise ProtocolError("Pipeline stage declares skips without allowing them")
         dependencies: dict[str, list[str]] = {}
         for stage in pipeline["stages"]:
             depends_on = stage.get("dependsOn", [])
@@ -120,6 +133,15 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
                 if condition.get("operator") not in {"lt", "lte", "gt", "gte"} or not isinstance(condition.get("value"), (int, float)):
                     raise ProtocolError("Pipeline condition is invalid")
                 require_string(condition, "metric")
+            routing = stage.get("candidateRouting")
+            if routing is not None:
+                if not isinstance(routing, dict) or routing.get("source") not in depends_on:
+                    raise ProtocolError("Candidate routing must reference a direct dependency")
+                if routing.get("direction") not in {"minimize", "maximize"}:
+                    raise ProtocolError("Candidate routing direction is invalid")
+                require_string(routing, "metric")
+                if not isinstance(routing.get("maximumCandidates"), int) or routing["maximumCandidates"] <= 0:
+                    raise ProtocolError("Candidate routing budget must be positive")
             budget = stage.get("budget")
             if budget is not None and not isinstance(budget, dict):
                 raise ProtocolError("Pipeline stage budget must be an object")
@@ -212,6 +234,7 @@ def validate_workflow_source(path: Path, bundle: dict[str, Any]) -> None:
         if not isinstance(stage, dict):
             raise ProtocolError("AUTOFOLD_WORKFLOW stages must be objects")
         stage.setdefault("selection", "all")
+        stage.setdefault("configs", {})
         stage.setdefault("dependsOn", [])
         stage.setdefault("optional", False)
     canonical = json.dumps(workflow, sort_keys=True, separators=(",", ":"))

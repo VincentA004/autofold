@@ -21,6 +21,13 @@ AUTOFOLD_WORKFLOW = {
             "id": "primary",
             "capability": "structure_prediction",
             "tools": ["boltz2-prediction"],
+            "configs": {
+                "boltz2-prediction": {
+                    "use_msa": False,
+                    "sampling_steps": 20,
+                    "diffusion_samples": 1,
+                },
+            },
             "maximumCandidates": 100,
             "maximumGpuSeconds": 500,
         },
@@ -29,6 +36,12 @@ AUTOFOLD_WORKFLOW = {
             "capability": "structure_prediction",
             "tools": ["chai1-prediction"],
             "dependsOn": ["primary"],
+            "candidateRouting": {
+                "source": "primary",
+                "metric": "confidence_score",
+                "direction": "maximize",
+                "maximumCandidates": 20,
+            },
             "maximumCandidates": 20,
             "maximumGpuSeconds": 400,
         },
@@ -66,6 +79,17 @@ The agent can rewrite the Proto `Program` and validation manifest between
 trials. It cannot rewrite them after execution starts, fabricate evidence,
 change the evaluator, or exceed the experiment budget.
 
+Execution is stage-first. For each frozen seed, a `candidateRouting` clause
+ranks the preceding stage's native metrics with a deterministic candidate-ID
+tie break, executes only the declared top-k survivors, and records every other
+candidate as `candidate_filtered`. Conditions and optional tool failures use
+separate typed skip reasons, so routing cannot silently hide model failures.
+
+Per-tool `configs` are validated by each registered Proto Pydantic config model
+before a trial is recorded and frozen into the pipeline. Autofold reserves
+`seed`/`seeds`, `timeout`, and `device` so agent-authored settings cannot bypass
+the experiment runtime policy.
+
 Workflow-composition skills remain advisory inputs to the authoring agent. They
 can teach generation strategies, model selection, disagreement handling, and
 budget allocation. Successful trajectories can refine those skills and the
@@ -75,3 +99,12 @@ components.
 The installed bridge currently accepts Proto `structure_prediction` tools with
 the common typed structure interface. A real multi-model 4090 acceptance run is
 still needed to calibrate native metrics and runtime budgets.
+
+The bounded hardware probe runs two primary predictions and routes one survivor
+through Chai and Protenix:
+
+```text
+PYTHONPATH=backend/worker python backend/worker/run_adaptive_acceptance.py \
+  --proto-root /path/to/proto-language \
+  --output /new/output/directory
+```

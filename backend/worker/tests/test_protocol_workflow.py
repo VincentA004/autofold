@@ -25,7 +25,7 @@ class FrozenWorkflowSourceTest(unittest.TestCase):
             ],
         }
         normalized = json.loads(json.dumps(workflow))
-        normalized["stages"][0].update({"selection": "all", "dependsOn": [], "optional": False})
+        normalized["stages"][0].update({"selection": "all", "configs": {}, "dependsOn": [], "optional": False})
         digest = "sha256:" + hashlib.sha256(
             json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()

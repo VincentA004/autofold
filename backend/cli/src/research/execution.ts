@@ -147,12 +147,13 @@ async function verifyModelRunsV2(
 ): Promise<void> {
   if (index.pipelineHash !== bundle.pipelineHash) throw new Error(`Run ${bundle.runId} model index uses another pipeline policy`)
   const candidateById = new Map(candidates.candidates.map((candidate) => [candidate.id, candidate]))
-  const policies = new Map<string, { version: string; allowSkip: boolean; dependsOn: Set<string> }>()
+  const policies = new Map<string, { version: string; allowSkip: boolean; allowedSkips: Set<string>; dependsOn: Set<string> }>()
   for (const stage of bundle.pipeline.stages) {
     for (const model of stage.models) {
       policies.set(`${stage.id}:${model.id}`, {
         version: model.version,
         allowSkip: stage.allowSkip,
+        allowedSkips: new Set(stage.allowedSkips),
         dependsOn: new Set(stage.dependsOn),
       })
     }
@@ -177,6 +178,9 @@ async function verifyModelRunsV2(
     parents.push({ identity, candidateId: entry.candidateId, seed: entry.seed, dependencies: policy.dependsOn, hashes: entry.parentArtifactHashes })
     if (entry.status === "skipped") {
       if (!policy.allowSkip) throw new Error(`Run ${bundle.runId} skipped required model evidence ${identity}`)
+      if (policy.allowedSkips.size > 0 && (!entry.kind || !policy.allowedSkips.has(entry.kind))) {
+        throw new Error(`Run ${bundle.runId} used an undeclared skip kind for ${identity}`)
+      }
       continue
     }
 
@@ -392,16 +396,20 @@ export namespace ResearchExecution {
         message: `Trial program does not match its recorded hash: ${context.trial.programPath}`,
       })
     }
-    const workflowPlan = adapter.proto && installed.evidenceAdapter
+    const proto = adapter.proto
+    const workflowPlan = proto && installed.evidenceAdapter
       ? await ResearchWorkflow.extract(sourceProgram, adapter.python)
       : undefined
-    const pipeline = workflowPlan && adapter.proto
-      ? ResearchWorkflow.compile({
-          plan: workflowPlan,
-          tools: await ResearchWorkflow.discover(adapter.python, adapter.proto.root),
-          contract: context.experiment.contract,
-          protoToolsCommit: adapter.proto.toolsCommit,
-        })
+    const pipeline = workflowPlan && proto
+      ? await (async () => {
+          await ResearchWorkflow.validateConfigs(workflowPlan, adapter.python, proto.root)
+          return ResearchWorkflow.compile({
+            plan: workflowPlan,
+            tools: await ResearchWorkflow.discover(adapter.python, proto.root),
+            contract: context.experiment.contract,
+            protoToolsCommit: proto.toolsCommit,
+          })
+        })()
       : undefined
 
     // Authorization is a precondition, not a run outcome. Check it before

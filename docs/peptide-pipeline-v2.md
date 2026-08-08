@@ -45,6 +45,11 @@ declares the exact completed validators, and the verifier rejects missing
 required coverage while allowing only policy-authorized skips. See
 [model-run-index-v2.md](model-run-index-v2.md).
 
+Stage-wise survivor routing is executable: downstream stages can rank a direct
+dependency's native metric and process only a frozen top-k candidate set.
+Filtered candidates, false conditions, and optional tool failures remain
+distinct verifiable decisions.
+
 The deterministic Boltz/Chai/Protenix fixture tests the topology without making
 biological claims. Dynamic Proto workflow compilation and the trusted registry
 dispatch bridge are implemented. A real multi-model 4090 acceptance run is

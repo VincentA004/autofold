@@ -62,19 +62,32 @@ def _agreement(values: list[tuple[float, float]]) -> float:
     return _clamp(1.0 - 2.0 * (statistics.pstdev(value[0] for value in values) + statistics.pstdev(value[1] for value in values)))
 
 
-def _condition_matches(condition: dict[str, Any], metrics: list[dict[str, Any]]) -> bool:
-    metric = condition["metric"]
+def _metric_value(metric: str, metrics: list[dict[str, Any]]) -> float | None:
     if metric == "predictor_disagreement":
+        if not metrics:
+            return None
         values = [
             (float(item["protein_iptm"] if "protein_iptm" in item else item["iptm"]), float(item["complex_plddt"] if "complex_plddt" in item else item["ptm"]))
             for item in metrics
         ]
-        actual = 1.0 - _agreement(values)
-    else:
-        values = [float(item[metric]) for item in metrics if metric in item]
-        if not values:
-            return False
-        actual = sum(values) / len(values)
+        return 1.0 - _agreement(values)
+    values = [float(item[metric]) for item in metrics if metric in item]
+    if metric == "confidence_score" and not values:
+        values = [
+            (
+                float(item.get("protein_iptm", item.get("iptm", 0.0)))
+                + float(item.get("complex_plddt", item.get("avg_plddt", item.get("ptm", 0.0))))
+            )
+            / 2
+            for item in metrics
+        ]
+    return sum(values) / len(values) if values else None
+
+
+def _condition_matches(condition: dict[str, Any], metrics: list[dict[str, Any]]) -> bool:
+    actual = _metric_value(condition["metric"], metrics)
+    if actual is None:
+        return False
     expected = float(condition["value"])
     return {
         "lt": actual < expected,
@@ -95,8 +108,14 @@ def _enrich_v4(
     adapter_hash = bundle["evidenceAdapter"]["sourceHash"]
     tools_commit = bundle["proto"]["toolsCommit"]
     entries: list[dict[str, Any]] = []
-    enriched: list[dict[str, Any]] = []
     stage_runtime: dict[str, float] = {}
+    candidates = list(candidate_set["candidates"])
+    candidate_state = {
+        candidate["id"]: {"predictors": [], "confidence": []}
+        for candidate in candidates
+    }
+    stage_artifacts: dict[tuple[str, int, str], list[str]] = {}
+    stage_metrics: dict[tuple[str, int, str], list[dict[str, Any]]] = {}
 
     for stage in bundle["pipeline"]["stages"]:
         for model in stage["models"]:
@@ -105,42 +124,72 @@ def _enrich_v4(
             if spec.category != "structure_prediction":
                 raise ValueError(f"Trusted structure workflow cannot execute Proto category {spec.category}")
 
-    for candidate in candidate_set["candidates"]:
-        sequence = candidate["sequence"]
-        candidate_key = hashlib.sha256(candidate["id"].encode("utf-8")).hexdigest()[:16]
-        predictors: list[dict[str, str]] = []
-        confidence: list[tuple[float, float]] = []
-        for seed in bundle["seeds"]:
-            stage_artifacts: dict[str, list[str]] = {}
-            stage_metrics: dict[str, list[dict[str, Any]]] = {}
-            for stage in bundle["pipeline"]["stages"]:
-                parents = [artifact for dependency in stage.get("dependsOn", []) for artifact in stage_artifacts[dependency]]
-                source_metrics = stage_metrics.get(stage.get("condition", {}).get("source", ""), [])
-                should_run = not stage.get("condition") or _condition_matches(stage["condition"], source_metrics)
+    def skip(candidate_id: str, stage: dict[str, Any], model: dict[str, Any], seed: int, parents: list[str], kind: str, reason: str) -> None:
+        if kind not in stage.get("allowedSkips", []):
+            raise RuntimeError(f"Frozen workflow does not permit {kind} for stage {stage['id']}")
+        entries.append(
+            {
+                "status": "skipped",
+                "kind": kind,
+                "candidateId": candidate_id,
+                "stage": stage["id"],
+                "modelId": model["id"],
+                "seed": seed,
+                "parentArtifactHashes": parents,
+                "reason": reason,
+            }
+        )
+
+    for seed in bundle["seeds"]:
+        for stage in bundle["pipeline"]["stages"]:
+            selected = {candidate["id"] for candidate in candidates}
+            routing = stage.get("candidateRouting")
+            if routing:
+                scored: list[tuple[float, str]] = []
+                for candidate in candidates:
+                    metrics = stage_metrics.get((candidate["id"], seed, routing["source"]), [])
+                    value = _metric_value(routing["metric"], metrics)
+                    if value is not None:
+                        scored.append((value, candidate["id"]))
+                reverse = routing["direction"] == "maximize"
+                scored.sort(key=lambda item: ((-item[0]) if reverse else item[0], item[1]))
+                selected = {candidate_id for _, candidate_id in scored[: routing["maximumCandidates"]]}
+
+            for candidate in candidates:
+                candidate_id = candidate["id"]
+                sequence = candidate["sequence"]
+                candidate_key = hashlib.sha256(candidate_id.encode("utf-8")).hexdigest()[:16]
+                parents = [
+                    artifact
+                    for dependency in stage.get("dependsOn", [])
+                    for artifact in stage_artifacts.get((candidate_id, seed, dependency), [])
+                ]
+                source_metrics = stage_metrics.get((candidate_id, seed, stage.get("condition", {}).get("source", "")), [])
+                skip_kind = None
+                skip_reason = ""
+                if candidate_id not in selected:
+                    skip_kind = "candidate_filtered"
+                    skip_reason = "Candidate was outside the frozen stage ranking budget"
+                elif stage.get("condition") and not _condition_matches(stage["condition"], source_metrics):
+                    skip_kind = "condition_false"
+                    skip_reason = "Frozen workflow condition evaluated false"
                 stage_hashes: list[str] = []
                 native_stage_metrics: list[dict[str, Any]] = []
+
                 for model in stage["models"]:
-                    if not should_run:
-                        entries.append(
-                            {
-                                "status": "skipped",
-                                "candidateId": candidate["id"],
-                                "stage": stage["id"],
-                                "modelId": model["id"],
-                                "seed": seed,
-                                "parentArtifactHashes": parents,
-                                "reason": "Frozen workflow condition evaluated false",
-                            }
-                        )
+                    if skip_kind:
+                        skip(candidate_id, stage, model, seed, parents, skip_kind, skip_reason)
                         continue
                     parameters = {
                         "tool": model.get("toolKey", model["id"]),
                         "seed": seed,
                     }
                     spec = ToolRegistry.get(parameters["tool"])
-                    config_values: dict[str, Any] = {}
+                    config_values: dict[str, Any] = dict(model.get("config", {}))
                     if "seed" in spec.config_model.model_fields:
                         config_values["seed"] = seed
+                    if "seeds" in spec.config_model.model_fields:
+                        config_values["seeds"] = [seed]
                     maximum_seconds = stage.get("budget", {}).get("maximumGpuSeconds")
                     if maximum_seconds and "timeout" in spec.config_model.model_fields:
                         config_values["timeout"] = max(1, int(maximum_seconds))
@@ -152,19 +201,9 @@ def _enrich_v4(
                     try:
                         prediction = spec.function(inputs, config)
                     except Exception as error:
-                        if not stage["allowSkip"]:
+                        if "optional_tool_failure" not in stage.get("allowedSkips", []):
                             raise
-                        entries.append(
-                            {
-                                "status": "skipped",
-                                "candidateId": candidate["id"],
-                                "stage": stage["id"],
-                                "modelId": model["id"],
-                                "seed": seed,
-                                "parentArtifactHashes": parents,
-                                "reason": f"Optional Proto tool failed: {type(error).__name__}",
-                            }
-                        )
+                        skip(candidate_id, stage, model, seed, parents, "optional_tool_failure", f"Optional Proto tool failed: {type(error).__name__}")
                         continue
                     wall_seconds = time.monotonic() - started
                     stage_runtime[stage["id"]] = stage_runtime.get(stage["id"], 0.0) + wall_seconds
@@ -172,25 +211,15 @@ def _enrich_v4(
                     if maximum_seconds and stage_runtime[stage["id"]] > maximum_seconds:
                         raise RuntimeError(f"Frozen GPU budget exceeded for stage {stage['id']}")
                     if getattr(prediction, "success", True) is False or not prediction.structures:
-                        if not stage["allowSkip"]:
+                        if "optional_tool_failure" not in stage.get("allowedSkips", []):
                             raise RuntimeError(f"Required Proto tool failed: {parameters['tool']}")
-                        entries.append(
-                            {
-                                "status": "skipped",
-                                "candidateId": candidate["id"],
-                                "stage": stage["id"],
-                                "modelId": model["id"],
-                                "seed": seed,
-                                "parentArtifactHashes": parents,
-                                "reason": "Optional Proto tool returned no structure",
-                            }
-                        )
+                        skip(candidate_id, stage, model, seed, parents, "optional_tool_failure", "Optional Proto tool returned no structure")
                         continue
                     structure = prediction.structures[0]
                     metrics = structure.metrics.model_dump(mode="json")
                     interface = float(metrics.get("protein_iptm", metrics.get("iptm", metrics.get("confidence_score", 0.0))))
                     fold = float(metrics.get("complex_plddt", metrics.get("avg_plddt", metrics.get("ptm", interface))))
-                    confidence.append((interface, fold))
+                    candidate_state[candidate_id]["confidence"].append((interface, fold))
                     native_stage_metrics.append(metrics)
                     directory = output / "model-runs" / candidate_key / stage["id"] / model["id"] / str(seed)
                     structure_path = directory / "prediction.cif"
@@ -199,7 +228,7 @@ def _enrich_v4(
                     metrics_hash = _write_json(metrics_path, metrics)
                     artifact = {
                         "format": "autofold.model-run.v2",
-                        "candidateId": candidate["id"],
+                        "candidateId": candidate_id,
                         "targetArtifactHash": bundle["targetArtifactHash"],
                         "peptideSequenceHash": _sha256_text(sequence),
                         "stage": stage["id"],
@@ -221,7 +250,7 @@ def _enrich_v4(
                     entries.append(
                         {
                             "status": "completed",
-                            "candidateId": candidate["id"],
+                            "candidateId": candidate_id,
                             "stage": stage["id"],
                             "modelId": model["id"],
                             "seed": seed,
@@ -235,9 +264,15 @@ def _enrich_v4(
                         }
                     )
                     stage_hashes.append(artifact_hash)
-                    predictors.append({"model": model["id"], "version": model["version"], "artifactHash": artifact_hash})
-                stage_artifacts[stage["id"]] = stage_hashes
-                stage_metrics[stage["id"]] = native_stage_metrics
+                    candidate_state[candidate_id]["predictors"].append({"model": model["id"], "version": model["version"], "artifactHash": artifact_hash})
+                stage_artifacts[(candidate_id, seed, stage["id"])] = stage_hashes
+                stage_metrics[(candidate_id, seed, stage["id"])] = native_stage_metrics
+
+    enriched: list[dict[str, Any]] = []
+    for candidate in candidates:
+        sequence = candidate["sequence"]
+        state = candidate_state[candidate["id"]]
+        confidence = state["confidence"]
         if not confidence:
             raise ValueError(f"Workflow produced no completed model evidence for {candidate['id']}")
         solubility, aggregation, synthesis = _sequence_metrics(sequence)
@@ -259,7 +294,7 @@ def _enrich_v4(
                     "solubility": solubility,
                     "aggregationRisk": aggregation,
                     "synthesisRisk": synthesis,
-                    "predictors": predictors,
+                    "predictors": state["predictors"],
                 },
             }
         )

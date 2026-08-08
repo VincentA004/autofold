@@ -524,7 +524,15 @@ describe("research execution worker", () => {
         stages: [
           { id: "primary_screen", models: [{ id: "boltz2", version: "2.2.1" }], required: true, allowSkip: false },
           { id: "independent_validation", models: [{ id: "chai1", version: "0.6.1" }], dependsOn: ["primary_screen"], required: true, allowSkip: false },
-          { id: "disagreement_resolution", models: [{ id: "protenix", version: "0.5.0" }], dependsOn: ["independent_validation"], required: true, allowSkip: false },
+          {
+            id: "disagreement_resolution",
+            models: [{ id: "protenix", version: "0.5.0" }],
+            dependsOn: ["independent_validation"],
+            candidateRouting: { source: "independent_validation", metric: "confidence_score", direction: "maximize", maximumCandidates: 2 },
+            required: false,
+            allowSkip: true,
+            allowedSkips: ["candidate_filtered"],
+          },
         ],
       })
       const bundle = ExecutionProtocol.TrialBundleV4.parse({
@@ -586,6 +594,36 @@ describe("research execution worker", () => {
       expect(candidates.candidates[0]?.evidence.predictors).toHaveLength(3)
       const chained = index.entries.find((entry) => entry.stage === "independent_validation")
       expect(chained?.parentArtifactHashes).toHaveLength(1)
+
+      const routedCandidate = candidates.candidates.at(-1)!
+      const routedIndex = structuredClone(index)
+      const routedEntryIndex = routedIndex.entries.findIndex(
+        (entry) => entry.candidateId === routedCandidate.id && entry.stage === "disagreement_resolution",
+      )
+      const routedEntry = routedIndex.entries[routedEntryIndex]!
+      if (routedEntry.status !== "completed") throw new Error("Expected completed disagreement fixture")
+      routedIndex.entries[routedEntryIndex] = {
+        status: "skipped",
+        kind: "candidate_filtered",
+        candidateId: routedEntry.candidateId,
+        stage: routedEntry.stage,
+        modelId: routedEntry.modelId,
+        seed: routedEntry.seed,
+        parentArtifactHashes: routedEntry.parentArtifactHashes,
+        reason: "Outside the frozen top-two route",
+      }
+      routedCandidate.evidence.predictors = routedCandidate.evidence.predictors.filter(
+        (predictor) => predictor.artifactHash !== routedEntry.artifactHash,
+      )
+      await fs.writeFile(path.join(output, "model-runs", "index.json"), JSON.stringify(routedIndex))
+      await expect(ResearchExecution.verifyModelEvidence(output, bundle, candidates)).resolves.toBeDefined()
+
+      const illegalIndex = structuredClone(routedIndex)
+      const illegalSkip = illegalIndex.entries[routedEntryIndex]!
+      if (illegalSkip.status !== "skipped") throw new Error("Expected routed skip")
+      illegalSkip.kind = "condition_false"
+      await fs.writeFile(path.join(output, "model-runs", "index.json"), JSON.stringify(illegalIndex))
+      await expect(ResearchExecution.verifyModelEvidence(output, bundle, candidates)).rejects.toThrow("undeclared skip kind")
     } finally {
       await fs.rm(root, { recursive: true, force: true })
     }

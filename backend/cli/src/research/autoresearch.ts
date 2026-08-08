@@ -327,7 +327,7 @@ export namespace ResearchAutoresearch {
       "The file must define build_program(bundle), return a Proto Program, remain deterministic under bundle seeds, and respect candidateBudget/submissionSize.",
       "The file must also assign one literal AUTOFOLD_WORKFLOW dictionary in autofold.proto-workflow.v1 format.",
       "Use exact proto-tools ToolRegistry keys from availableProtoTools. The workflow may change stages, tools, dependencies, conditions, and budgets between iterations.",
-      "Every GPU stage must declare maximumGpuSeconds; the workflow total must stay within contract.budget.gpuHours. Conditional stages must be optional.",
+      "Every GPU stage must declare maximumGpuSeconds; the workflow total must stay within contract.budget.gpuHours. Use candidateRouting for deterministic top-k survivor selection; optional permits tool failure.",
       "The completed Program must expose canonical peptide sequences through program.constructs and each construct's joined_sequences so the trusted adapter can collect them.",
       "Improve the incumbent using verified diagnostics and knowledge. You may compose registered proto_language/proto_tools components.",
       "Literature claims are advisory and retain their proposed/reviewed/contested status; do not treat them as locked experimental verification.",
@@ -374,6 +374,7 @@ export namespace ResearchAutoresearch {
       throw new Error("Proto autoresearch trial must define a literal AUTOFOLD_WORKFLOW manifest")
     }
     if (!adapter.proto) throw new Error("Pinned Proto metadata is unavailable")
+    await ResearchWorkflow.validateConfigs(workflow, adapter.python, adapter.proto.root)
     ResearchWorkflow.compile({
       plan: workflow,
       tools: await ResearchWorkflow.discover(adapter.python, adapter.proto.root),

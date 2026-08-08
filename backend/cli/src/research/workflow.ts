@@ -12,6 +12,7 @@ export namespace ResearchWorkflow {
     operator: z.enum(["lt", "lte", "gt", "gte"]),
     value: z.number().finite(),
   })
+  export const CandidateRouting = ExecutionProtocol.CandidateRouting
 
   export const Plan = z
     .object({
@@ -24,9 +25,11 @@ export namespace ResearchWorkflow {
             id: stageId,
             capability: z.string().trim().min(1),
             tools: z.array(toolKey).min(1).max(8),
+            configs: z.record(toolKey, z.record(z.string(), z.unknown())).default({}),
             selection: z.enum(["all", "first_available"]).default("all"),
             dependsOn: z.array(stageId).default([]),
             condition: Condition.optional(),
+            candidateRouting: CandidateRouting.optional(),
             maximumCandidates: z.number().int().positive().optional(),
             maximumGpuSeconds: z.number().finite().positive().optional(),
             optional: z.boolean().default(false),
@@ -36,6 +39,9 @@ export namespace ResearchWorkflow {
         .max(64),
     })
     .superRefine((plan, context) => {
+      if (Buffer.byteLength(JSON.stringify(plan), "utf8") > 256 * 1024) {
+        context.addIssue({ code: "custom", path: [], message: "Workflow manifest is too large" })
+      }
       const ids = new Set(plan.stages.map((stage) => stage.id))
       if (ids.size !== plan.stages.length) {
         context.addIssue({ code: "custom", path: ["stages"], message: "Workflow stage IDs must be unique" })
@@ -43,6 +49,16 @@ export namespace ResearchWorkflow {
       for (const [index, stage] of plan.stages.entries()) {
         if (new Set(stage.tools).size !== stage.tools.length) {
           context.addIssue({ code: "custom", path: ["stages", index, "tools"], message: "Workflow tools must be unique within a stage" })
+        }
+        for (const [key, config] of Object.entries(stage.configs)) {
+          if (!stage.tools.includes(key)) {
+            context.addIssue({ code: "custom", path: ["stages", index, "configs", key], message: "Workflow config references an undeclared tool" })
+          }
+          for (const reserved of ["seed", "seeds", "timeout", "device"]) {
+            if (reserved in config) {
+              context.addIssue({ code: "custom", path: ["stages", index, "configs", key, reserved], message: `Autofold owns the ${reserved} runtime setting` })
+            }
+          }
         }
         for (const dependency of stage.dependsOn) {
           if (!ids.has(dependency) || dependency === stage.id) {
@@ -55,8 +71,11 @@ export namespace ResearchWorkflow {
         if (stage.condition && !stage.dependsOn.includes(stage.condition.source)) {
           context.addIssue({ code: "custom", path: ["stages", index, "condition", "source"], message: "Condition source must be a direct dependency" })
         }
-        if (stage.condition && !stage.optional) {
-          context.addIssue({ code: "custom", path: ["stages", index, "optional"], message: "Conditional workflow stages must be optional" })
+        if (stage.candidateRouting && !stage.dependsOn.includes(stage.candidateRouting.source)) {
+          context.addIssue({ code: "custom", path: ["stages", index, "candidateRouting", "source"], message: "Candidate-routing source must be a direct dependency" })
+        }
+        if (stage.candidateRouting && stage.maximumCandidates && stage.candidateRouting.maximumCandidates > stage.maximumCandidates) {
+          context.addIssue({ code: "custom", path: ["stages", index, "candidateRouting", "maximumCandidates"], message: "Candidate route exceeds the stage candidate budget" })
         }
         const byId = new Map(plan.stages.map((item) => [item.id, item]))
         if (!stage.optional && stage.dependsOn.some((dependency) => byId.get(dependency)?.optional)) {
@@ -122,7 +141,7 @@ export namespace ResearchWorkflow {
           `Workflow stage ${stage.id} requests ${stage.maximumCandidates} candidates; experiment permits ${raw.contract.budget.maximumCandidates}`,
         )
       }
-      if (stage.maximumCandidates && stage.maximumCandidates < raw.contract.evaluator.submissionSize) {
+      if (stage.maximumCandidates && !stage.candidateRouting && stage.maximumCandidates < raw.contract.evaluator.submissionSize) {
         throw new Error(
           `Workflow stage ${stage.id} permits ${stage.maximumCandidates} candidates; trusted evaluation requires ${raw.contract.evaluator.submissionSize}`,
         )
@@ -130,17 +149,32 @@ export namespace ResearchWorkflow {
       if (selected.some((tool) => tool.usesGpu) && (stage.maximumGpuSeconds ?? 0) === 0) {
         throw new Error(`GPU workflow stage ${stage.id} must declare maximumGpuSeconds`)
       }
+      if (stage.candidateRouting && stage.candidateRouting.maximumCandidates > raw.contract.budget.maximumCandidates) {
+        throw new Error(`Workflow route ${stage.id} exceeds the experiment candidate budget`)
+      }
+      const allowedSkips = [
+        ...(stage.condition ? ["condition_false" as const] : []),
+        ...(stage.candidateRouting ? ["candidate_filtered" as const] : []),
+        ...(stage.optional ? ["optional_tool_failure" as const] : []),
+      ]
       return {
         id: stage.id,
-        models: selected.map((tool) => ({ id: tool.key, toolKey: tool.key, version: raw.protoToolsCommit })),
+        models: selected.map((tool) => ({
+          id: tool.key,
+          toolKey: tool.key,
+          version: raw.protoToolsCommit,
+          config: stage.configs[tool.key],
+        })),
         dependsOn: stage.dependsOn,
         condition: stage.condition,
+        candidateRouting: stage.candidateRouting,
         budget:
           stage.maximumCandidates || stage.maximumGpuSeconds
             ? { maximumCandidates: stage.maximumCandidates, maximumGpuSeconds: stage.maximumGpuSeconds }
             : undefined,
-        required: !stage.optional,
-        allowSkip: stage.optional,
+        required: allowedSkips.length === 0,
+        allowSkip: allowedSkips.length > 0,
+        allowedSkips,
       }
     })
     if (stages.some((stage) => stage.models.length === 0)) {
@@ -214,6 +248,34 @@ print(json.dumps([
     return z.array(Tool).parse(JSON.parse(stdout))
   }
 
+  export async function validateConfigs(raw: Plan, python: string, cwd: string): Promise<void> {
+    const plan = Plan.parse(raw)
+    const source = String.raw`
+import json, sys
+import proto_tools
+from proto_tools import ToolRegistry
+workflow = json.load(sys.stdin)
+for stage in workflow["stages"]:
+    for key, config in stage.get("configs", {}).items():
+        ToolRegistry.get(key).config_model(**config)
+`
+    const process = Bun.spawn([python, "-c", source], {
+      cwd,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...Bun.env, PYTHONDONTWRITEBYTECODE: "1" },
+    })
+    process.stdin.write(JSON.stringify(plan))
+    process.stdin.end()
+    const [code, stdout, stderr] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+    ])
+    if (code !== 0) throw new Error((stderr || stdout).trim() || "Proto tool configuration is invalid")
+  }
+
   function topological<T extends { id: string; dependsOn: string[] }>(stages: T[]): T[] | undefined {
     const remaining = new Map(stages.map((stage, index) => [stage.id, { stage, index }]))
     const emitted = new Set<string>()
@@ -237,7 +299,7 @@ print(json.dumps([
     if (value && typeof value === "object") {
       return Object.fromEntries(
         Object.entries(value)
-          .toSorted(([left], [right]) => left.localeCompare(right))
+          .toSorted(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
           .map(([key, item]) => [key, canonical(item)]),
       )
     }

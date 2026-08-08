@@ -84,6 +84,7 @@ class StructureCifCompatibilityTest(unittest.TestCase):
                             "dependsOn": [],
                             "required": True,
                             "allowSkip": False,
+                            "allowedSkips": [],
                             "budget": {"maximumGpuSeconds": 10},
                         },
                         {
@@ -91,17 +92,26 @@ class StructureCifCompatibilityTest(unittest.TestCase):
                             "models": [{"id": "boltz2-prediction", "toolKey": "boltz2-prediction", "version": "d" * 40}],
                             "dependsOn": ["primary"],
                             "condition": {"source": "primary", "metric": "iptm", "operator": "gt", "value": 0.9},
+                            "candidateRouting": {"source": "primary", "metric": "iptm", "direction": "maximize", "maximumCandidates": 1},
                             "required": False,
                             "allowSkip": True,
+                            "allowedSkips": ["condition_false", "candidate_filtered"],
                             "budget": {"maximumGpuSeconds": 10},
                         },
                     ]
                 },
             }
-            candidates = {"format": "autofold.candidate-set.v1", "candidates": [{"id": "cand_one", "sequence": "ACDEFGHIK"}]}
+            candidates = {
+                "format": "autofold.candidate-set.v1",
+                "candidates": [
+                    {"id": "cand_one", "sequence": "ACDEFGHIK"},
+                    {"id": "cand_two", "sequence": "LMNPQRSTV"},
+                ],
+            }
             enriched = _enrich_v4(bundle, candidates, root / "output", Registry)
             index = json.loads((root / "output" / "model-runs" / "index.json").read_text(encoding="utf-8"))
-            self.assertEqual([entry["status"] for entry in index["entries"]], ["completed", "skipped"])
+            self.assertEqual([entry["status"] for entry in index["entries"]], ["completed", "completed", "skipped", "skipped"])
+            self.assertEqual([entry.get("kind") for entry in index["entries"][2:]], ["condition_false", "candidate_filtered"])
             self.assertEqual(len(enriched["candidates"][0]["evidence"]["predictors"]), 1)
 
 

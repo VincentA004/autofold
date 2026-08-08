@@ -52,6 +52,13 @@ export namespace ExecutionProtocol {
       message: "Trusted scientific bundles require the pinned Proto runtime",
       path: ["proto"],
     })
+  export const SkipKind = z.enum(["condition_false", "candidate_filtered", "optional_tool_failure"])
+  export const CandidateRouting = z.object({
+    source: z.string().regex(/^[a-z][a-z0-9_-]*$/),
+    metric: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+    direction: z.enum(["minimize", "maximize"]),
+    maximumCandidates: z.number().int().positive(),
+  })
   export const PipelineStage = z
     .object({
       id: z.string().regex(/^[a-z][a-z0-9_-]*$/),
@@ -61,6 +68,7 @@ export namespace ExecutionProtocol {
             id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
             version: z.string().trim().min(1),
             toolKey: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/).optional(),
+            config: z.record(z.string(), z.unknown()).optional(),
           }),
         )
         .min(1),
@@ -73,6 +81,7 @@ export namespace ExecutionProtocol {
           value: z.number().finite(),
         })
         .optional(),
+      candidateRouting: CandidateRouting.optional(),
       budget: z
         .object({
           maximumCandidates: z.number().int().positive().optional(),
@@ -81,10 +90,15 @@ export namespace ExecutionProtocol {
         .optional(),
       required: z.boolean(),
       allowSkip: z.boolean(),
+      allowedSkips: z.array(SkipKind).default([]),
     })
-    .refine((stage) => !stage.required || !stage.allowSkip, {
-      message: "Required pipeline stages cannot allow skips",
-      path: ["allowSkip"],
+    .superRefine((stage, context) => {
+      if (stage.required && stage.allowSkip) {
+        context.addIssue({ code: "custom", path: ["allowSkip"], message: "Required pipeline stages cannot allow skips" })
+      }
+      if (stage.allowedSkips.length > 0 && !stage.allowSkip) {
+        context.addIssue({ code: "custom", path: ["allowedSkips"], message: "A stage with typed skips must allow skips" })
+      }
     })
   export const PipelinePolicy = z
     .object({
@@ -114,6 +128,9 @@ export namespace ExecutionProtocol {
         if (stage.condition && !stage.dependsOn.includes(stage.condition.source)) {
           context.addIssue({ code: "custom", path: ["stages", index, "condition", "source"], message: "Condition source must be a direct dependency" })
         }
+        if (stage.candidateRouting && !stage.dependsOn.includes(stage.candidateRouting.source)) {
+          context.addIssue({ code: "custom", path: ["stages", index, "candidateRouting", "source"], message: "Candidate-routing source must be a direct dependency" })
+        }
       }
       const visiting = new Set<string>()
       const visited = new Set<string>()
@@ -142,7 +159,7 @@ export namespace ExecutionProtocol {
   function canonical(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(canonical)
     if (value && typeof value === "object") {
-      return Object.fromEntries(Object.entries(value).toSorted(([left], [right]) => left.localeCompare(right)).map(([key, item]) => [key, canonical(item)]))
+      return Object.fromEntries(Object.entries(value).toSorted(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([key, item]) => [key, canonical(item)]))
     }
     return value
   }
@@ -317,6 +334,7 @@ export namespace ExecutionProtocol {
   })
   const SkippedModelRunEntryV2 = z.object({
     status: z.literal("skipped"),
+    kind: SkipKind.optional(),
     candidateId: z.string().trim().min(1),
     stage: z.string().regex(/^[a-z][a-z0-9_-]*$/),
     modelId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),

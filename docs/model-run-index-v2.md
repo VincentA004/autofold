@@ -10,7 +10,8 @@ Every candidate, stage, model, and frozen seed has exactly one index decision:
 - `completed` links a Model Run Artifact v2, native metrics, structure, runtime
   cost, parameters, and parent artifacts;
 - `skipped` records a bounded reason and is legal only when the frozen stage
-  policy permits it.
+  policy permits its typed cause (`candidate_filtered`, `condition_false`, or
+  `optional_tool_failure`).
 
 Model Run Artifact v2 adds:
 
