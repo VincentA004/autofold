@@ -48,6 +48,101 @@ function bundleResource(workspace: string, bundlePath: string, resource: string)
   return path.isAbsolute(resource) ? inside(workspace, resource) : inside(path.dirname(bundlePath), resource)
 }
 
+async function verifyGenerationRuns(
+  output: string,
+  bundle: ExecutionProtocol.TrialBundle,
+  candidates: ExecutionProtocol.CandidateSet,
+): Promise<ExecutionProtocol.GenerationRunIndexV1 | undefined> {
+  if (bundle.designAdapter !== "proto") return undefined
+  if (candidates.format !== "autofold.candidate-set.v2" || !bundle.proto || bundle.format === "autofold.trial-bundle.v1") return undefined
+  const indexPath = path.join(output, "generation-runs", "index.json")
+  const index = ExecutionProtocol.GenerationRunIndexV1.parse(await Bun.file(indexPath).json())
+  if (index.runId !== bundle.runId || index.programHash !== bundle.programHash) {
+    throw new Error(`Run ${bundle.runId} generation index has another execution identity`)
+  }
+  if (
+    bundle.format === "autofold.trial-bundle.v4" &&
+    bundle.pipeline.generation?.budget.maximumGpuSeconds &&
+    index.runtime.wallSeconds > bundle.pipeline.generation.budget.maximumGpuSeconds
+  ) {
+    throw new Error(`Run ${bundle.runId} generation exceeded its frozen runtime budget`)
+  }
+  const candidateById = new Map(candidates.candidates.map((candidate) => [candidate.id, candidate]))
+  const declaredGenerators = bundle.format === "autofold.trial-bundle.v4" && bundle.pipeline.generation
+    ? new Map(bundle.pipeline.generation.generators.map((generator) => [generator.id, generator]))
+    : undefined
+  const observedGenerators = new Set<string>()
+  const identities = new Set<string>()
+  for (const entry of index.entries) {
+    const candidate = candidateById.get(entry.candidateId)
+    if (!candidate) throw new Error(`Run ${bundle.runId} generation references unknown candidate ${entry.candidateId}`)
+    const identity = `${entry.candidateId}:${entry.seed}`
+    if (identities.has(identity)) throw new Error(`Run ${bundle.runId} has duplicate generation evidence ${identity}`)
+    identities.add(identity)
+    if (entry.seed !== candidate.seed || !bundle.seeds.includes(entry.seed)) {
+      throw new Error(`Run ${bundle.runId} generation uses an unfrozen seed for ${entry.candidateId}`)
+    }
+    if (path.isAbsolute(entry.artifactPath) || (entry.structurePath && path.isAbsolute(entry.structurePath))) {
+      throw new Error(`Run ${bundle.runId} generation-run paths must be relative`)
+    }
+    const artifactPath = inside(output, entry.artifactPath)
+    const artifactHash = await fileHash(artifactPath)
+    if (artifactHash !== entry.artifactHash) {
+      throw new Error(`Run ${bundle.runId} generation artifact no longer matches its index for ${identity}`)
+    }
+    const artifact = ExecutionProtocol.GenerationRunArtifactV1.parse(await Bun.file(artifactPath).json())
+    const sequenceHash = `sha256:${new Bun.CryptoHasher("sha256").update(candidate.sequence).digest("hex")}`
+    if (
+      artifact.candidateId !== entry.candidateId ||
+      artifact.seed !== entry.seed ||
+      artifact.targetArtifactHash !== bundle.targetArtifactHash ||
+      artifact.sequenceHash !== sequenceHash ||
+      artifact.outputs.sequenceHash !== sequenceHash ||
+      artifact.generator.id !== entry.modelId ||
+      artifact.generator.version !== candidate.generation.version ||
+      artifact.generator.protoLanguageCommit !== bundle.proto.languageCommit ||
+      artifact.generator.protoToolsCommit !== bundle.proto.toolsCommit ||
+      artifact.programHash !== bundle.programHash ||
+      artifact.parametersHash !== candidate.generation.parametersHash ||
+      candidate.generation.model !== entry.modelId ||
+      candidate.generation.artifactHash !== entry.artifactHash
+    ) {
+      throw new Error(`Run ${bundle.runId} generation provenance mismatch for ${identity}`)
+    }
+    if (declaredGenerators) {
+      const components = new Map(artifact.generator.components.map((component) => [component.id, component]))
+      if (
+        components.size === 0 ||
+        [...components].some(([id, observed]) => {
+          const declared = declaredGenerators.get(id)
+          observedGenerators.add(id)
+          return !declared || observed.version !== declared.version || JSON.stringify(observed.toolsCalled) !== JSON.stringify([...declared.toolsCalled].sort())
+        })
+      ) {
+        throw new Error(`Run ${bundle.runId} generation artifact violates its frozen generator policy for ${identity}`)
+      }
+    }
+    if (entry.structurePath && entry.structureHash) {
+      const structureHash = await fileHash(inside(output, entry.structurePath))
+      if (structureHash !== entry.structureHash || artifact.outputs.structureHash !== structureHash) {
+        throw new Error(`Run ${bundle.runId} generated structure no longer matches its index for ${identity}`)
+      }
+    } else if (artifact.outputs.structureHash) {
+      throw new Error(`Run ${bundle.runId} generation index omits a declared structure for ${identity}`)
+    }
+  }
+  if (index.entries.length !== candidates.candidates.length || identities.size !== candidates.candidates.length) {
+    throw new Error(`Run ${bundle.runId} has incomplete generation evidence`)
+  }
+  if (declaredGenerators && (
+    observedGenerators.size !== declaredGenerators.size ||
+    [...declaredGenerators.keys()].some((id) => !observedGenerators.has(id))
+  )) {
+    throw new Error(`Run ${bundle.runId} generation evidence omits a frozen generator`)
+  }
+  return index
+}
+
 async function verifyModelRuns(
   output: string,
   bundle: ExecutionProtocol.TrialBundle,
@@ -270,6 +365,7 @@ async function verifyModelRunsV2(
 
 export namespace ResearchExecution {
   export const verifyModelEvidence = verifyModelRuns
+  export const verifyGenerationEvidence = verifyGenerationRuns
 
   export interface EvaluatorInfo {
     id: string
@@ -403,11 +499,17 @@ export namespace ResearchExecution {
     const pipeline = workflowPlan && proto
       ? await (async () => {
           await ResearchWorkflow.validateConfigs(workflowPlan, adapter.python, proto.root)
+          const [tools, generators] = await Promise.all([
+            ResearchWorkflow.discover(adapter.python, proto.root),
+            workflowPlan.generation ? ResearchWorkflow.discoverGenerators(adapter.python, proto.root) : Promise.resolve([]),
+          ])
           return ResearchWorkflow.compile({
             plan: workflowPlan,
-            tools: await ResearchWorkflow.discover(adapter.python, proto.root),
+            tools,
+            generators,
             contract: context.experiment.contract,
             protoToolsCommit: proto.toolsCommit,
+            protoLanguageCommit: proto.languageCommit,
           })
         })()
       : undefined
@@ -559,7 +661,10 @@ export namespace ResearchExecution {
       Bun.file(resultPath).json().then(ExecutionProtocol.EvaluationResult.parse),
       Bun.file(manifestPath).json().then(ExecutionProtocol.RunManifest.parse),
     ])
-    const modelRuns = await verifyModelRuns(output, bundle, candidates)
+    const [generationRuns, modelRuns] = await Promise.all([
+      verifyGenerationRuns(output, bundle, candidates),
+      verifyModelRuns(output, bundle, candidates),
+    ])
     if (
       bundle.runId !== run.id ||
       candidates.runId !== run.id ||
@@ -583,6 +688,9 @@ export namespace ResearchExecution {
       if (expectedFiles.target !== bundle.targetArtifactHash) {
         throw new Error(`Run ${run.id} target artifact no longer matches its frozen hash`)
       }
+    }
+    if (bundle.designAdapter === "proto") {
+      expectedFiles.generation_runs = await fileHash(path.join(output, "generation-runs", "index.json"))
     }
     if (bundle.format === "autofold.trial-bundle.v3" || bundle.format === "autofold.trial-bundle.v4") {
       if (bundle.targetStructurePath) {
@@ -621,6 +729,7 @@ export namespace ResearchExecution {
       evaluation,
       manifest,
       modelRuns,
+      generationRuns,
       incumbent: context.experiment.incumbentTrialId === run.trialId,
     }
   }
@@ -674,7 +783,10 @@ export namespace ResearchExecution {
     const result = ExecutionProtocol.EvaluationResult.parse(await Bun.file(path.join(output, "result.json")).json())
     const manifestPath = path.join(output, "manifest.json")
     const manifest = ExecutionProtocol.RunManifest.parse(await Bun.file(manifestPath).json())
-    await verifyModelRuns(output, bundle, candidates)
+    await Promise.all([
+      verifyGenerationRuns(output, bundle, candidates),
+      verifyModelRuns(output, bundle, candidates),
+    ])
     if (
       bundle.runId !== run.id ||
       candidates.runId !== run.id ||
@@ -714,6 +826,9 @@ export namespace ResearchExecution {
       if (expectedFiles.target !== bundle.targetArtifactHash) {
         throw new Error(`Run ${run.id} target artifact no longer matches its frozen hash`)
       }
+    }
+    if (bundle.designAdapter === "proto") {
+      expectedFiles.generation_runs = await fileHash(path.join(output, "generation-runs", "index.json"))
     }
     if (bundle.format === "autofold.trial-bundle.v3" || bundle.format === "autofold.trial-bundle.v4") {
       if (manifest.evidenceAdapterHash !== bundle.evidenceAdapter.sourceHash) {

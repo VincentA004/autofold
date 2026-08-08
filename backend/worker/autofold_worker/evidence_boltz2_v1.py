@@ -62,6 +62,21 @@ def _agreement(values: list[tuple[float, float]]) -> float:
     return _clamp(1.0 - 2.0 * (statistics.pstdev(value[0] for value in values) + statistics.pstdev(value[1] for value in values)))
 
 
+def _generation(candidate: dict[str, Any], bundle: dict[str, Any]) -> dict[str, str]:
+    observed = candidate.get("generation")
+    if isinstance(observed, dict) and all(
+        isinstance(observed.get(key), str) and observed[key]
+        for key in ("model", "version", "artifactHash", "parametersHash")
+    ):
+        return observed
+    return {
+        "model": "proto-language",
+        "version": bundle["proto"]["languageCommit"],
+        "artifactHash": bundle["programHash"],
+        "parametersHash": bundle["programHash"],
+    }
+
+
 def _metric_value(metric: str, metrics: list[dict[str, Any]]) -> float | None:
     if metric == "predictor_disagreement":
         if not metrics:
@@ -281,12 +296,7 @@ def _enrich_v4(
                 "format": "autofold.peptide-candidate.v1",
                 **candidate,
                 "modality": bundle["modality"],
-                "generation": {
-                    "model": "proto-language",
-                    "version": bundle["proto"]["languageCommit"],
-                    "artifactHash": bundle["programHash"],
-                    "parametersHash": bundle["programHash"],
-                },
+                "generation": _generation(candidate, bundle),
                 "evidence": {
                     "interfaceConfidence": sum(value[0] for value in confidence) / len(confidence),
                     "foldConfidence": sum(value[1] for value in confidence) / len(confidence),
@@ -412,12 +422,7 @@ def enrich(bundle: dict[str, Any], candidate_set: dict[str, Any], output: Path) 
                 "format": "autofold.peptide-candidate.v1",
                 **candidate,
                 "modality": bundle["modality"],
-                "generation": {
-                    "model": "proto-language",
-                    "version": bundle["proto"]["languageCommit"],
-                    "artifactHash": bundle["programHash"],
-                    "parametersHash": bundle["programHash"],
-                },
+                "generation": _generation(candidate, bundle),
                 "evidence": {
                     "interfaceConfidence": sum(value[0] for value in confidence) / len(confidence),
                     "foldConfidence": sum(value[1] for value in confidence) / len(confidence),

@@ -77,6 +77,35 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
         if "protoToolsCommit" in pipeline:
             if require_string(pipeline, "protoToolsCommit") != value["proto"]["toolsCommit"]:
                 raise ProtocolError("Pipeline policy uses another proto-tools commit")
+        generation = pipeline.get("generation")
+        if generation is not None:
+            if not isinstance(generation, dict) or generation.get("mode") != "proto_program":
+                raise ProtocolError("Pipeline generation policy is invalid")
+            declared_generators = generation.get("generators")
+            if not isinstance(declared_generators, list) or not declared_generators or not all(
+                isinstance(generator, dict) for generator in declared_generators
+            ):
+                raise ProtocolError("Pipeline generation policy requires generator declarations")
+            generator_ids = [require_string(generator, "id") for generator in declared_generators]
+            if len(set(generator_ids)) != len(generator_ids):
+                raise ProtocolError("Pipeline generation IDs must be unique")
+            for generator in declared_generators:
+                if require_string(generator, "version") != value["proto"]["languageCommit"]:
+                    raise ProtocolError("Pipeline generator version does not match proto-language")
+                tools_called = generator.get("toolsCalled")
+                if not isinstance(tools_called, list) or not all(isinstance(tool, str) and tool for tool in tools_called):
+                    raise ProtocolError("Pipeline generator tools must be string arrays")
+            generation_budget = generation.get("budget")
+            if not isinstance(generation_budget, dict):
+                raise ProtocolError("Pipeline generation budget is invalid")
+            maximum_candidates = generation_budget.get("maximumCandidates")
+            if not isinstance(maximum_candidates, int) or maximum_candidates <= 0 or maximum_candidates > value["candidateBudget"]:
+                raise ProtocolError("Pipeline generation candidate budget is invalid")
+            maximum_gpu_seconds = generation_budget.get("maximumGpuSeconds")
+            if maximum_gpu_seconds is not None and (
+                not isinstance(maximum_gpu_seconds, (int, float)) or maximum_gpu_seconds <= 0
+            ):
+                raise ProtocolError("Pipeline generation GPU budget is invalid")
         stage_ids: set[str] = set()
         for stage in pipeline["stages"]:
             if not isinstance(stage, dict):

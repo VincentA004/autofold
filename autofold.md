@@ -104,9 +104,11 @@ publishes its sources and proposed claims. See
 [docs/literature-rsi-v1.md](docs/literature-rsi-v1.md).
 
 The complete budgeted generation and consensus-validation route is specified in
-[docs/peptide-pipeline-v2.md](docs/peptide-pipeline-v2.md). Trial Bundle v4 and
-[Model Run Index v2](docs/model-run-index-v2.md) now represent and verify staged
-model evidence. [Dynamic Proto workflow v1](docs/dynamic-proto-workflow-v1.md)
+[docs/peptide-pipeline-v2.md](docs/peptide-pipeline-v2.md). Trial Bundle v4,
+[Generation Run Index v1](docs/generation-run-index-v1.md), and
+[Model Run Index v2](docs/model-run-index-v2.md) preserve the exact Proto
+generator, configuration, sequence, optional generated complex, and downstream
+model lineage for every candidate. [Dynamic Proto workflow v1](docs/dynamic-proto-workflow-v1.md)
 lets the autoresearch agent compose the graph from the pinned Proto registry;
 each run freezes the resolved topology before trusted execution.
 

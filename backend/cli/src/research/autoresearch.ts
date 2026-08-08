@@ -375,11 +375,16 @@ export namespace ResearchAutoresearch {
     }
     if (!adapter.proto) throw new Error("Pinned Proto metadata is unavailable")
     await ResearchWorkflow.validateConfigs(workflow, adapter.python, adapter.proto.root)
+    const generators = workflow.generation
+      ? await ResearchWorkflow.discoverGenerators(adapter.python, adapter.proto.root)
+      : []
     ResearchWorkflow.compile({
       plan: workflow,
       tools: await ResearchWorkflow.discover(adapter.python, adapter.proto.root),
+      generators,
       contract: context.experiment.contract,
       protoToolsCommit: adapter.proto.toolsCommit,
+      protoLanguageCommit: adapter.proto.languageCommit,
     })
   }
 

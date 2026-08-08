@@ -100,11 +100,29 @@ export namespace ExecutionProtocol {
         context.addIssue({ code: "custom", path: ["allowedSkips"], message: "A stage with typed skips must allow skips" })
       }
     })
+  export const GenerationPolicy = z.object({
+    mode: z.literal("proto_program"),
+    generators: z.array(z.object({
+      id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+      version: z.string().trim().min(1),
+      toolsCalled: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)),
+    })).min(1),
+    budget: z.object({
+      maximumCandidates: z.number().int().positive(),
+      maximumGpuSeconds: z.number().finite().positive().optional(),
+    }),
+  }).superRefine((generation, context) => {
+    const ids = generation.generators.map((generator) => generator.id)
+    if (new Set(ids).size !== ids.length) {
+      context.addIssue({ code: "custom", path: ["generators"], message: "Generation policy IDs must be unique" })
+    }
+  })
   export const PipelinePolicy = z
     .object({
       id: z.string().trim().min(1),
       sourceHash: Digest.optional(),
       protoToolsCommit: z.string().regex(/^[a-f0-9]{40}$/).optional(),
+      generation: GenerationPolicy.optional(),
       stages: z.array(PipelineStage).min(1),
     })
     .superRefine((policy, context) => {
@@ -256,6 +274,51 @@ export namespace ExecutionProtocol {
 
   export const CandidateSet = z.union([CandidateSetV1, CandidateSetV2])
   export type CandidateSet = z.infer<typeof CandidateSet>
+
+  export const GenerationRunArtifactV1 = z.object({
+    format: z.literal("autofold.generation-run.v1"),
+    candidateId: z.string().trim().min(1),
+    targetArtifactHash: Digest,
+    sequenceHash: Digest,
+    generator: z.object({
+      id: z.string().trim().min(1),
+      version: z.string().trim().min(1),
+      protoLanguageCommit: z.string().regex(/^[a-f0-9]{40}$/),
+      protoToolsCommit: z.string().regex(/^[a-f0-9]{40}$/),
+      components: z.array(z.object({
+        id: z.string().trim().min(1),
+        version: z.string().trim().min(1),
+        toolsCalled: z.array(z.string().trim().min(1)),
+        parameters: z.record(z.string(), z.unknown()),
+        parametersHash: Digest,
+      })),
+    }),
+    programHash: Digest,
+    parametersHash: Digest,
+    seed: z.number().int(),
+    metadata: z.record(z.string(), z.unknown()),
+    outputs: z.object({ sequenceHash: Digest, structureHash: Digest.optional() }),
+  })
+  export type GenerationRunArtifactV1 = z.infer<typeof GenerationRunArtifactV1>
+
+  export const GenerationRunIndexV1 = z.object({
+    format: z.literal("autofold.generation-run-index.v1"),
+    runId: z.string().startsWith("run_"),
+    programHash: Digest,
+    runtime: z.object({ wallSeconds: z.number().finite().nonnegative() }),
+    entries: z.array(z.object({
+      candidateId: z.string().trim().min(1),
+      seed: z.number().int(),
+      modelId: z.string().trim().min(1),
+      artifactPath: z.string().trim().min(1),
+      artifactHash: Digest,
+      structurePath: z.string().trim().min(1).optional(),
+      structureHash: Digest.optional(),
+    }).refine((entry) => Boolean(entry.structurePath) === Boolean(entry.structureHash), {
+      message: "Generation structure path and hash must be declared together",
+    })),
+  })
+  export type GenerationRunIndexV1 = z.infer<typeof GenerationRunIndexV1>
 
   export const ModelRunArtifactV1 = z.object({
     format: z.literal("autofold.model-run.v1"),

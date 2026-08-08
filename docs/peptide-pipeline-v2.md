@@ -50,8 +50,14 @@ dependency's native metric and process only a frozen top-k candidate set.
 Filtered candidates, false conditions, and optional tool failures remain
 distinct verifiable decisions.
 
+Generation is also artifact-backed. The Proto program can compose any installed
+generator, while its literal workflow freezes the allowed generator registry IDs
+and budget. Generation Run Index v1 captures the observed generator components,
+configuration hashes, native metadata, output sequence, and generated complex for
+each candidate before validation begins.
+
 The deterministic Boltz/Chai/Protenix fixture tests the topology without making
 biological claims. Dynamic Proto workflow compilation and the trusted registry
-dispatch bridge are implemented. A real multi-model 4090 acceptance run is
-still required before treating the route as biologically operational. See
+dispatch bridge are implemented. A bounded 4090 run has verified real model
+dispatch and top-k routing, but it is not biological calibration. See
 [dynamic-proto-workflow-v1.md](dynamic-proto-workflow-v1.md).

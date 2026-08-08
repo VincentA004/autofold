@@ -19,6 +19,11 @@ export namespace ResearchWorkflow {
       format: z.literal("autofold.proto-workflow.v1"),
       id: z.string().regex(/^[a-z][a-z0-9_-]*$/),
       maximumGpuSeconds: z.number().finite().nonnegative(),
+      generation: z.object({
+        generators: z.array(toolKey).min(1).max(8),
+        maximumCandidates: z.number().int().positive(),
+        maximumGpuSeconds: z.number().finite().positive().optional(),
+      }).optional(),
       stages: z
         .array(
           z.object({
@@ -41,6 +46,9 @@ export namespace ResearchWorkflow {
     .superRefine((plan, context) => {
       if (Buffer.byteLength(JSON.stringify(plan), "utf8") > 256 * 1024) {
         context.addIssue({ code: "custom", path: [], message: "Workflow manifest is too large" })
+      }
+      if (plan.generation && new Set(plan.generation.generators).size !== plan.generation.generators.length) {
+        context.addIssue({ code: "custom", path: ["generation", "generators"], message: "Generation tools must be unique" })
       }
       const ids = new Set(plan.stages.map((stage) => stage.id))
       if (ids.size !== plan.stages.length) {
@@ -94,27 +102,65 @@ export namespace ResearchWorkflow {
     usesGpu: z.boolean(),
   })
   export type Tool = z.infer<typeof Tool>
+  export const Generator = z.object({
+    key: toolKey,
+    usesGpu: z.boolean(),
+    toolsCalled: z.array(toolKey),
+  })
+  export type Generator = z.infer<typeof Generator>
 
   export interface CompileInput {
     plan: z.input<typeof Plan>
     tools: Tool[]
+    generators?: Generator[]
     contract: {
       budget: ResearchDomain.ExperimentContract["budget"]
       evaluator: Pick<ResearchDomain.ExperimentContract["evaluator"], "submissionSize">
     }
     protoToolsCommit: string
+    protoLanguageCommit: string
     allowedCapabilities?: string[]
   }
 
   export function compile(raw: CompileInput): ExecutionProtocol.PipelinePolicy {
     const plan = Plan.parse(raw.plan)
     const tools = new Map(z.array(Tool).parse(raw.tools).map((tool) => [tool.key, tool]))
+    const generators = new Map(z.array(Generator).parse(raw.generators ?? []).map((generator) => [generator.key, generator]))
     const allowedCapabilities = new Set(raw.allowedCapabilities ?? ["structure_prediction"])
     const maximumGpuSeconds = raw.contract.budget.gpuHours * 3_600
     if (plan.maximumGpuSeconds > maximumGpuSeconds) {
       throw new Error(`Workflow requests ${plan.maximumGpuSeconds} GPU seconds; experiment permits ${maximumGpuSeconds}`)
     }
-    const declaredGpuSeconds = plan.stages.reduce((total, stage) => total + (stage.maximumGpuSeconds ?? 0), 0)
+    let generation: ExecutionProtocol.PipelinePolicy["generation"]
+    if (plan.generation) {
+      if (plan.generation.maximumCandidates > raw.contract.budget.maximumCandidates) {
+        throw new Error(`Generation requests ${plan.generation.maximumCandidates} candidates; experiment permits ${raw.contract.budget.maximumCandidates}`)
+      }
+      const selected = plan.generation.generators.map((key) => {
+        const generator = generators.get(key)
+        if (!generator) throw new Error(`Proto generator is not installed: ${key}`)
+        return generator
+      })
+      if (selected.some((generator) => generator.usesGpu) && !plan.generation.maximumGpuSeconds) {
+        throw new Error("GPU generation must declare maximumGpuSeconds")
+      }
+      if ((plan.generation.maximumGpuSeconds ?? 0) > plan.maximumGpuSeconds) {
+        throw new Error("Generation GPU budget exceeds the workflow budget")
+      }
+      generation = {
+        mode: "proto_program",
+        generators: selected.map((generator) => ({
+          id: generator.key,
+          version: raw.protoLanguageCommit,
+          toolsCalled: generator.toolsCalled,
+        })),
+        budget: {
+          maximumCandidates: plan.generation.maximumCandidates,
+          maximumGpuSeconds: plan.generation.maximumGpuSeconds,
+        },
+      }
+    }
+    const declaredGpuSeconds = (plan.generation?.maximumGpuSeconds ?? 0) + plan.stages.reduce((total, stage) => total + (stage.maximumGpuSeconds ?? 0), 0)
     if (declaredGpuSeconds > plan.maximumGpuSeconds) {
       throw new Error(`Workflow stages request ${declaredGpuSeconds} GPU seconds; workflow permits ${plan.maximumGpuSeconds}`)
     }
@@ -184,6 +230,7 @@ export namespace ResearchWorkflow {
       id: plan.id,
       sourceHash: hash(plan),
       protoToolsCommit: raw.protoToolsCommit,
+      generation,
       stages,
     })
   }
@@ -246,6 +293,31 @@ print(json.dumps([
     ])
     if (code !== 0) throw new Error((stderr || stdout).trim() || "Cannot discover pinned Proto tools")
     return z.array(Tool).parse(JSON.parse(stdout))
+  }
+
+  export async function discoverGenerators(python: string, cwd: string): Promise<Generator[]> {
+    const source = String.raw`
+import json
+from proto_language.generator import GeneratorRegistry
+print(json.dumps([
+    {"key": spec.key, "usesGpu": spec.uses_gpu, "toolsCalled": spec.tools_called}
+    for spec in GeneratorRegistry.list_all()
+]))
+`
+    const process = Bun.spawn([python, "-c", source], {
+      cwd,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...Bun.env, PYTHONDONTWRITEBYTECODE: "1" },
+    })
+    const [code, stdout, stderr] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+    ])
+    if (code !== 0) throw new Error((stderr || stdout).trim() || "Cannot discover pinned Proto generators")
+    return z.array(Generator).parse(JSON.parse(stdout))
   }
 
   export async function validateConfigs(raw: Plan, python: string, cwd: string): Promise<void> {

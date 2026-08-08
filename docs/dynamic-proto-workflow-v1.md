@@ -16,6 +16,11 @@ AUTOFOLD_WORKFLOW = {
     "format": "autofold.proto-workflow.v1",
     "id": "adaptive_validation",
     "maximumGpuSeconds": 1200,
+    "generation": {
+        "generators": ["rfdiffusion-mpnn-binder"],
+        "maximumCandidates": 100,
+        "maximumGpuSeconds": 300,
+    },
     "stages": [
         {
             "id": "primary",
@@ -66,14 +71,20 @@ AUTOFOLD_WORKFLOW = {
 
 Before a trial is created, autoresearch statically extracts the literal without
 executing `trial.py`. The compiler discovers the pinned live Proto registry,
-checks tool availability and categories, topologically orders the graph,
+checks generator and tool availability, topologically orders the validation graph,
 enforces the experiment budget, resolves `first_available` routes, and pins
-each selected tool to the proto-tools Git commit.
+each selected component to its Proto repository commit.
 
 Run startup repeats compilation. Trial Bundle v4 freezes the resulting policy.
 The worker independently binds it back to the literal manifest, then the
 trusted structure bridge invokes the selected `ToolRegistry` functions. Model
 Run Index v2 records completed calls and legal conditional skips.
+
+Generation remains inside the agent-authored Proto `Program`. The trusted worker
+observes the completed program, checks its generator inventory against the frozen
+`generation` policy, and emits Generation Run Index v1 with per-candidate sequence,
+configuration, metadata, structure, and provenance hashes. See
+[generation-run-index-v1.md](generation-run-index-v1.md).
 
 The agent can rewrite the Proto `Program` and validation manifest between
 trials. It cannot rewrite them after execution starts, fabricate evidence,
@@ -96,9 +107,10 @@ budget allocation. Successful trajectories can refine those skills and the
 next manifest; the evidence bridge and evaluator remain trusted runtime
 components.
 
-The installed bridge currently accepts Proto `structure_prediction` tools with
+The installed bridge accepts Proto `structure_prediction` tools with
 the common typed structure interface. A real multi-model 4090 acceptance run is
-still needed to calibrate native metrics and runtime budgets.
+complete for Boltz, Chai, and Protenix Tiny; full-model scientific calibration is
+still required.
 
 The bounded hardware probe runs two primary predictions and routes one survivor
 through Chai and Protenix:

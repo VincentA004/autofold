@@ -116,7 +116,7 @@ def run(
     manifest_path = output / "manifest.json"
 
     adapter = MockDesignAdapter() if bundle["designAdapter"] == "mock" else ProtoDesignAdapter()
-    candidate_set = adapter.generate(runtime_bundle)
+    candidate_set = adapter.generate(runtime_bundle, output)
     if enrich is not None:
         candidate_set = enrich(runtime_bundle, candidate_set, output)
     write_json(candidates_path, candidate_set)
@@ -129,6 +129,11 @@ def run(
         files["target"] = target_path
     if target_structure_path is not None:
         files["target_structure"] = target_structure_path
+    generation_runs_path = output / "generation-runs" / "index.json"
+    if bundle["designAdapter"] == "proto":
+        if not generation_runs_path.is_file():
+            raise ProtocolError("Proto design adapter did not produce generation-runs/index.json")
+        files["generation_runs"] = generation_runs_path
     model_runs_path = output / "model-runs" / "index.json"
     if enrich is not None:
         if not model_runs_path.is_file():

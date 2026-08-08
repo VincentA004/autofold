@@ -462,6 +462,14 @@ describe("research execution worker", () => {
       expect(candidates.targetArtifactHash).toBe(target.targetArtifactHash)
       expect(candidates.candidates).toHaveLength(3)
       expect(candidates.candidates[0]?.evidence.predictors).toHaveLength(3)
+      const generationRuns = await ResearchExecution.verifyGenerationEvidence(path.join(root, "one"), bundle, candidates)
+      expect(generationRuns?.entries).toHaveLength(3)
+      const firstGeneration = ExecutionProtocol.GenerationRunArtifactV1.parse(
+        await Bun.file(path.join(root, "one", generationRuns!.entries[0]!.artifactPath)).json(),
+      )
+      expect(firstGeneration.programHash).toBe(bundle.programHash)
+      expect(firstGeneration.generator.components).toHaveLength(1)
+      expect(candidates.candidates[0]?.generation.artifactHash).toBe(generationRuns!.entries[0]!.artifactHash)
       const modelRuns = ExecutionProtocol.ModelRunIndex.parse(
         await Bun.file(path.join(root, "one", "model-runs", "index.json")).json(),
       )
@@ -484,6 +492,7 @@ describe("research execution worker", () => {
       expect(manifest.files.target).toBe(target.targetArtifactHash)
       expect(manifest.files.target_structure).toBe(target.artifact.structure!.contentHash)
       expect(manifest.files.model_runs).toBe(await hashFile(path.join(root, "one", "model-runs", "index.json")))
+      expect(manifest.files.generation_runs).toBe(await hashFile(path.join(root, "one", "generation-runs", "index.json")))
       expect(manifest.evidenceAdapterHash).toBe(evidenceAdapterHash)
       expect(manifest.files.candidates).toBe(await hashFile(path.join(root, "one", "candidates.json")))
     } finally {

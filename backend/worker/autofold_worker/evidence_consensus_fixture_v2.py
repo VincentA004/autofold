@@ -144,12 +144,12 @@ def enrich(bundle: dict[str, Any], candidate_set: dict[str, Any], output: Path) 
                 "format": "autofold.peptide-candidate.v1",
                 **candidate,
                 "modality": bundle["modality"],
-                "generation": {
+                "generation": candidate.get("generation", {
                     "model": "proto-language",
                     "version": bundle["proto"]["languageCommit"],
                     "artifactHash": bundle["programHash"],
                     "parametersHash": bundle["programHash"],
-                },
+                }),
                 "evidence": {
                     "interfaceConfidence": sum(value[0] for value in confidence) / len(confidence),
                     "foldConfidence": sum(value[1] for value in confidence) / len(confidence),

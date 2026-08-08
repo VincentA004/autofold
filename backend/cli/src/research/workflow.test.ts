@@ -9,22 +9,36 @@ const contract = {
   evaluator: { submissionSize: 3 },
 }
 const commit = "a".repeat(40)
+const languageCommit = "b".repeat(40)
 const tools: ResearchWorkflow.Tool[] = [
   { key: "boltz2-prediction", category: "structure_prediction", usesGpu: true },
   { key: "chai1-prediction", category: "structure_prediction", usesGpu: true },
   { key: "protenix-prediction", category: "structure_prediction", usesGpu: true },
 ]
+const generators: ResearchWorkflow.Generator[] = [
+  { key: "rfdiffusion-mpnn-binder", usesGpu: true, toolsCalled: ["rfdiffusion3-design", "proteinmpnn-sample"] },
+]
+const protoRoot = path.join(os.homedir(), "Developer", "repo_store", "github.com-evo-design-proto-language")
+const protoPython = path.resolve(import.meta.dir, "../../../../.autofold/envs/proto/bin/python")
+const generationExample = path.resolve(import.meta.dir, "../../../worker/examples/rfdiffusion_mpnn_trial.py")
 
 describe("dynamic Proto workflow compiler", () => {
   test("resolves registry tools and topologically freezes an agent-authored graph", () => {
     const pipeline = ResearchWorkflow.compile({
       contract,
       protoToolsCommit: commit,
+      protoLanguageCommit: languageCommit,
       tools,
+      generators,
       plan: {
         format: "autofold.proto-workflow.v1",
         id: "adaptive-validation",
-        maximumGpuSeconds: 1_200,
+        maximumGpuSeconds: 1_300,
+        generation: {
+          generators: ["rfdiffusion-mpnn-binder"],
+          maximumCandidates: 100,
+          maximumGpuSeconds: 100,
+        },
         stages: [
           {
             id: "resolve_disagreement",
@@ -64,6 +78,13 @@ describe("dynamic Proto workflow compiler", () => {
     expect(pipeline.stages[2]?.allowedSkips).toEqual(["condition_false", "candidate_filtered", "optional_tool_failure"])
     expect(pipeline.sourceHash).toStartWith("sha256:")
     expect(pipeline.protoToolsCommit).toBe(commit)
+    expect(pipeline.generation?.generators).toEqual([
+      {
+        id: "rfdiffusion-mpnn-binder",
+        version: languageCommit,
+        toolsCalled: ["rfdiffusion3-design", "proteinmpnn-sample"],
+      },
+    ])
   })
 
   test("enforces the frozen experiment compute budget", () => {
@@ -71,6 +92,7 @@ describe("dynamic Proto workflow compiler", () => {
       ResearchWorkflow.compile({
         contract,
         protoToolsCommit: commit,
+        protoLanguageCommit: languageCommit,
         tools,
         plan: {
           format: "autofold.proto-workflow.v1",
@@ -136,4 +158,30 @@ describe("dynamic Proto workflow compiler", () => {
       await fs.rm(root, { recursive: true, force: true })
     }
   })
+
+  test("compiles the production RFdiffusion3 and ProteinMPNN trial against the pinned registries", async () => {
+    const installed = await Promise.all([fs.access(protoPython), fs.access(path.join(protoRoot, "proto_language"))]).then(
+      () => true,
+      () => false,
+    )
+    if (!installed) return
+    const plan = await ResearchWorkflow.extract(generationExample, protoPython)
+    expect(plan?.generation?.generators).toEqual(["rfdiffusion-mpnn-binder"])
+    await ResearchWorkflow.validateConfigs(plan!, protoPython, protoRoot)
+    const languageCommit = (await Bun.$`git -C ${protoRoot} rev-parse HEAD`.text()).trim()
+    const toolsCommit = (await Bun.$`git -C ${path.join(protoRoot, "proto-tools")} rev-parse HEAD`.text()).trim()
+    const pipeline = ResearchWorkflow.compile({
+      plan: plan!,
+      tools: await ResearchWorkflow.discover(protoPython, protoRoot),
+      generators: await ResearchWorkflow.discoverGenerators(protoPython, protoRoot),
+      contract: {
+        budget: { maximumCandidates: 16, gpuHours: 2, wallTimeMinutes: 180 },
+        evaluator: { submissionSize: 2 },
+      },
+      protoLanguageCommit: languageCommit,
+      protoToolsCommit: toolsCommit,
+    })
+    expect(pipeline.generation?.generators[0]?.id).toBe("rfdiffusion-mpnn-binder")
+    expect(pipeline.stages.map((stage) => stage.id)).toEqual(["primary", "independent", "resolution"])
+  }, 30_000)
 })

@@ -5,11 +5,13 @@ import importlib.util
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 from ..protocol import ProtocolError
+from ..generation import capture
 
 AMINO_ACIDS = set("ACDEFGHIKLMNPQRSTVWY")
 SCIENTIFIC_EVALUATOR = ("peptide-panel", "1")
@@ -83,7 +85,7 @@ def _normalize(raw: Any, bundle: dict[str, Any]) -> dict[str, Any]:
 
 
 class ProtoDesignAdapter:
-    def generate(self, bundle: dict[str, Any]) -> dict[str, Any]:
+    def generate(self, bundle: dict[str, Any], output: Path) -> dict[str, Any]:
         proto = bundle.get("proto")
         if not isinstance(proto, dict):
             raise ProtocolError("Proto adapter requires pinned Proto runtime metadata")
@@ -110,7 +112,9 @@ class ProtoDesignAdapter:
         program = build_program(bundle)
         if not callable(getattr(program, "run", None)):
             raise ProtocolError("build_program(bundle) must return a Proto Program")
+        started = time.monotonic()
         program.run()
+        wall_seconds = time.monotonic() - started
 
         extract = getattr(module, "extract_candidates", None)
         if callable(extract):
@@ -121,4 +125,4 @@ class ProtoDesignAdapter:
                 for construct in program.constructs
                 for sequence in construct.joined_sequences
             ]
-        return _normalize(raw, bundle)
+        return capture(bundle, _normalize(raw, bundle), program, output, wall_seconds)
