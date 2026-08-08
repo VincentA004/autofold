@@ -81,7 +81,13 @@ function conceptBody(concept: ResearchDomain.KnowledgeConcept): string {
 
 function literatureBody(record: ResearchDomain.LiteratureRecord): string {
   return matter.stringify(
-    [`# ${record.title}`, "", record.summary ?? "No summary was returned by the source.", ""].join("\n"),
+    [
+      `# ${record.title}`,
+      "",
+      record.summary ?? "No summary was returned by the source.",
+      ...(record.excerpts.length ? ["", "## Frozen evidence excerpts", "", ...record.excerpts.map((excerpt) => `> ${excerpt}`)] : []),
+      "",
+    ].join("\n"),
     {
       type: "Literature Source",
       campaign_id: record.campaignId,

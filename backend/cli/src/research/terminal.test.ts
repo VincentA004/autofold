@@ -76,6 +76,40 @@ describe("research terminal", () => {
     })
   })
 
+  test("starts a bounded dynamic literature review", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const code = await ResearchTerminal.run(
+      [
+        "literature",
+        "review",
+        "cmp_one",
+        "--session",
+        "ses_parent",
+        "--question",
+        "Which constraints improve selectivity?",
+        "--max-sources",
+        "12",
+        "--max-claims",
+        "8",
+      ],
+      {
+        output: () => undefined,
+        fetchFn: (async (input, init) => {
+          calls.push({ url: String(input), init })
+          return new Response(JSON.stringify({ records: [], claims: [], unresolvedQuestions: [] }))
+        }) as typeof fetch,
+      },
+    )
+    expect(code).toBe(0)
+    expect(calls[0]?.url).toBe("http://127.0.0.1:4096/research/campaigns/cmp_one/literature/review")
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      sessionId: "ses_parent",
+      question: "Which constraints improve selectivity?",
+      maxSources: 12,
+      maxClaims: 8,
+    })
+  })
+
   test("watches a run through completion and then prints verified artifacts", async () => {
     const output: string[] = []
     let reads = 0

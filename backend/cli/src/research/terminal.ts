@@ -155,6 +155,18 @@ export namespace ResearchTerminal {
         )
         return 0
       }
+      if (command === "literature" && noun === "review") {
+        outputJSON(
+          output,
+          await client.post(`/campaigns/${requiredPosition(parsed, 2, "campaign id")}/literature/review`, {
+            sessionId: requiredFlag(parsed, "session"),
+            ...(stringFlag(parsed, "question") ? { question: stringFlag(parsed, "question") } : {}),
+            maxSources: integerFlag(parsed, "max-sources", 20),
+            maxClaims: integerFlag(parsed, "max-claims", 20),
+          }),
+        )
+        return 0
+      }
       if (command === "literature") {
         outputJSON(output, await client.get(`/campaigns/${requiredPosition(parsed, 1, "campaign id")}/literature`))
         return 0
@@ -398,6 +410,7 @@ Commands:
   campaign create --objective TEXT
   campaign activate CMP_ID
   literature search CMP_ID --query TEXT [--databases pubmed,europepmc,openalex] [--limit N]
+  literature review CMP_ID --session SES_ID [--question TEXT] [--max-sources N] [--max-claims N]
   literature CMP_ID
   claim add CMP_ID --statement TEXT --evidence LIT_ID[,LIT_ID] [--kind hypothesis] [--stance context] [--confidence 0.5]
   claim review CMP_ID CLM_ID --by REVIEWER [--status reviewed|contested|deprecated]

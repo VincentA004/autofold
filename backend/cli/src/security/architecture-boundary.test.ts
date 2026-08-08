@@ -43,4 +43,13 @@ describe("Autofold backend architecture boundary", () => {
     expect(autoresearch).toContain('await import("@/session")')
     expect(autoresearch).toContain('await import("@/session/prompt")')
   })
+
+  test("literature RSI loads the child-agent harness only for a requested review", () => {
+    const review = read("../research/literature-review.ts")
+
+    expect(review).not.toContain('import { Session } from "@/session"')
+    expect(review).not.toContain('import { SessionPrompt } from "@/session/prompt"')
+    expect(review).toContain('await import("@/session")')
+    expect(review).toContain('await import("@/session/prompt")')
+  })
 })

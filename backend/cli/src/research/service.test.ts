@@ -60,6 +60,69 @@ async function evaluatingTrial(service: ResearchService.Service, projectId: stri
 }
 
 describe("research service", () => {
+  test("atomically ingests a bounded literature-agent review", async () => {
+    const { service, store, projectId } = fixture()
+    const campaign = await service.createCampaign(projectId, { objective: "Find selective peptide binders" })
+    await service.activateCampaign(projectId, campaign.id)
+    const result = await service.ingestLiteratureReview(projectId, campaign.id, {
+      generatedBy: "literature-review:ses_child",
+      sources: [
+        {
+          key: "pubmed:7",
+          database: "pubmed",
+          sourceId: "7",
+          title: "Primary interface study",
+          summary: "A primary study of interface constraints.",
+          excerpts: ["Hotspot constraints improved selective recovery."],
+          url: "https://pubmed.ncbi.nlm.nih.gov/7/",
+          query: "interface hotspot peptide design",
+        },
+      ],
+      claims: [
+        {
+          kind: "design_rule",
+          statement: "Hotspot constraints may improve selective recovery.",
+          stance: "supports",
+          confidence: 0.72,
+          evidence: [{ sourceKey: "pubmed:7", excerpt: "Hotspot constraints improved selective recovery." }],
+        },
+      ],
+      unresolvedQuestions: ["Does this transfer across target families?"],
+    })
+    expect(result.records).toHaveLength(1)
+    expect(result.claims[0]?.evidence[0]?.literatureId).toBe(result.records[0]?.id)
+    expect(result.claims[0]?.status).toBe("proposed")
+
+    await expect(
+      service.ingestLiteratureReview(projectId, campaign.id, {
+        generatedBy: "literature-review:ses_bad",
+        sources: [
+          {
+            key: "pubmed:8",
+            database: "pubmed",
+            sourceId: "8",
+            title: "Another study",
+            excerpts: ["The actual frozen excerpt."],
+            query: "another query",
+          },
+        ],
+        claims: [
+          {
+            kind: "hypothesis",
+            statement: "Unsupported proposal",
+            stance: "supports",
+            confidence: 0.9,
+            evidence: [{ sourceKey: "pubmed:8", excerpt: "A fabricated excerpt." }],
+          },
+        ],
+        unresolvedQuestions: [],
+      }),
+    ).rejects.toBeInstanceOf(ResearchService.ConflictError)
+    const state = await store.read(projectId)
+    expect(Object.values(state.literature)).toHaveLength(1)
+    expect(Object.values(state.claims)).toHaveLength(1)
+  })
+
   test("compounds immutable literature records into evidence-linked campaign claims", async () => {
     const { service, store, projectId } = fixture()
     const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "autofold-literature-"))
@@ -71,6 +134,7 @@ describe("research service", () => {
         sourceId: "12345",
         title: "A peptide binder design study",
         summary: "Interface hotspots improved binder recovery.",
+        excerpts: [],
         url: "https://pubmed.ncbi.nlm.nih.gov/12345/",
         query: "peptide binder interface hotspots",
       }

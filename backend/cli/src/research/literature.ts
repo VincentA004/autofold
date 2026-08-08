@@ -53,6 +53,7 @@ export namespace ResearchLiterature {
             sourceId: hit.id,
             title: hit.title,
             summary: hit.summary,
+            excerpts: [],
             url: hit.url,
             query: input.query,
           }),

@@ -10,6 +10,7 @@ import {
   ResearchDomain,
   ResearchExecution,
   ResearchLiterature,
+  ResearchLiteratureReview,
   ResearchPrograms,
   ResearchService,
 } from "@/research"
@@ -135,6 +136,32 @@ export const ResearchRoutes = lazy(() =>
             { campaignId: c.req.valid("param").campaignId, ...c.req.valid("json") },
             c.req.raw.signal,
           ),
+        ),
+    )
+    .post(
+      "/campaigns/:campaignId/literature/review",
+      describeRoute({
+        summary: "Run a bounded dynamic campaign literature review",
+        description: "Spawns a literature subagent that searches and fetches sources, then atomically records proposed evidence-linked claims.",
+        operationId: "research.literature.review",
+        responses: { 200: { description: "Persisted literature records, proposed claims, and unresolved questions" } },
+      }),
+      validator("param", CampaignParam),
+      validator(
+        "json",
+        ResearchLiteratureReview.Input.omit({ campaignId: true }).extend({
+          maxSources: ResearchLiteratureReview.Input.shape.maxSources.optional(),
+          maxClaims: ResearchLiteratureReview.Input.shape.maxClaims.optional(),
+        }),
+      ),
+      async (c) =>
+        c.json(
+          await ResearchLiteratureReview.run({
+            campaignId: c.req.valid("param").campaignId,
+            ...c.req.valid("json"),
+            maxSources: c.req.valid("json").maxSources ?? 20,
+            maxClaims: c.req.valid("json").maxClaims ?? 20,
+          }),
         ),
     )
     .get(

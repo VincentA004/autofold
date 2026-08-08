@@ -60,6 +60,7 @@ export namespace ResearchService {
     sourceId: z.string().trim().min(1),
     title: z.string().trim().min(1),
     summary: z.string().trim().min(1).optional(),
+    excerpts: z.array(z.string().trim().min(1).max(4_000)).max(50).default([]),
     url: z.string().url().optional(),
     query: z.string().trim().min(1),
   })
@@ -80,6 +81,64 @@ export namespace ResearchService {
     reviewedBy: z.string().trim().min(1),
   })
   export type ReviewClaimInput = z.infer<typeof ReviewClaimInput>
+
+  export const LiteratureReviewInput = z
+    .object({
+      generatedBy: z.string().trim().min(1),
+      sources: z
+        .array(
+          IngestLiteratureInput.extend({
+            key: z.string().trim().min(1).max(500),
+            excerpts: z.array(z.string().trim().min(1).max(4_000)).min(1).max(50),
+          }),
+        )
+        .max(50),
+      claims: z
+        .array(
+          z.object({
+            kind: CreateClaimInput.shape.kind,
+            statement: CreateClaimInput.shape.statement,
+            stance: CreateClaimInput.shape.stance,
+            confidence: CreateClaimInput.shape.confidence,
+            evidence: z
+              .array(
+                z.object({
+                  sourceKey: z.string().trim().min(1).max(500),
+                  excerpt: z.string().trim().min(1).max(4_000),
+                }),
+              )
+              .min(1)
+              .max(100),
+          }),
+        )
+        .max(50),
+      unresolvedQuestions: z.array(z.string().trim().min(1).max(2_000)).max(50).default([]),
+    })
+    .superRefine((review, context) => {
+      const keys = new Set(review.sources.map((source) => source.key))
+      if (keys.size !== review.sources.length) {
+        context.addIssue({ code: "custom", path: ["sources"], message: "Literature source keys must be unique" })
+      }
+      for (const [claimIndex, claim] of review.claims.entries()) {
+        for (const [evidenceIndex, evidence] of claim.evidence.entries()) {
+          if (!keys.has(evidence.sourceKey)) {
+            context.addIssue({
+              code: "custom",
+              path: ["claims", claimIndex, "evidence", evidenceIndex, "sourceKey"],
+              message: `Unknown literature source key: ${evidence.sourceKey}`,
+            })
+          }
+        }
+      }
+      if (review.claims.length === 0 && review.unresolvedQuestions.length === 0) {
+        context.addIssue({
+          code: "custom",
+          path: ["unresolvedQuestions"],
+          message: "A review with no supported claims must record an unresolved question",
+        })
+      }
+    })
+  export type LiteratureReviewInput = z.infer<typeof LiteratureReviewInput>
 
   export interface Options {
     now?: () => string
@@ -154,6 +213,7 @@ export namespace ResearchService {
           sourceId: input.sourceId,
           title: input.title,
           summary: input.summary,
+          excerpts: input.excerpts,
           url: input.url,
         })
         const contentHash = `sha256:${new Bun.CryptoHasher("sha256").update(canonical).digest("hex")}`
@@ -194,6 +254,16 @@ export namespace ResearchService {
           if (!literature || literature.campaignId !== campaignId) {
             throw new NotFoundError({ entity: "literature", id: evidence.literatureId })
           }
+          if (
+            evidence.excerpt &&
+            !literature.excerpts.includes(evidence.excerpt) &&
+            !literature.summary?.includes(evidence.excerpt)
+          ) {
+            throw new ConflictError({
+              code: "claim_excerpt_not_frozen",
+              message: `Claim excerpt is not present in literature record ${literature.id}`,
+            })
+          }
         }
         const claim = ResearchDomain.KnowledgeClaim.parse({
           id: this.id("clm"),
@@ -230,6 +300,87 @@ export namespace ResearchService {
         })
         state.claims[claimId] = updated
         return updated
+      })
+    }
+
+    async ingestLiteratureReview(
+      projectId: string,
+      campaignId: string,
+      raw: LiteratureReviewInput,
+    ): Promise<{
+      records: ResearchDomain.LiteratureRecord[]
+      claims: ResearchDomain.KnowledgeClaim[]
+      unresolvedQuestions: string[]
+    }> {
+      const input = LiteratureReviewInput.parse(raw)
+      return this.store.mutate(projectId, (state) => {
+        this.campaign(state, campaignId)
+        const records: ResearchDomain.LiteratureRecord[] = []
+        const recordByKey = new Map<string, ResearchDomain.LiteratureRecord>()
+        for (const source of input.sources) {
+          const canonical = JSON.stringify({
+            database: source.database,
+            sourceId: source.sourceId,
+            title: source.title,
+            summary: source.summary,
+            excerpts: source.excerpts,
+            url: source.url,
+          })
+          const contentHash = `sha256:${new Bun.CryptoHasher("sha256").update(canonical).digest("hex")}`
+          const existing = Object.values(state.literature).find(
+            (record) => record.campaignId === campaignId && record.contentHash === contentHash,
+          )
+          const record =
+            existing ??
+            ResearchDomain.LiteratureRecord.parse({
+              id: this.id("lit"),
+              campaignId,
+              database: source.database,
+              sourceId: source.sourceId,
+              title: source.title,
+              summary: source.summary,
+              excerpts: source.excerpts,
+              url: source.url,
+              query: source.query,
+              contentHash,
+              retrievedAt: this.now(),
+            })
+          if (!existing) state.literature[record.id] = record
+          records.push(record)
+          recordByKey.set(source.key, record)
+        }
+        const claims = input.claims.map((proposal) => {
+          const evidence = proposal.evidence.map((item) => {
+            const record = recordByKey.get(item.sourceKey)!
+            if (
+              item.excerpt &&
+              !record.excerpts.includes(item.excerpt) &&
+              !record.summary?.includes(item.excerpt)
+            ) {
+              throw new ConflictError({
+                code: "claim_excerpt_not_frozen",
+                message: `Claim excerpt is not frozen in source ${item.sourceKey}`,
+              })
+            }
+            return { literatureId: record.id, excerpt: item.excerpt }
+          })
+          const createdAt = this.now()
+          const claim = ResearchDomain.KnowledgeClaim.parse({
+            id: this.id("clm"),
+            campaignId,
+            kind: proposal.kind,
+            statement: proposal.statement,
+            stance: proposal.stance,
+            confidence: proposal.confidence,
+            evidence,
+            status: "proposed",
+            generated: { by: input.generatedBy, at: createdAt },
+            createdAt,
+          })
+          state.claims[claim.id] = claim
+          return claim
+        })
+        return { records, claims, unresolvedQuestions: input.unresolvedQuestions }
       })
     }
 

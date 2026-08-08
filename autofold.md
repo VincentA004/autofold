@@ -97,6 +97,12 @@ proposed until reviewed; they are published as separate OKF source and claim
 nodes and supplied to experiment RSI without being mislabeled as verified run
 evidence.
 
+The bounded literature-RSI loop now creates a dynamic `literature-review`
+child, restricts it to scientific search/fetch tools and one proposal artifact,
+verifies every cited excerpt against the exact fetch transcript, and atomically
+publishes its sources and proposed claims. See
+[docs/literature-rsi-v1.md](docs/literature-rsi-v1.md).
+
 The complete budgeted generation and consensus-validation route is specified in
 [docs/peptide-pipeline-v2.md](docs/peptide-pipeline-v2.md). Its next code
 increment is Model Run Index v2 plus the trusted Boltz/Chai/Protenix consensus

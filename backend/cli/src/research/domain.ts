@@ -194,6 +194,7 @@ export namespace ResearchDomain {
     sourceId: z.string().trim().min(1),
     title: z.string().trim().min(1),
     summary: z.string().trim().min(1).optional(),
+    excerpts: z.array(z.string().trim().min(1).max(4_000)).max(50).default([]),
     url: z.string().url().optional(),
     query: z.string().trim().min(1),
     contentHash: Digest,
