@@ -60,6 +60,57 @@ async function evaluatingTrial(service: ResearchService.Service, projectId: stri
 }
 
 describe("research service", () => {
+  test("compounds immutable literature records into evidence-linked campaign claims", async () => {
+    const { service, store, projectId } = fixture()
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "autofold-literature-"))
+    try {
+      const campaign = await service.createCampaign(projectId, { objective: "Find a selective peptide binder" })
+      await service.activateCampaign(projectId, campaign.id)
+      const input = {
+        database: "pubmed",
+        sourceId: "12345",
+        title: "A peptide binder design study",
+        summary: "Interface hotspots improved binder recovery.",
+        url: "https://pubmed.ncbi.nlm.nih.gov/12345/",
+        query: "peptide binder interface hotspots",
+      }
+      const first = await service.ingestLiterature(projectId, campaign.id, input)
+      const duplicate = await service.ingestLiterature(projectId, campaign.id, input)
+      expect(duplicate.id).toBe(first.id)
+      const claim = await service.createClaim(projectId, campaign.id, {
+        kind: "design_rule",
+        statement: "Preserving target interface hotspots may improve binder recovery.",
+        stance: "supports",
+        confidence: 0.7,
+        evidence: [{ literatureId: first.id, excerpt: "Interface hotspots improved binder recovery." }],
+        generatedBy: "literature-agent",
+      })
+      expect(claim.status).toBe("proposed")
+      const reviewed = await service.reviewClaim(projectId, campaign.id, claim.id, {
+        status: "reviewed",
+        reviewedBy: "human-reviewer",
+      })
+      expect(reviewed.reviewed?.by).toBe("human-reviewer")
+      expect(await service.listLiterature(projectId, campaign.id)).toHaveLength(1)
+      expect(await service.listClaims(projectId, campaign.id)).toEqual([reviewed])
+      const state = await store.read(projectId)
+      expect(Object.values(state.literature)).toEqual([first])
+      expect(Object.values(state.claims)).toEqual([reviewed])
+
+      await service.publishCampaignKnowledge(projectId, campaign.id, workspace)
+      const root = path.join(workspace, ".autofold", "campaigns", campaign.id, "knowledge")
+      const index = await Bun.file(path.join(root, "index.md")).text()
+      const source = await Bun.file(path.join(root, "sources", `${first.id}.md`)).text()
+      const renderedClaim = await Bun.file(path.join(root, "claims", `${reviewed.id}.md`)).text()
+      expect(index).toContain("## Literature claims")
+      expect(index).toContain(`claims/${reviewed.id}.md`)
+      expect(source).toContain(first.contentHash)
+      expect(renderedClaim).toContain(`../sources/${first.id}.md`)
+    } finally {
+      await fs.rm(workspace, { recursive: true, force: true })
+    }
+  })
+
   test("runs the campaign to incumbent lifecycle", async () => {
     const { service, projectId } = fixture()
     const experiment = await activeExperiment(service, projectId)

@@ -45,6 +45,37 @@ describe("research terminal", () => {
     expect(JSON.parse(output[0]!)).toEqual({ id: "cmp_one" })
   })
 
+  test("searches literature into the campaign knowledge plane", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const code = await ResearchTerminal.run(
+      [
+        "literature",
+        "search",
+        "cmp_one",
+        "--query",
+        "PD-L1 peptide binder design",
+        "--databases",
+        "pubmed,europepmc",
+        "--limit",
+        "4",
+      ],
+      {
+        output: () => undefined,
+        fetchFn: (async (input, init) => {
+          calls.push({ url: String(input), init })
+          return new Response(JSON.stringify({ records: [], errors: [] }))
+        }) as typeof fetch,
+      },
+    )
+    expect(code).toBe(0)
+    expect(calls[0]?.url).toBe("http://127.0.0.1:4096/research/campaigns/cmp_one/literature/search")
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      query: "PD-L1 peptide binder design",
+      databases: ["pubmed", "europepmc"],
+      limit: 4,
+    })
+  })
+
   test("watches a run through completion and then prints verified artifacts", async () => {
     const output: string[] = []
     let reads = 0

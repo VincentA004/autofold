@@ -14,7 +14,7 @@ export namespace ResearchService {
 
   export const NotFoundError = NamedError.create(
     "ResearchNotFoundError",
-    z.object({ entity: z.enum(["campaign", "experiment", "trial", "evaluation", "run", "knowledge"]), id: z.string() }),
+    z.object({ entity: z.enum(["campaign", "experiment", "trial", "evaluation", "run", "knowledge", "literature", "claim"]), id: z.string() }),
   )
 
   export const ConflictError = NamedError.create(
@@ -55,9 +55,35 @@ export namespace ResearchService {
     })
   export type RecordEvaluationInput = z.infer<typeof RecordEvaluationInput>
 
+  export const IngestLiteratureInput = z.object({
+    database: z.string().trim().min(1),
+    sourceId: z.string().trim().min(1),
+    title: z.string().trim().min(1),
+    summary: z.string().trim().min(1).optional(),
+    url: z.string().url().optional(),
+    query: z.string().trim().min(1),
+  })
+  export type IngestLiteratureInput = z.infer<typeof IngestLiteratureInput>
+
+  export const CreateClaimInput = z.object({
+    kind: ResearchDomain.KnowledgeClaim.shape.kind,
+    statement: ResearchDomain.KnowledgeClaim.shape.statement,
+    stance: ResearchDomain.KnowledgeClaim.shape.stance,
+    confidence: ResearchDomain.KnowledgeClaim.shape.confidence,
+    evidence: ResearchDomain.KnowledgeClaim.shape.evidence,
+    generatedBy: z.string().trim().min(1).default("autofold-agent"),
+  })
+  export type CreateClaimInput = z.infer<typeof CreateClaimInput>
+
+  export const ReviewClaimInput = z.object({
+    status: z.enum(["reviewed", "contested", "deprecated"]),
+    reviewedBy: z.string().trim().min(1),
+  })
+  export type ReviewClaimInput = z.infer<typeof ReviewClaimInput>
+
   export interface Options {
     now?: () => string
-    id?: (prefix: "cmp" | "exp" | "trl" | "evl" | "run" | "knw") => string
+    id?: (prefix: "cmp" | "exp" | "trl" | "evl" | "run" | "knw" | "lit" | "clm") => string
   }
 
   export interface EvaluationResult {
@@ -70,7 +96,7 @@ export namespace ResearchService {
 
   export class Service {
     private readonly now: () => string
-    private readonly id: (prefix: "cmp" | "exp" | "trl" | "evl" | "run" | "knw") => string
+    private readonly id: (prefix: "cmp" | "exp" | "trl" | "evl" | "run" | "knw" | "lit" | "clm") => string
 
     constructor(
       private readonly store: ResearchStore,
@@ -105,6 +131,110 @@ export namespace ResearchService {
         throw new NotFoundError({ entity: "knowledge", id: conceptId })
       }
       return concept
+    }
+
+    async listLiterature(projectId: string, campaignId: string): Promise<ResearchDomain.LiteratureRecord[]> {
+      const state = await this.store.read(projectId)
+      this.campaign(state, campaignId)
+      return Object.values(state.literature)
+        .filter((record) => record.campaignId === campaignId)
+        .toSorted((a, b) => b.retrievedAt.localeCompare(a.retrievedAt) || a.id.localeCompare(b.id))
+    }
+
+    async ingestLiterature(
+      projectId: string,
+      campaignId: string,
+      raw: IngestLiteratureInput,
+    ): Promise<ResearchDomain.LiteratureRecord> {
+      const input = IngestLiteratureInput.parse(raw)
+      return this.store.mutate(projectId, (state) => {
+        this.campaign(state, campaignId)
+        const canonical = JSON.stringify({
+          database: input.database,
+          sourceId: input.sourceId,
+          title: input.title,
+          summary: input.summary,
+          url: input.url,
+        })
+        const contentHash = `sha256:${new Bun.CryptoHasher("sha256").update(canonical).digest("hex")}`
+        const existing = Object.values(state.literature).find(
+          (record) => record.campaignId === campaignId && record.contentHash === contentHash,
+        )
+        if (existing) return existing
+        const record = ResearchDomain.LiteratureRecord.parse({
+          id: this.id("lit"),
+          campaignId,
+          ...input,
+          contentHash,
+          retrievedAt: this.now(),
+        })
+        state.literature[record.id] = record
+        return record
+      })
+    }
+
+    async listClaims(projectId: string, campaignId: string): Promise<ResearchDomain.KnowledgeClaim[]> {
+      const state = await this.store.read(projectId)
+      this.campaign(state, campaignId)
+      return Object.values(state.claims)
+        .filter((claim) => claim.campaignId === campaignId)
+        .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id))
+    }
+
+    async createClaim(
+      projectId: string,
+      campaignId: string,
+      raw: CreateClaimInput,
+    ): Promise<ResearchDomain.KnowledgeClaim> {
+      const input = CreateClaimInput.parse(raw)
+      return this.store.mutate(projectId, (state) => {
+        this.campaign(state, campaignId)
+        for (const evidence of input.evidence) {
+          const literature = state.literature[evidence.literatureId]
+          if (!literature || literature.campaignId !== campaignId) {
+            throw new NotFoundError({ entity: "literature", id: evidence.literatureId })
+          }
+        }
+        const claim = ResearchDomain.KnowledgeClaim.parse({
+          id: this.id("clm"),
+          campaignId,
+          kind: input.kind,
+          statement: input.statement,
+          stance: input.stance,
+          confidence: input.confidence,
+          evidence: input.evidence,
+          status: "proposed",
+          generated: { by: input.generatedBy, at: this.now() },
+          createdAt: this.now(),
+        })
+        state.claims[claim.id] = claim
+        return claim
+      })
+    }
+
+    async reviewClaim(
+      projectId: string,
+      campaignId: string,
+      claimId: string,
+      raw: ReviewClaimInput,
+    ): Promise<ResearchDomain.KnowledgeClaim> {
+      const input = ReviewClaimInput.parse(raw)
+      return this.store.mutate(projectId, (state) => {
+        this.campaign(state, campaignId)
+        const claim = state.claims[claimId]
+        if (!claim || claim.campaignId !== campaignId) throw new NotFoundError({ entity: "claim", id: claimId })
+        const updated = ResearchDomain.KnowledgeClaim.parse({
+          ...claim,
+          status: input.status,
+          reviewed: { by: input.reviewedBy, at: this.now() },
+        })
+        state.claims[claimId] = updated
+        return updated
+      })
+    }
+
+    async publishCampaignKnowledge(projectId: string, campaignId: string, workspace: string): Promise<void> {
+      await this.publishKnowledge(projectId, campaignId, workspace)
     }
 
     async createCampaign(projectId: string, raw: CreateCampaignInput): Promise<ResearchDomain.Campaign> {
@@ -599,7 +729,9 @@ export namespace ResearchService {
       const state = await this.store.read(projectId)
       const campaign = this.campaign(state, campaignId)
       const concepts = Object.values(state.knowledge).filter((concept) => concept.campaignId === campaignId)
-      await ResearchKnowledge.writeBundle({ workspace, campaign, concepts })
+      const literature = Object.values(state.literature).filter((record) => record.campaignId === campaignId)
+      const claims = Object.values(state.claims).filter((claim) => claim.campaignId === campaignId)
+      await ResearchKnowledge.writeBundle({ workspace, campaign, concepts, literature, claims })
     }
 
     private campaign(state: ResearchState, id: string): ResearchDomain.Campaign {

@@ -62,6 +62,8 @@ function context(): ResearchAutoresearch.Context {
     incumbentProgram: "def build_program(bundle):\n    return bundle\n",
     history: { trials: [incumbent], evaluations: [] },
     knowledge: [],
+    literatureClaims: [],
+    literatureRecords: [],
     incumbentCandidates: [],
     protoToolCatalog: [],
   }

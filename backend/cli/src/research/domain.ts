@@ -187,6 +187,51 @@ export namespace ResearchDomain {
     })
   export type KnowledgeConcept = z.infer<typeof KnowledgeConcept>
 
+  export const LiteratureRecord = z.object({
+    id: z.string().regex(/^lit_[A-Za-z0-9_-]+$/),
+    campaignId: z.string().startsWith("cmp_"),
+    database: z.string().trim().min(1),
+    sourceId: z.string().trim().min(1),
+    title: z.string().trim().min(1),
+    summary: z.string().trim().min(1).optional(),
+    url: z.string().url().optional(),
+    query: z.string().trim().min(1),
+    contentHash: Digest,
+    retrievedAt: Timestamp,
+  })
+  export type LiteratureRecord = z.infer<typeof LiteratureRecord>
+
+  export const ClaimEvidence = z.object({
+    literatureId: z.string().startsWith("lit_"),
+    excerpt: z.string().trim().min(1).max(4_000).optional(),
+  })
+  export type ClaimEvidence = z.infer<typeof ClaimEvidence>
+
+  export const KnowledgeClaim = z
+    .object({
+      id: z.string().regex(/^clm_[A-Za-z0-9_-]+$/),
+      campaignId: z.string().startsWith("cmp_"),
+      kind: z.enum(["mechanism", "design_rule", "assay_fact", "limitation", "hypothesis"]),
+      statement: z.string().trim().min(1).max(8_000),
+      stance: z.enum(["supports", "refutes", "context"]),
+      confidence: z.number().finite().min(0).max(1),
+      evidence: z.array(ClaimEvidence).min(1).max(100),
+      status: z.enum(["proposed", "reviewed", "contested", "deprecated"]),
+      generated: KnowledgeActor,
+      reviewed: KnowledgeActor.optional(),
+      createdAt: Timestamp,
+    })
+    .superRefine((claim, context) => {
+      const ids = new Set(claim.evidence.map((evidence) => evidence.literatureId))
+      if (ids.size !== claim.evidence.length) {
+        context.addIssue({ code: "custom", path: ["evidence"], message: "Claim evidence records must be unique" })
+      }
+      if (claim.status !== "proposed" && !claim.reviewed) {
+        context.addIssue({ code: "custom", path: ["reviewed"], message: "Resolved claims require a reviewer" })
+      }
+    })
+  export type KnowledgeClaim = z.infer<typeof KnowledgeClaim>
+
   const trialTransitions: Record<TrialStatus, ReadonlySet<TrialStatus>> = {
     proposed: new Set(["queued", "cancelled"]),
     queued: new Set(["running", "cancelled", "failed"]),

@@ -121,6 +121,8 @@ export namespace ResearchAutoresearch {
       evaluations: ResearchDomain.Evaluation[]
     }
     knowledge: ResearchDomain.KnowledgeConcept[]
+    literatureClaims: ResearchDomain.KnowledgeClaim[]
+    literatureRecords: ResearchDomain.LiteratureRecord[]
     incumbentCandidates: unknown[]
     protoToolCatalog: unknown[]
   }
@@ -209,9 +211,11 @@ export namespace ResearchAutoresearch {
       throw new Error(`Experiment ${experimentId} must be active for autoresearch`)
     }
     const campaignId = history.experiment.campaignId
-    const [target, knowledge, protoToolCatalog] = await Promise.all([
+    const [target, knowledge, literatureClaims, literatureRecords, protoToolCatalog] = await Promise.all([
       ResearchArtifacts.readTarget(Instance.directory, history.experiment.contract.targetArtifactHash),
       Research.listKnowledge(projectId, campaignId),
+      Research.listClaims(projectId, campaignId),
+      Research.listLiterature(projectId, campaignId),
       loadProtoToolCatalog(),
     ])
     const incumbent = history.experiment.incumbentTrialId
@@ -244,6 +248,8 @@ export namespace ResearchAutoresearch {
         evaluations: history.evaluations.slice(-20),
       },
       knowledge: knowledge.slice(0, 20),
+      literatureClaims: literatureClaims.slice(0, 30),
+      literatureRecords: literatureRecords.slice(0, 30),
       incumbentCandidates,
       protoToolCatalog,
     }
@@ -307,6 +313,8 @@ export namespace ResearchAutoresearch {
       incumbent: input.context.incumbent,
       history: input.context.history,
       verifiedKnowledge: input.context.knowledge,
+      literatureClaims: input.context.literatureClaims,
+      literatureRecords: input.context.literatureRecords,
       incumbentCandidates: input.context.incumbentCandidates,
       availableProtoTools: input.context.protoToolCatalog,
     }
@@ -317,6 +325,7 @@ export namespace ResearchAutoresearch {
       "The file must define build_program(bundle), return a Proto Program, remain deterministic under bundle seeds, and respect candidateBudget/submissionSize.",
       "The completed Program must expose canonical peptide sequences through program.constructs and each construct's joined_sequences so the trusted adapter can collect them.",
       "Improve the incumbent using verified diagnostics and knowledge. You may compose registered proto_language/proto_tools components.",
+      "Literature claims are advisory and retain their proposed/reviewed/contested status; do not treat them as locked experimental verification.",
       "When using a catalog tool key, resolve it through ToolRegistry instead of guessing Python symbol names.",
       "The runtime bundle provides targetArtifactPath and, when authored, targetStructurePath; refer to those bundle values rather than local authoring-time paths.",
       "Do not emit generation provenance, evaluator evidence, scores, or model-run artifacts; the trusted worker owns those.",

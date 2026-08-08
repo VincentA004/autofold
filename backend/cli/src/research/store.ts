@@ -11,6 +11,8 @@ export const ResearchState = z.object({
   evaluations: z.record(z.string(), ResearchDomain.Evaluation),
   runs: z.record(z.string(), ResearchDomain.Run).default({}),
   knowledge: z.record(z.string(), ResearchDomain.KnowledgeConcept).default({}),
+  literature: z.record(z.string(), ResearchDomain.LiteratureRecord).default({}),
+  claims: z.record(z.string(), ResearchDomain.KnowledgeClaim).default({}),
 })
 export type ResearchState = z.infer<typeof ResearchState>
 
@@ -23,6 +25,8 @@ export function emptyResearchState(): ResearchState {
     evaluations: {},
     runs: {},
     knowledge: {},
+    literature: {},
+    claims: {},
   }
 }
 

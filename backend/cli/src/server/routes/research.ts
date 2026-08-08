@@ -9,6 +9,7 @@ import {
   ResearchArtifacts,
   ResearchDomain,
   ResearchExecution,
+  ResearchLiterature,
   ResearchPrograms,
   ResearchService,
 } from "@/research"
@@ -18,6 +19,10 @@ const CampaignParam = z.object({ campaignId: z.string().startsWith("cmp_") })
 const KnowledgeParam = z.object({
   campaignId: z.string().startsWith("cmp_"),
   conceptId: z.string().regex(/^knw_[A-Za-z0-9_-]+$/),
+})
+const ClaimParam = z.object({
+  campaignId: z.string().startsWith("cmp_"),
+  claimId: z.string().regex(/^clm_[A-Za-z0-9_-]+$/),
 })
 const ExperimentParam = z.object({ experimentId: z.string().startsWith("exp_") })
 const TrialParam = z.object({ trialId: z.string().startsWith("trl_") })
@@ -103,6 +108,82 @@ export const ResearchRoutes = lazy(() =>
       }),
       validator("param", CampaignParam),
       async (c) => c.json(await Research.listKnowledge(Instance.project.id, c.req.valid("param").campaignId)),
+    )
+    .get(
+      "/campaigns/:campaignId/literature",
+      describeRoute({
+        summary: "List immutable campaign literature records",
+        operationId: "research.literature.list",
+        responses: { 200: { description: "Campaign literature search records" } },
+      }),
+      validator("param", CampaignParam),
+      async (c) => c.json(await Research.listLiterature(Instance.project.id, c.req.valid("param").campaignId)),
+    )
+    .post(
+      "/campaigns/:campaignId/literature/search",
+      describeRoute({
+        summary: "Search literature sources into campaign knowledge",
+        description: "Searches public literature connectors and freezes normalized results by content hash.",
+        operationId: "research.literature.search",
+        responses: { 200: { description: "Frozen literature records and per-source errors" } },
+      }),
+      validator("param", CampaignParam),
+      validator("json", ResearchLiterature.SearchInput.omit({ campaignId: true })),
+      async (c) =>
+        c.json(
+          await ResearchLiterature.search(
+            { campaignId: c.req.valid("param").campaignId, ...c.req.valid("json") },
+            c.req.raw.signal,
+          ),
+        ),
+    )
+    .get(
+      "/campaigns/:campaignId/claims",
+      describeRoute({
+        summary: "List campaign literature claims",
+        operationId: "research.claim.list",
+        responses: { 200: { description: "Proposed and reviewed campaign claims" } },
+      }),
+      validator("param", CampaignParam),
+      async (c) => c.json(await Research.listClaims(Instance.project.id, c.req.valid("param").campaignId)),
+    )
+    .post(
+      "/campaigns/:campaignId/claims",
+      describeRoute({
+        summary: "Create an evidence-linked campaign claim",
+        description: "Creates a proposed claim; literature evidence is not mislabeled as experimental verification.",
+        operationId: "research.claim.create",
+        responses: { 200: { description: "Created proposed claim" } },
+      }),
+      validator("param", CampaignParam),
+      validator("json", ResearchService.CreateClaimInput),
+      async (c) => {
+        const campaignId = c.req.valid("param").campaignId
+        const claim = await Research.createClaim(Instance.project.id, campaignId, c.req.valid("json"))
+        await Research.publishCampaignKnowledge(Instance.project.id, campaignId, Instance.directory)
+        return c.json(claim)
+      },
+    )
+    .post(
+      "/campaigns/:campaignId/claims/:claimId/review",
+      describeRoute({
+        summary: "Review a campaign literature claim",
+        operationId: "research.claim.review",
+        responses: { 200: { description: "Reviewed, contested, or deprecated claim" } },
+      }),
+      validator("param", ClaimParam),
+      validator("json", ResearchService.ReviewClaimInput),
+      async (c) => {
+        const params = c.req.valid("param")
+        const claim = await Research.reviewClaim(
+          Instance.project.id,
+          params.campaignId,
+          params.claimId,
+          c.req.valid("json"),
+        )
+        await Research.publishCampaignKnowledge(Instance.project.id, params.campaignId, Instance.directory)
+        return c.json(claim)
+      },
     )
     .get(
       "/campaigns/:campaignId/knowledge/:conceptId",

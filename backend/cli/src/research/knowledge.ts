@@ -79,6 +79,45 @@ function conceptBody(concept: ResearchDomain.KnowledgeConcept): string {
   ].join("\n")
 }
 
+function literatureBody(record: ResearchDomain.LiteratureRecord): string {
+  return matter.stringify(
+    [`# ${record.title}`, "", record.summary ?? "No summary was returned by the source.", ""].join("\n"),
+    {
+      type: "Literature Source",
+      campaign_id: record.campaignId,
+      database: record.database,
+      source_id: record.sourceId,
+      query: record.query,
+      ...(record.url ? { url: record.url } : {}),
+      content_hash: record.contentHash,
+      retrieved_at: record.retrievedAt,
+    },
+  )
+}
+
+function claimBody(claim: ResearchDomain.KnowledgeClaim, records: Map<string, ResearchDomain.LiteratureRecord>): string {
+  const evidence = claim.evidence.map((item) => {
+    const source = records.get(item.literatureId)
+    const suffix = item.excerpt ? ` — “${item.excerpt}”` : ""
+    return `- [${source?.title ?? item.literatureId}](../sources/${item.literatureId}.md)${suffix}`
+  })
+  return matter.stringify(
+    [`# ${claim.kind.replaceAll("_", " ")}`, "", claim.statement, "", "## Literature evidence", "", ...evidence, ""].join("\n"),
+    {
+      type: "Literature Claim",
+      campaign_id: claim.campaignId,
+      kind: claim.kind,
+      stance: claim.stance,
+      confidence: claim.confidence,
+      status: claim.status,
+      generated: claim.generated,
+      ...(claim.reviewed ? { reviewed: claim.reviewed } : {}),
+      evidence: claim.evidence,
+      created_at: claim.createdAt,
+    },
+  )
+}
+
 export namespace ResearchKnowledge {
   export function relativeRunResource(campaignId: string, resource: string): string {
     const concepts = path.posix.join(".autofold", "campaigns", campaignId, "knowledge", "concepts")
@@ -89,10 +128,17 @@ export namespace ResearchKnowledge {
     return matter.stringify(conceptBody(concept), conceptFrontmatter(concept))
   }
 
-  export function renderIndex(campaign: ResearchDomain.Campaign, concepts: ResearchDomain.KnowledgeConcept[]): string {
+  export function renderIndex(
+    campaign: ResearchDomain.Campaign,
+    concepts: ResearchDomain.KnowledgeConcept[],
+    literature: ResearchDomain.LiteratureRecord[] = [],
+    claims: ResearchDomain.KnowledgeClaim[] = [],
+  ): string {
     const entries = concepts
       .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id))
       .map((concept) => `* [${concept.title}](concepts/${concept.id}.md) - ${concept.description}`)
+    const claimEntries = claims.map((claim) => `* [${claim.statement}](claims/${claim.id}.md) - ${claim.status}`)
+    const sourceEntries = literature.map((record) => `* [${record.title}](sources/${record.id}.md) - ${record.database}`)
     const body = [
       `# ${campaign.objective}`,
       "",
@@ -102,6 +148,14 @@ export namespace ResearchKnowledge {
       "",
       ...(entries.length ? entries : ["No research outcomes yet."]),
       "",
+      "## Literature claims",
+      "",
+      ...(claimEntries.length ? claimEntries : ["No literature claims yet."]),
+      "",
+      "## Literature sources",
+      "",
+      ...(sourceEntries.length ? sourceEntries : ["No literature sources yet."]),
+      "",
     ].join("\n")
     return matter.stringify(body, { okf_version: "0.2" })
   }
@@ -110,6 +164,8 @@ export namespace ResearchKnowledge {
     workspace: string
     campaign: ResearchDomain.Campaign
     concepts: ResearchDomain.KnowledgeConcept[]
+    literature?: ResearchDomain.LiteratureRecord[]
+    claims?: ResearchDomain.KnowledgeClaim[]
   }): Promise<string> {
     const root = bundleRoot(input.workspace, input.campaign.id)
     for (const concept of input.concepts) {
@@ -118,7 +174,18 @@ export namespace ResearchKnowledge {
       }
       await writeAtomic(path.join(root, "concepts", `${concept.id}.md`), renderConcept(concept))
     }
-    await writeAtomic(path.join(root, "index.md"), renderIndex(input.campaign, input.concepts))
+    const literature = input.literature ?? []
+    const claims = input.claims ?? []
+    const records = new Map(literature.map((record) => [record.id, record]))
+    for (const record of literature) {
+      if (record.campaignId !== input.campaign.id) throw new Error(`Literature ${record.id} belongs to another campaign`)
+      await writeAtomic(path.join(root, "sources", `${record.id}.md`), literatureBody(record))
+    }
+    for (const claim of claims) {
+      if (claim.campaignId !== input.campaign.id) throw new Error(`Claim ${claim.id} belongs to another campaign`)
+      await writeAtomic(path.join(root, "claims", `${claim.id}.md`), claimBody(claim, records))
+    }
+    await writeAtomic(path.join(root, "index.md"), renderIndex(input.campaign, input.concepts, literature, claims))
     return root
   }
 }

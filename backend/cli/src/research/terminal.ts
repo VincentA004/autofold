@@ -143,6 +143,57 @@ export namespace ResearchTerminal {
         outputJSON(output, await client.post(`/campaigns/${requiredPosition(parsed, 2, "campaign id")}/activate`))
         return 0
       }
+      if (command === "literature" && noun === "search") {
+        const databases = stringFlag(parsed, "databases")
+        outputJSON(
+          output,
+          await client.post(`/campaigns/${requiredPosition(parsed, 2, "campaign id")}/literature/search`, {
+            query: requiredFlag(parsed, "query"),
+            ...(databases ? { databases: databases.split(",").map((value) => value.trim()).filter(Boolean) } : {}),
+            limit: integerFlag(parsed, "limit", 5),
+          }),
+        )
+        return 0
+      }
+      if (command === "literature") {
+        outputJSON(output, await client.get(`/campaigns/${requiredPosition(parsed, 1, "campaign id")}/literature`))
+        return 0
+      }
+      if (command === "claim" && noun === "add") {
+        const evidence = requiredFlag(parsed, "evidence")
+          .split(",")
+          .map((literatureId) => ({ literatureId: literatureId.trim() }))
+          .filter((item) => item.literatureId)
+        outputJSON(
+          output,
+          await client.post(`/campaigns/${requiredPosition(parsed, 2, "campaign id")}/claims`, {
+            kind: stringFlag(parsed, "kind") ?? "hypothesis",
+            statement: requiredFlag(parsed, "statement"),
+            stance: stringFlag(parsed, "stance") ?? "context",
+            confidence: numberFlag(parsed, "confidence", 0.5),
+            evidence,
+            generatedBy: stringFlag(parsed, "by") ?? "autofold-agent",
+          }),
+        )
+        return 0
+      }
+      if (command === "claims") {
+        outputJSON(output, await client.get(`/campaigns/${requiredPosition(parsed, 1, "campaign id")}/claims`))
+        return 0
+      }
+      if (command === "claim" && noun === "review") {
+        outputJSON(
+          output,
+          await client.post(
+            `/campaigns/${requiredPosition(parsed, 2, "campaign id")}/claims/${requiredPosition(parsed, 3, "claim id")}/review`,
+            {
+              status: stringFlag(parsed, "status") ?? "reviewed",
+              reviewedBy: requiredFlag(parsed, "by"),
+            },
+          ),
+        )
+        return 0
+      }
       if (command === "experiments") {
         outputJSON(output, await client.get(`/campaigns/${requiredPosition(parsed, 1, "campaign id")}/experiments`))
         return 0
@@ -346,6 +397,11 @@ Commands:
   target add --file TARGET.json [--structure TARGET.cif] [--structure-format pdb|mmcif]
   campaign create --objective TEXT
   campaign activate CMP_ID
+  literature search CMP_ID --query TEXT [--databases pubmed,europepmc,openalex] [--limit N]
+  literature CMP_ID
+  claim add CMP_ID --statement TEXT --evidence LIT_ID[,LIT_ID] [--kind hypothesis] [--stance context] [--confidence 0.5]
+  claim review CMP_ID CLM_ID --by REVIEWER [--status reviewed|contested|deprecated]
+  claims CMP_ID
   experiments CMP_ID
   experiment create CMP_ID --objective TEXT (--target sha256:... | --target-file TARGET.json) [--target-structure TARGET.cif] [--evaluator ID] [--modality short_peptide]
   experiment activate EXP_ID

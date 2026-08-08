@@ -90,6 +90,18 @@ SSH GPU profile, retrieves the resulting artifact tree, and verifies it locally
 before recording any result or knowledge. Local execution remains the default.
 See [docs/remote-compute-v1.md](docs/remote-compute-v1.md).
 
+Campaign knowledge now also accepts content-addressed literature search records
+from the existing PubMed, Europe PMC, OpenAlex, Semantic Scholar, Crossref,
+bioRxiv, and arXiv connectors. Evidence-linked claims remain explicitly
+proposed until reviewed; they are published as separate OKF source and claim
+nodes and supplied to experiment RSI without being mislabeled as verified run
+evidence.
+
+The complete budgeted generation and consensus-validation route is specified in
+[docs/peptide-pipeline-v2.md](docs/peptide-pipeline-v2.md). Its next code
+increment is Model Run Index v2 plus the trusted Boltz/Chai/Protenix consensus
+adapter.
+
 ## Bounded autoresearch v1
 
 The first experiment-RSI controller is implemented through the existing child-session harness. Each iteration creates a biology, ML, or general child agent; injects the frozen contract, target, incumbent program, verified candidates, recent evaluations, campaign OKF concepts, and a compact pinned Proto tool catalog; then grants write access to exactly one mutable draft `trial.py`. The draft is preserved under `.autofold/autoresearch`, statically preflighted without importing it, frozen by content hash, executed, and promoted or rejected by the locked evaluator. A rejected trial does not stop the loop; the next iteration still starts from the current incumbent.
