@@ -9,9 +9,13 @@ describe("research remote compute", () => {
   test("builds a bounded SSH profile", () => {
     const profile = ResearchRemoteCompute.profile("run_abc", true, {
       AUTOFOLD_RESEARCH_COMPUTE: "ssh:workstation_4090",
+      AUTOFOLD_RESEARCH_REMOTE_HOST: "100.88.23.66",
       AUTOFOLD_RESEARCH_REMOTE_ROOT: "/home/vincent/.autofold",
       AUTOFOLD_RESEARCH_REMOTE_PYTHON: "/home/vincent/.venvs/autofold/bin/python",
       AUTOFOLD_RESEARCH_REMOTE_PROTO_ROOT: "/home/vincent/proto-language",
+      AUTOFOLD_RESEARCH_REMOTE_PROTO_HOME: "/home/vincent/.proto",
+      AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_EXECUTABLE: "/home/vincent/boltzgen/bin/boltzgen",
+      AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_CACHE: "/home/vincent/boltzgen/cache",
     })
     expect(profile).toEqual({
       kind: "ssh",
@@ -19,12 +23,16 @@ describe("research remote compute", () => {
         id: "workstation_4090",
         label: "workstation_4090",
         host: "workstation_4090",
+        address: "100.88.23.66",
         scheduler: "none",
         workdir: "/home/vincent/.autofold/runs/run_abc",
       },
       remoteRun: "/home/vincent/.autofold/runs/run_abc",
       python: "/home/vincent/.venvs/autofold/bin/python",
       protoRoot: "/home/vincent/proto-language",
+      protoHome: "/home/vincent/.proto",
+      boltzgenExecutable: "/home/vincent/boltzgen/bin/boltzgen",
+      boltzgenCache: "/home/vincent/boltzgen/cache",
     })
   })
 
@@ -55,9 +63,13 @@ describe("research remote compute", () => {
   test("constructs a remote worker launch without local paths", () => {
     const profile = ResearchRemoteCompute.profile("run_abc", true, {
       AUTOFOLD_RESEARCH_COMPUTE: "ssh:workstation_4090",
+      AUTOFOLD_RESEARCH_REMOTE_HOST: "100.88.23.66",
       AUTOFOLD_RESEARCH_REMOTE_ROOT: "/srv/autofold",
       AUTOFOLD_RESEARCH_REMOTE_PYTHON: "/srv/venv/bin/python",
       AUTOFOLD_RESEARCH_REMOTE_PROTO_ROOT: "/srv/proto",
+      AUTOFOLD_RESEARCH_REMOTE_PROTO_HOME: "/srv/proto-home",
+      AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_EXECUTABLE: "/srv/boltzgen/bin/boltzgen",
+      AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_CACHE: "/srv/boltzgen/cache",
     })
     const launch = ResearchRemoteCompute.command(profile, {
       python: "/local/python",
@@ -69,6 +81,9 @@ describe("research remote compute", () => {
     expect(launch.target).toEqual({ kind: "ssh", host_id: "workstation_4090" })
     expect(launch.cwd).toBe("/srv/autofold/runs/run_abc")
     expect(launch.command).toContain("AUTOFOLD_PROTO_ROOT='/srv/proto'")
+    expect(launch.command).toContain("PROTO_HOME='/srv/proto-home'")
+    expect(launch.command).toContain("AUTOFOLD_BOLTZGEN_EXECUTABLE='/srv/boltzgen/bin/boltzgen'")
+    expect(launch.command).toContain("AUTOFOLD_BOLTZGEN_CACHE='/srv/boltzgen/cache'")
     expect(launch.command).toContain("'/srv/venv/bin/python'")
     expect(launch.command).not.toContain("/local/")
   })

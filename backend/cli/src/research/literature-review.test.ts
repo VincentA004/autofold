@@ -17,6 +17,24 @@ function campaign(): ResearchDomain.Campaign {
 }
 
 describe("bounded literature review", () => {
+  test("requires both resume identifiers", () => {
+    expect(
+      ResearchLiteratureReview.Input.safeParse({
+        campaignId: "cmp_review",
+        sessionId: "ses_parent",
+        resumeProposalPath: ".autofold/literature-reviews/cmp_review/review.json",
+      }).success,
+    ).toBe(false)
+    expect(
+      ResearchLiteratureReview.Input.safeParse({
+        campaignId: "cmp_review",
+        sessionId: "ses_parent",
+        resumeProposalPath: ".autofold/literature-reviews/cmp_review/review.json",
+        resumeChildSessionId: "ses_child",
+      }).success,
+    ).toBe(true)
+  })
+
   test("binds every frozen excerpt to the exact fetched record", () => {
     const artifact = {
       sources: [
@@ -53,6 +71,24 @@ describe("bounded literature review", () => {
           tool: "science_fetch",
           input: { db: "pubmed", id: "1" },
           output: '{"abstract":"Hotspot constraints increased selective recovery."}',
+        },
+      ]),
+    ).not.toThrow()
+    expect(() =>
+      ResearchLiteratureReview.verifyFetchedExcerpts(artifact, [
+        {
+          tool: "science_fetch",
+          input: { db: "pubmed", id: "1" },
+          output: '{"abstract":"Hotspot constraints\\n  increased selective recovery.","note":"A \\"quoted\\" field."}',
+        },
+      ]),
+    ).not.toThrow()
+    expect(() =>
+      ResearchLiteratureReview.verifyFetchedExcerpts(artifact, [
+        {
+          tool: "science_fetch",
+          input: { db: "pubmed", id: "1" },
+          output: '{"abstract":"Hotspot constraints\n  increased selective recovery."}',
         },
       ]),
     ).not.toThrow()

@@ -37,6 +37,7 @@ export namespace ComputeJobs {
     id: z.string(),
     label: z.string(),
     host: z.string(),
+    address: z.string().optional(),
     user: z.string().optional(),
     port: z.number().int().positive().optional(),
     scheduler: Scheduler.default("none"),
@@ -483,7 +484,8 @@ export namespace ComputeJobs {
     const destination = host.user ? `${host.user}@${host.host}` : host.host
     if (destination.startsWith("-")) throw new Error("SSH destinations cannot begin with a hyphen")
     const port = host.port ? ["-p", String(host.port)] : []
-    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ...port, "--", destination, script]
+    const address = host.address ? ["-o", `HostName=${host.address}`] : []
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ...address, ...port, "--", destination, script]
   }
 
   export function command(

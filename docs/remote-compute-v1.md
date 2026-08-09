@@ -24,14 +24,22 @@ Local execution remains the default. To select an SSH alias:
 
 ```text
 AUTOFOLD_RESEARCH_COMPUTE=ssh:workstation_4090
+AUTOFOLD_RESEARCH_REMOTE_HOST=100.88.23.66 # optional stable endpoint when alias DNS is unavailable to jobs
 AUTOFOLD_RESEARCH_REMOTE_ROOT=/home/vincent/.autofold-runtime
 AUTOFOLD_RESEARCH_REMOTE_PYTHON=/home/vincent/autofold-env/bin/python
 AUTOFOLD_RESEARCH_REMOTE_PROTO_ROOT=/home/vincent/proto-language
+AUTOFOLD_RESEARCH_REMOTE_PROTO_HOME=/home/vincent/.proto
+AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_EXECUTABLE=/home/vincent/boltzgen/bin/boltzgen
+AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_CACHE=/home/vincent/boltzgen-cache
 ```
 
 The Python environment and Proto repositories must already be installed on the
-host. Autofold verifies the pinned Proto commits; it does not silently update
-them. The SSH alias must use non-interactive authentication.
+host. `AUTOFOLD_RESEARCH_REMOTE_PROTO_HOME` identifies the retained tool
+environments and model caches used by proto-tools. Autofold verifies the pinned
+Proto commits; it does not silently update them. The SSH alias must use
+non-interactive authentication. The optional BoltzGen pair is passed to trial
+programs as `AUTOFOLD_BOLTZGEN_EXECUTABLE` and `AUTOFOLD_BOLTZGEN_CACHE`; both
+must be provided together and resolve to safe absolute remote paths.
 
 Each run is staged into
 `<remote-root>/runs/<run-id>`. The remote directory must not already exist.

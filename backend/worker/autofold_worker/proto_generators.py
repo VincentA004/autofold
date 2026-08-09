@@ -61,6 +61,11 @@ class BoltzGenBinderConfig(BaseConfig):
     protocol: Literal["peptide-anything", "protein-anything"] = ConfigField(
         default="peptide-anything", title="Protocol", description="BoltzGen protocol preset"
     )
+    scaffold: Literal["linear", "cyclic", "disulfide_beta_hairpin"] = ConfigField(
+        default="linear",
+        title="Peptide Scaffold",
+        description="Native BoltzGen peptide topology and secondary-structure conditioning",
+    )
 
 
 @generator(
@@ -91,8 +96,11 @@ class BoltzGenBinderGenerator(Generator):
         seed = self._next_seed()
         with tempfile.TemporaryDirectory(prefix="autofold-boltzgen-") as temporary:
             root = Path(temporary)
-            target_path = root / "target.cif"
-            target.write_cif(target_path)
+            # BoltzGen's PDB parser accepts the portable target directly. Proto's
+            # compact CIF writer omits entity tables required by BoltzGen's mmCIF
+            # parser, so converting a PDB target to that representation is lossy.
+            target_path = root / "target.pdb"
+            target.write_pdb(target_path)
             chain = {"id": self.config.target_chain}
             entity: dict[str, object] = {
                 "path": str(target_path),
@@ -103,11 +111,28 @@ class BoltzGenBinderGenerator(Generator):
                 entity["binding_types"] = [
                     {"chain": {"id": self.config.target_chain, "binding": ",".join(map(str, self.config.hotspots))}}
                 ]
+            protein: dict[str, object] = {
+                "id": "G",
+                "sequence": f"{segment.sequence_length}..{segment.sequence_length}",
+            }
+            constraints: list[dict[str, object]] = []
+            if self.config.scaffold == "cyclic":
+                protein["cyclic"] = True
+            elif self.config.scaffold == "disulfide_beta_hairpin":
+                if segment.sequence_length < 8:
+                    raise ValueError("A disulfide beta-hairpin requires at least 8 residues")
+                protein["sequence"] = f"C{segment.sequence_length - 2}C"
+                left_end = segment.sequence_length // 2 - 1
+                right_start = segment.sequence_length // 2 + 2
+                protein["secondary_structure"] = {
+                    "sheet": f"2..{left_end},{right_start}..{segment.sequence_length - 1}"
+                }
+                constraints.append(
+                    {"bond": {"atom1": ["G", 1, "SG"], "atom2": ["G", segment.sequence_length, "SG"]}}
+                )
             specification = {
-                "entities": [
-                    {"protein": {"id": "G", "sequence": f"{segment.sequence_length}..{segment.sequence_length}"}},
-                    {"file": entity},
-                ]
+                "entities": [{"protein": protein}, {"file": entity}],
+                **({"constraints": constraints} if constraints else {}),
             }
             spec_path = root / "design.yaml"
             spec_path.write_text(json.dumps(specification, indent=2) + "\n", encoding="utf-8")
@@ -141,6 +166,7 @@ class BoltzGenBinderGenerator(Generator):
                     "seed": seed,
                     "seedControl": "upstream_cli_unavailable",
                     "protocol": self.config.protocol,
+                    "scaffold": self.config.scaffold,
                 }
 
 

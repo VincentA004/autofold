@@ -77,9 +77,13 @@ export namespace ExecutionAuthority {
       Config.trustedSandbox(),
     ])
     const backend = Sandbox.describe()
+    // A remote job is already a distinct trust capability and cannot function
+    // with network egress denied. Other process capabilities retain the
+    // project's configured network policy.
+    const network = input.capability === "remote_job" ? "allow" : policy.network ?? "deny"
     const sandbox = {
       enabled: policy.enabled ?? true,
-      network: policy.network ?? "deny",
+      network,
       allowWrite: policy.allowWrite ?? [],
       onUnavailable: policy.onUnavailable ?? "error",
       backend: backend.backend,

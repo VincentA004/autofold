@@ -378,6 +378,12 @@ export namespace ResearchTerminal {
             ...(stringFlag(parsed, "question") ? { question: stringFlag(parsed, "question") } : {}),
             maxSources: integerFlag(parsed, "max-sources", 20),
             maxClaims: integerFlag(parsed, "max-claims", 20),
+            ...(stringFlag(parsed, "resume-proposal")
+              ? { resumeProposalPath: stringFlag(parsed, "resume-proposal") }
+              : {}),
+            ...(stringFlag(parsed, "child-session")
+              ? { resumeChildSessionId: stringFlag(parsed, "child-session") }
+              : {}),
           }),
         )
         return 0
@@ -483,6 +489,7 @@ Commands:
   knowledge alignments CMP_ID
   knowledge cycles CMP_ID
   knowledge refresh CMP_ID --session SES_ID [--question TEXT] [--max-sources N] [--max-claims N] [--force]
+    [--resume-proposal PATH --child-session SES_ID]
   alignment review CMP_ID ALN_ID --by REVIEWER [--status reviewed|contested|deprecated]
 
 Typical flow: create + activate campaign, create + activate experiment, author a

@@ -251,6 +251,25 @@ export namespace Agent {
         mode: "subagent",
         native: true,
       },
+      "autofold-knowledge-review": {
+        name: "autofold-knowledge-review",
+        description: "Bounded Autofold evidence refresh using only scientific connectors and one proposal artifact.",
+        permission: PermissionNext.merge(
+          defaults,
+          PermissionNext.fromConfig({
+            "*": "deny",
+            science_list_dbs: "allow",
+            science_search: "allow",
+            science_fetch: "allow",
+            apply_patch: "allow",
+            edit: "allow",
+          }),
+          user,
+        ),
+        options: {},
+        mode: "subagent",
+        native: true,
+      },
       critique: {
         name: "critique",
         steps: 60,

@@ -14,6 +14,9 @@ export namespace ResearchRemoteCompute {
         remoteRun: string
         python: string
         protoRoot?: string
+        protoHome?: string
+        boltzgenExecutable?: string
+        boltzgenCache?: string
       }
 
   function absoluteRemote(value: string | undefined, label: string): string {
@@ -44,18 +47,47 @@ export namespace ResearchRemoteCompute {
     if (!safeHost.test(alias) || alias.startsWith("-")) {
       throw new Error("The research SSH host alias contains unsupported characters")
     }
+    const endpoint = env.AUTOFOLD_RESEARCH_REMOTE_HOST?.trim() || alias
+    if (!safeHost.test(endpoint) || endpoint.startsWith("-")) {
+      throw new Error("AUTOFOLD_RESEARCH_REMOTE_HOST contains unsupported characters")
+    }
     const root = absoluteRemote(env.AUTOFOLD_RESEARCH_REMOTE_ROOT, "AUTOFOLD_RESEARCH_REMOTE_ROOT")
     const python = absoluteRemote(env.AUTOFOLD_RESEARCH_REMOTE_PYTHON, "AUTOFOLD_RESEARCH_REMOTE_PYTHON")
     const protoRoot = proto
       ? absoluteRemote(env.AUTOFOLD_RESEARCH_REMOTE_PROTO_ROOT, "AUTOFOLD_RESEARCH_REMOTE_PROTO_ROOT")
       : undefined
+    const protoHome = proto
+      ? absoluteRemote(env.AUTOFOLD_RESEARCH_REMOTE_PROTO_HOME, "AUTOFOLD_RESEARCH_REMOTE_PROTO_HOME")
+      : undefined
+    const hasBoltzgen = Boolean(
+      env.AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_EXECUTABLE || env.AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_CACHE,
+    )
+    const boltzgenExecutable = hasBoltzgen
+      ? absoluteRemote(
+          env.AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_EXECUTABLE,
+          "AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_EXECUTABLE",
+        )
+      : undefined
+    const boltzgenCache = hasBoltzgen
+      ? absoluteRemote(env.AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_CACHE, "AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_CACHE")
+      : undefined
     const remoteRun = path.posix.join(root, "runs", runId)
     return {
       kind: "ssh",
-      host: { id: alias, label: alias, host: alias, scheduler: "none", workdir: remoteRun },
+      host: {
+        id: alias,
+        label: alias,
+        host: alias,
+        ...(endpoint === alias ? {} : { address: endpoint }),
+        scheduler: "none",
+        workdir: remoteRun,
+      },
       remoteRun,
       python,
       protoRoot,
+      protoHome,
+      boltzgenExecutable,
+      boltzgenCache,
     }
   }
 
@@ -72,12 +104,14 @@ export namespace ResearchRemoteCompute {
   }
 
   export async function stage(profile: Extract<Profile, { kind: "ssh" }>, localRun: string, workerRoot: string) {
+    const address = profile.host.address ? ["-o", `HostName=${profile.host.address}`] : []
     await subprocess([
       "ssh",
       "-o",
       "BatchMode=yes",
       "-o",
       "ConnectTimeout=8",
+      ...address,
       "--",
       profile.host.host,
       `test ! -e ${ComputeJobs.quote(profile.remoteRun)} && mkdir -p ${ComputeJobs.quote(profile.remoteRun)}`,
@@ -87,8 +121,8 @@ export namespace ResearchRemoteCompute {
     if (!inputs.includes("bundle.json") || !inputs.includes("trial.py")) {
       throw new Error("Research run staging requires bundle.json and trial.py")
     }
-    await subprocess(["scp", "-q", ...inputs.map((entry) => path.join(localRun, entry)), `${profile.host.host}:${profile.remoteRun}/`])
-    await subprocess(["scp", "-q", "-r", workerRoot, `${profile.host.host}:${profile.remoteRun}/worker`])
+    await subprocess(["scp", "-q", ...address, ...inputs.map((entry) => path.join(localRun, entry)), `${profile.host.host}:${profile.remoteRun}/`])
+    await subprocess(["scp", "-q", ...address, "-r", workerRoot, `${profile.host.host}:${profile.remoteRun}/worker`])
   }
 
   async function validateDownloadedTree(root: string): Promise<void> {
@@ -119,10 +153,15 @@ export namespace ResearchRemoteCompute {
     if (!job.cwd || !safeRemotePath.test(job.cwd)) throw new Error("Remote research job has no safe run directory")
     const alias = job.target.host_id
     if (!safeHost.test(alias) || alias.startsWith("-")) throw new Error("Remote research job has an invalid SSH host")
+    const configuredAddress = process.env.AUTOFOLD_RESEARCH_REMOTE_HOST?.trim()
+    if (configuredAddress && (!safeHost.test(configuredAddress) || configuredAddress.startsWith("-"))) {
+      throw new Error("AUTOFOLD_RESEARCH_REMOTE_HOST contains unsupported characters")
+    }
+    const address = configuredAddress ? ["-o", `HostName=${configuredAddress}`] : []
     const temporary = path.join(path.dirname(output), `.remote-download-${crypto.randomUUID()}`)
     await fs.mkdir(path.dirname(output), { recursive: true })
     try {
-      await subprocess(["scp", "-q", "-r", `${alias}:${path.posix.join(job.cwd, "output")}`, temporary])
+      await subprocess(["scp", "-q", ...address, "-r", `${alias}:${path.posix.join(job.cwd, "output")}`, temporary])
       await validateDownloadedTree(temporary)
       await fs.rename(temporary, output)
     } catch (error) {
@@ -152,9 +191,21 @@ export namespace ResearchRemoteCompute {
         : undefined,
     }
     const base = workerCommand(remote)
-    const command = profile.protoRoot
-      ? `AUTOFOLD_PROTO_ROOT=${ComputeJobs.quote(profile.protoRoot)} ${base}`
-      : base
+    const environment = [
+      ...(profile.protoRoot && profile.protoHome
+        ? [
+            `PROTO_HOME=${ComputeJobs.quote(profile.protoHome)}`,
+            `AUTOFOLD_PROTO_ROOT=${ComputeJobs.quote(profile.protoRoot)}`,
+          ]
+        : []),
+      ...(profile.boltzgenExecutable && profile.boltzgenCache
+        ? [
+            `AUTOFOLD_BOLTZGEN_EXECUTABLE=${ComputeJobs.quote(profile.boltzgenExecutable)}`,
+            `AUTOFOLD_BOLTZGEN_CACHE=${ComputeJobs.quote(profile.boltzgenCache)}`,
+          ]
+        : []),
+    ]
+    const command = environment.length ? `${environment.join(" ")} ${base}` : base
     return {
       command,
       cwd: profile.remoteRun,
