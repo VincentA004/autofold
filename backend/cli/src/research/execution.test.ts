@@ -78,7 +78,27 @@ describe("research execution worker", () => {
       submissionSize: 3,
     })
     expect(legacy.format).toBe("autofold.trial-bundle.v1")
+    expect(legacy.intent).toBe("optimize")
     expect("targetArtifactHash" in legacy).toBe(false)
+  })
+
+  test("carries non-promotable shadow replay intent through the worker protocol", () => {
+    const bundle = ExecutionProtocol.TrialBundle.parse({
+      format: "autofold.trial-bundle.v1",
+      runId: "run_shadow",
+      trialId: "trl_shadow",
+      intent: "shadow_replay",
+      contractHash: `sha256:${"a".repeat(64)}`,
+      designAdapter: "mock",
+      programPath: "/immutable/trial.py",
+      programHash: `sha256:${"b".repeat(64)}`,
+      modality: "short_peptide",
+      evaluator: { id: "mock-peptide-panel", version: "1", sourceHash: `sha256:${"c".repeat(64)}`, direction: "minimize" },
+      seeds: [7],
+      candidateBudget: 8,
+      submissionSize: 3,
+    })
+    expect(bundle.intent).toBe("shadow_replay")
   })
 
   test("rejects evidence authored by an agent-editable v3 trial", async () => {

@@ -123,7 +123,6 @@ def _enrich_v4(
     adapter_hash = bundle["evidenceAdapter"]["sourceHash"]
     tools_commit = bundle["proto"]["toolsCommit"]
     entries: list[dict[str, Any]] = []
-    stage_runtime: dict[str, float] = {}
     candidates = list(candidate_set["candidates"])
     candidate_state = {
         candidate["id"]: {"predictors": [], "confidence": []}
@@ -221,10 +220,11 @@ def _enrich_v4(
                         skip(candidate_id, stage, model, seed, parents, "optional_tool_failure", f"Optional Proto tool failed: {type(error).__name__}")
                         continue
                     wall_seconds = time.monotonic() - started
-                    stage_runtime[stage["id"]] = stage_runtime.get(stage["id"], 0.0) + wall_seconds
-                    maximum_seconds = stage.get("budget", {}).get("maximumGpuSeconds")
-                    if maximum_seconds and stage_runtime[stage["id"]] > maximum_seconds:
-                        raise RuntimeError(f"Frozen GPU budget exceeded for stage {stage['id']}")
+                    # Proto enforces config.timeout around the model request. The wall clock
+                    # observed here also includes one-time environment and checkpoint hydration,
+                    # which happens before Proto starts that request deadline. Treating this value
+                    # as GPU time rejects valid cold-start results and throws their evidence away.
+                    # Preserve it as provenance below; do not duplicate Proto's runtime authority.
                     if getattr(prediction, "success", True) is False or not prediction.structures:
                         if "optional_tool_failure" not in stage.get("allowedSkips", []):
                             raise RuntimeError(f"Required Proto tool failed: {parameters['tool']}")

@@ -28,6 +28,26 @@ export namespace LLM {
 
   export const OUTPUT_TOKEN_MAX = Flag.OPENSCIENCE_EXPERIMENTAL_OUTPUT_TOKEN_MAX || 32_000
 
+  export function outputTokenLimit(_agentName: string): number {
+    return OUTPUT_TOKEN_MAX
+  }
+
+  export function shouldCapOutput(agentName: string): boolean {
+    return !agentName.startsWith("autofold-")
+  }
+
+  export function providerRoutingOptions(agentName: string, providerID: string): Record<string, unknown> {
+    if (!agentName.startsWith("autofold-") || providerID !== "openrouter") return {}
+    return {
+      provider: {
+        order: ["deepinfra", "deepseek", "fireworks", "together"],
+        allow_fallbacks: true,
+        require_parameters: true,
+        ignore: ["phala"],
+      },
+    }
+  }
+
   export type StreamInput = {
     user: MessageV2.User
     sessionID: string
@@ -118,6 +138,7 @@ export namespace LLM {
       mergeDeep(input.model.options),
       mergeDeep(tier.options),
       mergeDeep(input.agent.options),
+      mergeDeep(providerRoutingOptions(input.agent.name, input.model.providerID)),
       mergeDeep(variant),
     )
     if (isCodex) {
@@ -157,13 +178,13 @@ export namespace LLM {
       },
     )
 
-    const maxOutputTokens = isCodex
+    const maxOutputTokens = isCodex || !shouldCapOutput(input.agent.name)
       ? undefined
       : ProviderTransform.maxOutputTokens(
           input.model.api.npm,
           params.options,
           input.model.limit.output,
-          OUTPUT_TOKEN_MAX,
+          outputTokenLimit(input.agent.name),
         )
 
     const tools = await modelTools(input)

@@ -1,3 +1,4 @@
+import crypto from "node:crypto"
 import { Hono } from "hono"
 import { describeRoute, validator } from "hono-openapi"
 import z from "zod"
@@ -11,12 +12,21 @@ import {
   ResearchExecution,
   ResearchLiterature,
   ResearchLiteratureReview,
+  ResearchJobRunner,
+  ResearchJobs,
+  ResearchJobService,
+  ResearchOrchestration,
   ResearchPrograms,
   ResearchService,
+  CampaignSkills,
+  CapabilityRefinement,
+  SkillShadowReplay,
 } from "@/research"
 import { lazy } from "@/util/lazy"
 
 const CampaignParam = z.object({ campaignId: z.string().startsWith("cmp_") })
+const CampaignSkillParam = CampaignParam.extend({ skillId: z.string().regex(/^skill_[a-z0-9._-]+$/) })
+const SkillVersionParam = CampaignParam.extend({ versionId: z.string().startsWith("skv_") })
 const KnowledgeParam = z.object({
   campaignId: z.string().startsWith("cmp_"),
   conceptId: z.string().regex(/^knw_[A-Za-z0-9_-]+$/),
@@ -32,9 +42,18 @@ const AlignmentParam = z.object({
 const ExperimentParam = z.object({ experimentId: z.string().startsWith("exp_") })
 const TrialParam = z.object({ trialId: z.string().startsWith("trl_") })
 const RunParam = z.object({ runId: z.string().startsWith("run_") })
+const JobParam = z.object({ jobId: z.string().startsWith("job_") })
+
+function idempotencyKey(value?: string): string {
+  return value?.trim() || `request:${crypto.randomUUID()}`
+}
 
 export const ResearchRoutes = lazy(() =>
   new Hono()
+    .use(async (_c, next) => {
+      ResearchJobRunner.wake()
+      await next()
+    })
     .get(
       "/design-adapters",
       describeRoute({
@@ -103,6 +122,153 @@ export const ResearchRoutes = lazy(() =>
       async (c) =>
         c.json(await Research.activateCampaign(Instance.project.id, c.req.valid("param").campaignId)),
     )
+    .post(
+      "/campaigns/:campaignId/skills/initialize",
+      describeRoute({
+        summary: "Initialize campaign domain skills",
+        operationId: "research.campaign.skill.initialize",
+        responses: { 200: { description: "Campaign-scoped immutable skill versions" } },
+      }),
+      validator("param", CampaignParam),
+      async (c) => c.json(await CampaignSkills.service.initialize(
+        Instance.project.id, c.req.valid("param").campaignId, Instance.directory,
+      )),
+    )
+    .get(
+      "/campaigns/:campaignId/skills",
+      describeRoute({
+        summary: "List campaign skill versions",
+        operationId: "research.campaign.skill.list",
+        responses: { 200: { description: "All candidate, active, rejected, and superseded skill versions" } },
+      }),
+      validator("param", CampaignParam),
+      async (c) => c.json(await CampaignSkills.service.list(Instance.project.id, c.req.valid("param").campaignId)),
+    )
+    .post(
+      "/campaigns/:campaignId/skills/:skillId/candidates",
+      describeRoute({
+        summary: "Propose an immutable campaign skill refinement",
+        operationId: "research.campaign.skill.propose",
+        responses: { 200: { description: "Unevaluated candidate skill version" } },
+      }),
+      validator("param", CampaignSkillParam),
+      validator("json", CampaignSkills.ProposeInput),
+      async (c) => {
+        const param = c.req.valid("param")
+        return c.json(await CampaignSkills.service.propose(
+          Instance.project.id, param.campaignId, Instance.directory, param.skillId, c.req.valid("json"),
+        ))
+      },
+    )
+    .post(
+      "/campaigns/:campaignId/skills/:skillId/refine",
+      describeRoute({
+        summary: "Queue evidence-bounded capability refinement",
+        description: "Freezes referenced campaign trajectories and lets one bounded child agent author one candidate SKILL.md. Promotion still requires replay.",
+        operationId: "research.campaign.skill.refine",
+        responses: { 202: { description: "Persisted capability-refinement job" } },
+      }),
+      validator("param", CampaignSkillParam),
+      validator("json", CapabilityRefinement.Input.omit({ campaignId: true, skillId: true }).extend({
+        idempotencyKey: z.string().trim().min(1).max(500).optional(),
+        replayExperimentId: z.string().startsWith("exp_").optional(),
+        replayAgent: z.enum(["biology", "ml", "task"]).optional(),
+        replayRepetitions: z.number().int().min(3).max(5).optional(),
+      })),
+      async (c) => {
+        const param = c.req.valid("param")
+        const body = c.req.valid("json")
+        await CampaignSkills.service.initialize(Instance.project.id, param.campaignId, Instance.directory)
+        const job = await ResearchJobs.enqueue(Instance.project.id, {
+          idempotencyKey: idempotencyKey(body.idempotencyKey ?? c.req.header("Idempotency-Key")),
+          payload: {
+            kind: "capability_refinement",
+            campaignId: param.campaignId,
+            skillId: param.skillId,
+            sessionId: body.sessionId,
+            trajectoryRefs: body.trajectoryRefs,
+            replayExperimentId: body.replayExperimentId,
+            replayAgent: body.replayAgent ?? "biology",
+            replayRepetitions: body.replayRepetitions ?? 3,
+          },
+        })
+        ResearchJobRunner.wake()
+        return c.json(job, 202)
+      },
+    )
+    .post(
+      "/campaigns/:campaignId/skill-versions/:versionId/evaluate",
+      describeRoute({
+        summary: "Replay-evaluate a candidate skill",
+        operationId: "research.campaign.skill.evaluate",
+        responses: { 200: { description: "Activated or rejected skill version" } },
+      }),
+      validator("param", SkillVersionParam),
+      validator("json", CampaignSkills.ReplayInput),
+      async (c) => {
+        const param = c.req.valid("param")
+        return c.json(await CampaignSkills.service.evaluate(
+          Instance.project.id, param.campaignId, param.versionId, c.req.valid("json"),
+        ))
+      },
+    )
+    .post(
+      "/campaigns/:campaignId/skill-versions/:versionId/replay",
+      describeRoute({
+        summary: "Queue trusted parent-versus-candidate shadow replay",
+        description: "Runs both skills from one frozen context as non-promotable trials and derives promotion evidence from locked evaluations.",
+        operationId: "research.campaign.skill.shadow-replay",
+        responses: { 202: { description: "Persisted skill shadow-replay job" } },
+      }),
+      validator("param", SkillVersionParam),
+      validator("json", SkillShadowReplay.Input.omit({ campaignId: true, candidateVersionId: true }).extend({
+        idempotencyKey: z.string().trim().min(1).max(500).optional(),
+      })),
+      async (c) => {
+        const param = c.req.valid("param")
+        const body = c.req.valid("json")
+        const job = await ResearchJobs.enqueue(Instance.project.id, {
+          idempotencyKey: idempotencyKey(body.idempotencyKey ?? c.req.header("Idempotency-Key")),
+          payload: {
+            kind: "skill_shadow_replay",
+            campaignId: param.campaignId,
+            candidateVersionId: param.versionId,
+            experimentId: body.experimentId,
+            sessionId: body.sessionId,
+            agent: body.agent,
+            repetitions: body.repetitions,
+          },
+        })
+        ResearchJobRunner.wake()
+        return c.json(job, 202)
+      },
+    )
+    .post(
+      "/campaigns/:campaignId/skill-versions/:versionId/rollback",
+      describeRoute({
+        summary: "Roll back a campaign skill",
+        operationId: "research.campaign.skill.rollback",
+        responses: { 200: { description: "Reactivated historical skill version" } },
+      }),
+      validator("param", SkillVersionParam),
+      async (c) => {
+        const param = c.req.valid("param")
+        return c.json(await CampaignSkills.service.rollback(Instance.project.id, param.campaignId, param.versionId))
+      },
+    )
+    .post(
+      "/campaigns/:campaignId/skill-versions/:versionId/promote-library",
+      describeRoute({
+        summary: "Promote a cross-campaign validated skill to the project library",
+        operationId: "research.campaign.skill.promote-library",
+        responses: { 200: { description: "Project skill library entry" } },
+      }),
+      validator("param", SkillVersionParam),
+      async (c) => {
+        const param = c.req.valid("param")
+        return c.json(await CampaignSkills.service.promoteToLibrary(Instance.project.id, param.campaignId, param.versionId))
+      },
+    )
     .get(
       "/campaigns/:campaignId/knowledge",
       describeRoute({
@@ -113,6 +279,121 @@ export const ResearchRoutes = lazy(() =>
       }),
       validator("param", CampaignParam),
       async (c) => c.json(await Research.listKnowledge(Instance.project.id, c.req.valid("param").campaignId)),
+    )
+    .get(
+      "/campaigns/:campaignId/orchestration/observation",
+      describeRoute({
+        summary: "Build the canonical campaign-supervisor observation",
+        operationId: "research.orchestration.observe",
+        responses: { 200: { description: "Policy-safe recursive campaign state" } },
+      }),
+      validator("param", CampaignParam),
+      async (c) => c.json(await ResearchOrchestration.observe(c.req.valid("param").campaignId)),
+    )
+    .post(
+      "/campaigns/:campaignId/orchestration/moves/compile",
+      describeRoute({
+        summary: "Compile an agent-proposed campaign move without executing it",
+        operationId: "research.orchestration.move.compile",
+        responses: { 200: { description: "Authorized, rejected, or approval-required move" } },
+      }),
+      validator("param", CampaignParam),
+      validator("json", ResearchOrchestration.Move),
+      async (c) =>
+        c.json(
+          ResearchOrchestration.compile(
+            await ResearchOrchestration.observe(c.req.valid("param").campaignId),
+            c.req.valid("json"),
+          ),
+        ),
+    )
+    .post(
+      "/campaigns/:campaignId/orchestration/moves/execute",
+      describeRoute({
+        summary: "Compile and execute one authorized campaign move",
+        operationId: "research.orchestration.move.execute",
+        responses: { 200: { description: "Policy decision and optional durable job" } },
+      }),
+      validator("param", CampaignParam),
+      validator(
+        "json",
+        z.object({
+          move: ResearchOrchestration.Move,
+          sessionId: z.string().startsWith("ses_"),
+          idempotencyKey: z.string().trim().min(1).max(500).optional(),
+        }),
+      ),
+      async (c) => {
+        const campaignId = c.req.valid("param").campaignId
+        const input = c.req.valid("json")
+        const decision = ResearchOrchestration.compile(await ResearchOrchestration.observe(campaignId), input.move)
+        if (decision.status !== "authorized" || !decision.executable) return c.json({ decision })
+        const payload =
+          decision.move.kind === "iterate_experiment"
+            ? {
+                kind: "autoresearch" as const,
+                experimentId: decision.move.experimentId,
+                sessionId: input.sessionId,
+                iterations: decision.move.iterations,
+                agent: decision.move.agent,
+              }
+            : {
+                kind: "knowledge_refresh" as const,
+                campaignId,
+                sessionId: input.sessionId,
+                question: decision.move.kind === "refresh_knowledge" ? decision.move.question : undefined,
+                maxSources: 20,
+                maxClaims: 20,
+              }
+        const job = await ResearchJobs.enqueue(Instance.project.id, {
+          idempotencyKey: idempotencyKey(input.idempotencyKey ?? c.req.header("Idempotency-Key")),
+          payload,
+        })
+        ResearchJobRunner.wake()
+        return c.json({ decision, job })
+      },
+    )
+    .post(
+      "/campaigns/:campaignId/orchestration/loops",
+      describeRoute({
+        summary: "Start one bounded dynamic campaign-supervisor loop",
+        operationId: "research.orchestration.loop.start",
+        responses: { 202: { description: "Durable campaign-loop job" } },
+      }),
+      validator("param", CampaignParam),
+      validator(
+        "json",
+        z.object({
+          sessionId: z.string().startsWith("ses_"),
+          maxSteps: z.number().int().min(1).max(20).default(3),
+          idempotencyKey: z.string().trim().min(1).max(500).optional(),
+        }),
+      ),
+      async (c) => {
+        const campaignId = c.req.valid("param").campaignId
+        const input = c.req.valid("json")
+        const key = idempotencyKey(input.idempotencyKey ?? c.req.header("Idempotency-Key"))
+        const existing = (await ResearchJobs.list(Instance.project.id)).find((job) => job.idempotencyKey === key)
+        if (existing) return c.json(existing, 202)
+        const observation = await ResearchOrchestration.observe(campaignId)
+        if (observation.activeJobs.some((job) => job.kind === "campaign_loop")) {
+          throw new ResearchJobService.ConflictError({
+            code: "campaign_loop_active",
+            message: `Campaign ${campaignId} already has an active supervisor loop`,
+          })
+        }
+        const job = await ResearchJobs.enqueue(Instance.project.id, {
+          idempotencyKey: key,
+          payload: {
+            kind: "campaign_loop",
+            campaignId,
+            sessionId: input.sessionId,
+            maxSteps: input.maxSteps,
+          },
+        })
+        ResearchJobRunner.wake()
+        return c.json(job, 202)
+      },
     )
     .get(
       "/campaigns/:campaignId/knowledge/status",
@@ -196,10 +477,10 @@ export const ResearchRoutes = lazy(() =>
     .post(
       "/campaigns/:campaignId/literature/review",
       describeRoute({
-        summary: "Refresh campaign evidence and recommend the next experiment",
-        description: "Runs one bounded literature review, records evidence alignment, summarizes the campaign, and returns one advisory next experiment.",
-        operationId: "research.literature.review",
-        responses: { 200: { description: "Persisted evidence cycle, compact campaign summary, and next-experiment proposal" } },
+        summary: "Queue a campaign evidence refresh",
+        description: "Persists a restart-safe literature review job and returns immediately.",
+        operationId: "research.literature.review.enqueue",
+        responses: { 202: { description: "Persisted knowledge-refresh job" } },
       }),
       validator("param", CampaignParam),
       validator(
@@ -207,17 +488,27 @@ export const ResearchRoutes = lazy(() =>
         ResearchLiteratureReview.Input.omit({ campaignId: true }).extend({
           maxSources: ResearchLiteratureReview.Input.shape.maxSources.optional(),
           maxClaims: ResearchLiteratureReview.Input.shape.maxClaims.optional(),
+          idempotencyKey: z.string().trim().min(1).max(500).optional(),
         }),
       ),
-      async (c) =>
-        c.json(
-          await ResearchLiteratureReview.run({
+      async (c) => {
+        const body = c.req.valid("json")
+        const job = await ResearchJobs.enqueue(Instance.project.id, {
+          idempotencyKey: idempotencyKey(body.idempotencyKey ?? c.req.header("Idempotency-Key")),
+          payload: {
+            kind: "knowledge_refresh",
             campaignId: c.req.valid("param").campaignId,
-            ...c.req.valid("json"),
-            maxSources: c.req.valid("json").maxSources ?? 20,
-            maxClaims: c.req.valid("json").maxClaims ?? 20,
-          }),
-        ),
+            sessionId: body.sessionId,
+            question: body.question,
+            maxSources: body.maxSources ?? 20,
+            maxClaims: body.maxClaims ?? 20,
+            resumeProposalPath: body.resumeProposalPath,
+            resumeChildSessionId: body.resumeChildSessionId,
+          },
+        })
+        ResearchJobRunner.wake()
+        return c.json(job, 202)
+      },
     )
     .get(
       "/campaigns/:campaignId/claims",
@@ -300,14 +591,17 @@ export const ResearchRoutes = lazy(() =>
       }),
       validator("param", CampaignParam),
       validator("json", ResearchService.CreateExperimentInput),
-      async (c) =>
-        c.json(
+      async (c) => {
+        const input = c.req.valid("json")
+        await ResearchArtifacts.readTarget(Instance.directory, input.contract.targetArtifactHash)
+        return c.json(
           await Research.createExperiment(
             Instance.project.id,
             c.req.valid("param").campaignId,
-            c.req.valid("json"),
+            input,
           ),
-        ),
+        )
+      },
     )
     .post(
       "/experiments/:experimentId/activate",
@@ -317,17 +611,21 @@ export const ResearchRoutes = lazy(() =>
         responses: { 200: { description: "Activated experiment" } },
       }),
       validator("param", ExperimentParam),
-      async (c) =>
-        c.json(await Research.activateExperiment(Instance.project.id, c.req.valid("param").experimentId)),
+      async (c) => {
+        const experimentId = c.req.valid("param").experimentId
+        const history = await Research.history(Instance.project.id, experimentId)
+        await ResearchArtifacts.readTarget(Instance.directory, history.experiment.contract.targetArtifactHash)
+        return c.json(await Research.activateExperiment(Instance.project.id, experimentId))
+      },
     )
     .post(
       "/experiments/:experimentId/autoresearch",
       describeRoute({
-        summary: "Run bounded experiment-level RSI",
+        summary: "Queue bounded experiment-level RSI",
         description:
-          "Creates a dynamic child agent for each iteration, freezes its Proto proposal, executes it, and returns locked evaluation outcomes.",
-        operationId: "research.autoresearch.run",
-        responses: { 200: { description: "Completed bounded autoresearch iterations" } },
+          "Persists a restart-safe job that creates dynamic child agents, freezes Proto proposals, and executes locked evaluations.",
+        operationId: "research.autoresearch.enqueue",
+        responses: { 202: { description: "Persisted autoresearch job" } },
       }),
       validator("param", ExperimentParam),
       validator(
@@ -335,17 +633,24 @@ export const ResearchRoutes = lazy(() =>
         ResearchAutoresearch.Input.omit({ experimentId: true }).extend({
           iterations: ResearchAutoresearch.Input.shape.iterations.optional(),
           agent: ResearchAutoresearch.Input.shape.agent.optional(),
+          idempotencyKey: z.string().trim().min(1).max(500).optional(),
         }),
       ),
-      async (c) =>
-        c.json(
-          await ResearchAutoresearch.run({
+      async (c) => {
+        const body = c.req.valid("json")
+        const job = await ResearchJobs.enqueue(Instance.project.id, {
+          idempotencyKey: idempotencyKey(body.idempotencyKey ?? c.req.header("Idempotency-Key")),
+          payload: {
+            kind: "autoresearch",
             experimentId: c.req.valid("param").experimentId,
-            sessionId: c.req.valid("json").sessionId,
-            iterations: c.req.valid("json").iterations ?? 1,
-            agent: c.req.valid("json").agent ?? "biology",
-          }),
-        ),
+            sessionId: body.sessionId,
+            iterations: body.iterations ?? 1,
+            agent: body.agent ?? "biology",
+          },
+        })
+        ResearchJobRunner.wake()
+        return c.json(job, 202)
+      },
     )
     .get(
       "/experiments/:experimentId/history",
@@ -391,6 +696,7 @@ export const ResearchRoutes = lazy(() =>
         return c.json(
           await Research.createTrial(Instance.project.id, c.req.valid("param").experimentId, {
             hypothesis: input.hypothesis,
+            intent: input.intent,
             designAdapter: input.designAdapter,
             parentTrialId: input.parentTrialId,
             ...program,
@@ -473,5 +779,53 @@ export const ResearchRoutes = lazy(() =>
       }),
       validator("param", RunParam),
       async (c) => c.json(await ResearchExecution.artifacts(c.req.valid("param").runId)),
+    )
+    .get(
+      "/jobs",
+      describeRoute({
+        summary: "List durable research jobs",
+        operationId: "research.job.list",
+        responses: { 200: { description: "Project-scoped orchestration jobs" } },
+      }),
+      async (c) => c.json(await ResearchJobs.list(Instance.project.id)),
+    )
+    .get(
+      "/jobs/:jobId",
+      describeRoute({
+        summary: "Get a durable research job",
+        operationId: "research.job.get",
+        responses: { 200: { description: "Current job state, attempts, error, and result" } },
+      }),
+      validator("param", JobParam),
+      async (c) => c.json(await ResearchJobs.get(Instance.project.id, c.req.valid("param").jobId)),
+    )
+    .post(
+      "/jobs/:jobId/cancel",
+      describeRoute({
+        summary: "Cancel a durable research job",
+        operationId: "research.job.cancel",
+        responses: { 200: { description: "Cancelled job" } },
+      }),
+      validator("param", JobParam),
+      async (c) => {
+        const jobId = c.req.valid("param").jobId
+        const job = await ResearchJobs.cancel(Instance.project.id, jobId)
+        ResearchJobRunner.abort(jobId)
+        return c.json(job)
+      },
+    )
+    .post(
+      "/jobs/:jobId/retry",
+      describeRoute({
+        summary: "Retry a failed durable research job",
+        operationId: "research.job.retry",
+        responses: { 200: { description: "Requeued job" } },
+      }),
+      validator("param", JobParam),
+      async (c) => {
+        const job = await ResearchJobs.retry(Instance.project.id, c.req.valid("param").jobId)
+        ResearchJobRunner.wake()
+        return c.json(job)
+      },
     ),
 )

@@ -168,7 +168,12 @@ export namespace ResearchArtifacts {
   export async function readTarget(workspace: string, targetArtifactHash: string): Promise<StoredTarget> {
     const targetArtifactPath = targetPath(targetArtifactHash)
     const absolute = inside(workspace, targetArtifactPath)
-    const content = await fs.readFile(absolute, "utf8")
+    const content = await fs.readFile(absolute, "utf8").catch((error) => {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+        throw new Error(`Target artifact ${targetArtifactHash} is missing at ${targetArtifactPath}`)
+      }
+      throw error
+    })
     if (sha256(content) !== targetArtifactHash) {
       throw new Error(`Target artifact no longer matches ${targetArtifactHash}`)
     }

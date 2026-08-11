@@ -119,6 +119,7 @@ describe("bounded literature review", () => {
           alignments: [],
           cycles: [],
           newRunKnowledge: [],
+          newRunEvidence: [],
         }),
         propose: async () => {
           events.push("propose")
@@ -233,8 +234,9 @@ describe("bounded literature review", () => {
             literature: [],
             claims: [],
             alignments: [],
-            cycles: [],
-            newRunKnowledge: [],
+          cycles: [],
+          newRunKnowledge: [],
+          newRunEvidence: [],
           }),
           propose: async () => ({
             childSessionId: "ses_child",

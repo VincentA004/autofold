@@ -110,6 +110,49 @@ describe("research terminal", () => {
     })
   })
 
+  test("queues evidence-bounded capability refinement", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const code = await ResearchTerminal.run([
+      "skill", "refine", "cmp_one", "skill_bionemo.predictor-interpretation",
+      "--session", "ses_parent", "--trajectories", "trl_one,evl_one", "--experiment", "exp_one",
+      "--agent", "ml", "--idempotency-key", "refine-one",
+    ], {
+      output: () => undefined,
+      fetchFn: (async (input, init) => {
+        calls.push({ url: String(input), init })
+        return new Response(JSON.stringify({ id: "job_refine" }), { status: 202 })
+      }) as typeof fetch,
+    })
+    expect(code).toBe(0)
+    expect(calls[0]?.url).toBe(
+      "http://127.0.0.1:4096/research/campaigns/cmp_one/skills/skill_bionemo.predictor-interpretation/refine",
+    )
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      sessionId: "ses_parent", trajectoryRefs: ["trl_one", "evl_one"], replayExperimentId: "exp_one", replayAgent: "ml",
+      replayRepetitions: 3,
+      idempotencyKey: "refine-one",
+    })
+  })
+
+  test("queues trusted skill shadow replay", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const code = await ResearchTerminal.run([
+      "skill", "replay", "cmp_one", "skv_candidate", "--experiment", "exp_one",
+      "--session", "ses_parent", "--agent", "ml",
+    ], {
+      output: () => undefined,
+      fetchFn: (async (input, init) => {
+        calls.push({ url: String(input), init })
+        return new Response(JSON.stringify({ id: "job_shadow" }), { status: 202 })
+      }) as typeof fetch,
+    })
+    expect(code).toBe(0)
+    expect(calls[0]?.url).toBe("http://127.0.0.1:4096/research/campaigns/cmp_one/skill-versions/skv_candidate/replay")
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      experimentId: "exp_one", sessionId: "ses_parent", agent: "ml", repetitions: 3,
+    })
+  })
+
   test("refreshes literature only when the knowledge watermark is due", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = []
     const code = await ResearchTerminal.run(["knowledge", "refresh", "cmp_one", "--session", "ses_parent"], {
@@ -154,6 +197,28 @@ describe("research terminal", () => {
     expect(output.some((line) => line.includes('"candidates"'))).toBe(true)
   })
 
+  test("watches a durable research job and prints its result", async () => {
+    const output: string[] = []
+    let reads = 0
+    const code = await ResearchTerminal.run(["job", "watch", "job_one"], {
+      output: (value) => output.push(value),
+      sleep: async () => undefined,
+      fetchFn: (async (_input) => {
+        reads++
+        return new Response(
+          JSON.stringify(
+            reads === 1
+              ? { id: "job_one", status: "running" }
+              : { id: "job_one", status: "succeeded", result: { cycleId: "kcy_one" } },
+          ),
+        )
+      }) as typeof fetch,
+    })
+    expect(code).toBe(0)
+    expect(output.some((line) => line.includes("running"))).toBe(true)
+    expect(output.some((line) => line.includes('"cycleId": "kcy_one"'))).toBe(true)
+  })
+
   test("creates a session through the same project-scoped terminal client", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = []
     const code = await ResearchTerminal.run(["session", "create", "--title", "Acceptance compute"], {
@@ -190,6 +255,27 @@ describe("research terminal", () => {
       agent: "biology",
     })
     expect(output[0]).toContain('"completedIterations": 3')
+  })
+
+  test("starts a durable bounded campaign supervisor", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const code = await ResearchTerminal.run(
+      ["campaign", "loop", "cmp_one", "--session", "ses_parent", "--steps", "4", "--idempotency-key", "loop:one"],
+      {
+        output: () => undefined,
+        fetchFn: (async (input, init) => {
+          calls.push({ url: String(input), init })
+          return new Response(JSON.stringify({ id: "job_loop", status: "queued" }), { status: 202 })
+        }) as typeof fetch,
+      },
+    )
+    expect(code).toBe(0)
+    expect(calls[0]?.url).toBe("http://127.0.0.1:4096/research/campaigns/cmp_one/orchestration/loops")
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      sessionId: "ses_parent",
+      maxSteps: 4,
+      idempotencyKey: "loop:one",
+    })
   })
 
   test("authors a target file before freezing an experiment with the scientific evaluator", async () => {

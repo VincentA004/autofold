@@ -1,4 +1,5 @@
 import z from "zod"
+import { ResearchSkills } from "./research-skills"
 
 const Digest = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const Timestamp = z.string().datetime()
@@ -96,7 +97,15 @@ export namespace ResearchDomain {
     id: z.string().startsWith("trl_"),
     experimentId: z.string().startsWith("exp_"),
     parentTrialId: z.string().startsWith("trl_").optional(),
+    origin: z
+      .object({
+        jobId: z.string().startsWith("job_"),
+        phase: z.string().trim().min(1).max(200),
+      })
+      .optional(),
+    skills: z.array(ResearchSkills.Reference).max(30).default([]),
     hypothesis: z.string().trim().min(1),
+    intent: z.enum(["optimize", "calibrate", "negative_control", "shadow_replay"]).default("optimize"),
     designAdapter: z.enum(["mock", "proto"]),
     programPath: z.string().trim().min(1).max(4_000),
     programHash: Digest,
@@ -105,6 +114,64 @@ export namespace ResearchDomain {
     updatedAt: Timestamp,
   })
   export type Trial = z.infer<typeof Trial>
+
+  export const SkillReplayScore = z.object({
+    lockedObjectiveUtility: z.number().finite(),
+    areaUnderImprovementCurve: z.number().finite(),
+    validDiverseYield: z.number().finite().nonnegative(),
+    predictorDisagreement: z.number().finite().nonnegative(),
+    failureRate: z.number().finite().min(0).max(1),
+    computeCost: z.number().finite().nonnegative(),
+  })
+  export type SkillReplayScore = z.infer<typeof SkillReplayScore>
+
+  export const SkillReplay = z.object({
+    benchmarkId: z.string().trim().min(1).max(200),
+    baselineVersionId: z.string().startsWith("skv_"),
+    candidateVersionId: z.string().startsWith("skv_"),
+    sameBudget: z.boolean(),
+    baseline: SkillReplayScore,
+    candidate: SkillReplayScore,
+    campaignIds: z.array(z.string().startsWith("cmp_")).min(1),
+    passed: z.boolean(),
+    evaluatedAt: Timestamp,
+  })
+  export type SkillReplay = z.infer<typeof SkillReplay>
+
+  export const SkillVersion = z.object({
+    id: z.string().startsWith("skv_"),
+    campaignId: z.string().startsWith("cmp_"),
+    skillId: ResearchSkills.Reference.shape.id,
+    version: z.number().int().positive(),
+    parentVersionId: z.string().startsWith("skv_").optional(),
+    path: z.string().trim().min(1).max(4_000),
+    contentHash: Digest,
+    capabilities: z.array(ResearchSkills.Capability).min(1).max(6),
+    appliesToToolKeys: z.array(z.string().trim().min(1)).max(30),
+    status: z.enum(["candidate", "active", "rejected", "superseded"]),
+    source: z.enum(["bundled", "campaign_refinement"]),
+    trajectoryRefs: z.array(z.string().trim().min(1).max(500)).max(100),
+    createdBy: z.string().trim().min(1).max(200),
+    origin: z.object({
+      jobId: z.string().startsWith("job_"),
+      phase: z.string().trim().min(1).max(200),
+    }).optional(),
+    replay: SkillReplay.optional(),
+    createdAt: Timestamp,
+  })
+  export type SkillVersion = z.infer<typeof SkillVersion>
+
+  export const SkillLibraryEntry = z.object({
+    id: z.string().startsWith("slb_"),
+    projectId: z.string().trim().min(1),
+    skillId: ResearchSkills.Reference.shape.id,
+    sourceVersionId: z.string().startsWith("skv_"),
+    contentHash: Digest,
+    promotedFromCampaignIds: z.array(z.string().startsWith("cmp_")).min(3),
+    status: z.enum(["active", "superseded"]),
+    createdAt: Timestamp,
+  })
+  export type SkillLibraryEntry = z.infer<typeof SkillLibraryEntry>
 
   export const Evaluation = z.object({
     id: z.string().startsWith("evl_"),
@@ -132,6 +199,95 @@ export namespace ResearchDomain {
     completedAt: Timestamp.optional(),
   })
   export type Run = z.infer<typeof Run>
+
+  export const JobPayload = z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("autoresearch"),
+      experimentId: z.string().startsWith("exp_"),
+      sessionId: z.string().startsWith("ses_"),
+      iterations: z.number().int().min(1).max(10),
+      agent: z.enum(["biology", "ml", "task"]),
+    }),
+    z.object({
+      kind: z.literal("knowledge_refresh"),
+      campaignId: z.string().startsWith("cmp_"),
+      sessionId: z.string().startsWith("ses_"),
+      question: z.string().trim().min(1).max(2_000).optional(),
+      maxSources: z.number().int().min(1).max(50),
+      maxClaims: z.number().int().min(1).max(50),
+      resumeProposalPath: z.string().trim().min(1).optional(),
+      resumeChildSessionId: z.string().startsWith("ses_").optional(),
+    }),
+    z.object({
+      kind: z.literal("campaign_loop"),
+      campaignId: z.string().startsWith("cmp_"),
+      sessionId: z.string().startsWith("ses_"),
+      maxSteps: z.number().int().min(1).max(20),
+    }),
+    z.object({
+      kind: z.literal("capability_refinement"),
+      campaignId: z.string().startsWith("cmp_"),
+      sessionId: z.string().startsWith("ses_"),
+      skillId: ResearchSkills.Reference.shape.id,
+      trajectoryRefs: z.array(z.string().regex(/^(exp|trl|evl|run|knw|clm|job)_[A-Za-z0-9_-]+$/)).min(1).max(100),
+      replayExperimentId: z.string().startsWith("exp_").optional(),
+      replayAgent: z.enum(["biology", "ml", "task"]).default("biology"),
+      replayRepetitions: z.number().int().min(3).max(5).default(3),
+    }),
+    z.object({
+      kind: z.literal("skill_shadow_replay"),
+      campaignId: z.string().startsWith("cmp_"),
+      experimentId: z.string().startsWith("exp_"),
+      candidateVersionId: z.string().startsWith("skv_"),
+      sessionId: z.string().startsWith("ses_"),
+      agent: z.enum(["biology", "ml", "task"]),
+      repetitions: z.number().int().min(3).max(5).default(3),
+    }),
+  ])
+  export type JobPayload = z.infer<typeof JobPayload>
+
+  export const JobStatus = z.enum(["queued", "running", "retry_wait", "succeeded", "failed", "cancelled"])
+  export type JobStatus = z.infer<typeof JobStatus>
+
+  export const JobCheckpoint = z.object({
+    phase: z.string().trim().min(1).max(200),
+    data: z.record(z.string(), z.unknown()),
+    completedAt: Timestamp,
+  })
+  export type JobCheckpoint = z.infer<typeof JobCheckpoint>
+
+  export const Job = z
+    .object({
+      id: z.string().startsWith("job_"),
+      projectId: z.string().trim().min(1),
+      idempotencyKey: z.string().trim().min(1).max(500),
+      payload: JobPayload,
+      status: JobStatus,
+      attempts: z.number().int().nonnegative(),
+      maxAttempts: z.number().int().min(1).max(20),
+      createdAt: Timestamp,
+      updatedAt: Timestamp,
+      startedAt: Timestamp.optional(),
+      heartbeatAt: Timestamp.optional(),
+      completedAt: Timestamp.optional(),
+      nextAttemptAt: Timestamp.optional(),
+      leaseId: z.string().trim().min(1).optional(),
+      leaseExpiresAt: Timestamp.optional(),
+      cancelRequestedAt: Timestamp.optional(),
+      error: z.string().trim().min(1).max(4_000).optional(),
+      result: z.record(z.string(), z.unknown()).optional(),
+      checkpoints: z.record(z.string(), JobCheckpoint).default({}),
+    })
+    .superRefine((job, context) => {
+      if (job.payload.kind !== "knowledge_refresh") return
+      if (Boolean(job.payload.resumeProposalPath) === Boolean(job.payload.resumeChildSessionId)) return
+      context.addIssue({
+        code: "custom",
+        path: ["payload"],
+        message: "resumeProposalPath and resumeChildSessionId must be provided together",
+      })
+    })
+  export type Job = z.infer<typeof Job>
 
   export const KnowledgeSource = z.object({
     id: z.string().trim().min(1),
@@ -165,7 +321,7 @@ export namespace ResearchDomain {
       verified: z.array(KnowledgeActor).min(1).optional(),
       status: z.enum(["draft", "stable", "deprecated"]),
       score: z.number().finite().nullable(),
-      decision: z.enum(["promoted", "rejected", "failed"]),
+      decision: z.enum(["promoted", "rejected", "observed", "failed"]),
       error: z.string().trim().min(1).max(4_000).optional(),
       diagnostics: z.record(z.string(), z.number().finite()),
       provenance: z.object({

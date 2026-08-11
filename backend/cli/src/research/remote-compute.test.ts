@@ -16,6 +16,7 @@ describe("research remote compute", () => {
       AUTOFOLD_RESEARCH_REMOTE_PROTO_HOME: "/home/vincent/.proto",
       AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_EXECUTABLE: "/home/vincent/boltzgen/bin/boltzgen",
       AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_CACHE: "/home/vincent/boltzgen/cache",
+      AUTOFOLD_RESEARCH_REMOTE_PXDESIGN_EXECUTABLE: "/home/vincent/pxdesign/bin/pxdesign",
     })
     expect(profile).toEqual({
       kind: "ssh",
@@ -33,6 +34,7 @@ describe("research remote compute", () => {
       protoHome: "/home/vincent/.proto",
       boltzgenExecutable: "/home/vincent/boltzgen/bin/boltzgen",
       boltzgenCache: "/home/vincent/boltzgen/cache",
+      pxdesignExecutable: "/home/vincent/pxdesign/bin/pxdesign",
     })
   })
 
@@ -70,6 +72,7 @@ describe("research remote compute", () => {
       AUTOFOLD_RESEARCH_REMOTE_PROTO_HOME: "/srv/proto-home",
       AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_EXECUTABLE: "/srv/boltzgen/bin/boltzgen",
       AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_CACHE: "/srv/boltzgen/cache",
+      AUTOFOLD_RESEARCH_REMOTE_PXDESIGN_EXECUTABLE: "/srv/pxdesign/bin/pxdesign",
     })
     const launch = ResearchRemoteCompute.command(profile, {
       python: "/local/python",
@@ -84,7 +87,34 @@ describe("research remote compute", () => {
     expect(launch.command).toContain("PROTO_HOME='/srv/proto-home'")
     expect(launch.command).toContain("AUTOFOLD_BOLTZGEN_EXECUTABLE='/srv/boltzgen/bin/boltzgen'")
     expect(launch.command).toContain("AUTOFOLD_BOLTZGEN_CACHE='/srv/boltzgen/cache'")
+    expect(launch.command).toContain("AUTOFOLD_PXDESIGN_EXECUTABLE='/srv/pxdesign/bin/pxdesign'")
     expect(launch.command).toContain("'/srv/venv/bin/python'")
     expect(launch.command).not.toContain("/local/")
+  })
+
+  test("requires gated Protenix v2 weights before a remote launch", () => {
+    const bundle = {
+      pipeline: {
+        stages: [
+          {
+            models: [
+              {
+                toolKey: "protenix-prediction",
+                config: { model_name: "protenix-v2" },
+              },
+            ],
+          },
+        ],
+      },
+    }
+    expect(ResearchRemoteCompute.requiredProtoArtifacts(bundle, "/srv/proto-home")).toEqual([
+      "/srv/proto-home/proto_model_cache/protenix/checkpoint/protenix-v2.pt",
+    ])
+    expect(
+      ResearchRemoteCompute.requiredProtoArtifacts(
+        { pipeline: { stages: [{ models: [{ toolKey: "protenix-prediction", config: { model_name: "protenix_mini_esm_v0.5.0" } }] }] } },
+        "/srv/proto-home",
+      ),
+    ).toEqual([])
   })
 })

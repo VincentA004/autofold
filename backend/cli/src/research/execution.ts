@@ -60,13 +60,9 @@ async function verifyGenerationRuns(
   if (index.runId !== bundle.runId || index.programHash !== bundle.programHash) {
     throw new Error(`Run ${bundle.runId} generation index has another execution identity`)
   }
-  if (
-    bundle.format === "autofold.trial-bundle.v4" &&
-    bundle.pipeline.generation?.budget.maximumGpuSeconds &&
-    index.runtime.wallSeconds > bundle.pipeline.generation.budget.maximumGpuSeconds
-  ) {
-    throw new Error(`Run ${bundle.runId} generation exceeded its frozen runtime budget`)
-  }
+  // Proto enforces the frozen GPU timeout at the model-request boundary. This wall-clock
+  // measurement also contains first-use environment/checkpoint hydration and is retained as
+  // provenance; comparing it to GPU seconds would reject valid cold-start artifacts.
   const candidateById = new Map(candidates.candidates.map((candidate) => [candidate.id, candidate]))
   const declaredGenerators = bundle.format === "autofold.trial-bundle.v4" && bundle.pipeline.generation
     ? new Map(bundle.pipeline.generation.generators.map((generator) => [generator.id, generator]))
@@ -403,7 +399,7 @@ export namespace ResearchExecution {
         requiresTargetArtifact: true,
         evidenceAdapter: {
           id: "proto-structure-pipeline",
-          version: "1",
+          version: "2",
           sourceHash: await fileHash(structureEvidenceSource),
           sourcePath: structureEvidenceSource,
         },
@@ -542,6 +538,7 @@ export namespace ResearchExecution {
           : "autofold.trial-bundle.v2",
       runId,
       trialId: context.trial.id,
+      intent: context.trial.intent,
       contractHash: context.experiment.contractHash,
       targetArtifactHash: context.experiment.contract.targetArtifactHash,
       targetArtifactPath: targetPath ? path.posix.basename(targetPath) : undefined,
@@ -671,6 +668,7 @@ export namespace ResearchExecution {
       evaluation.runId !== run.id ||
       manifest.runId !== run.id ||
       bundle.trialId !== run.trialId ||
+      bundle.intent !== context.trial.intent ||
       candidates.trialId !== run.trialId ||
       evaluation.trialId !== run.trialId ||
       manifest.trialId !== run.trialId
@@ -722,6 +720,35 @@ export namespace ResearchExecution {
     if (run.manifestHash !== (await fileHash(manifestPath))) {
       throw new Error(`Run ${run.id} manifest no longer matches its persisted hash`)
     }
+    const modelEvidence = modelRuns
+      ? await Promise.all(
+          modelRuns.entries.map(async (entry) => {
+            if ("status" in entry && entry.status === "skipped") {
+              return {
+                candidateId: entry.candidateId,
+                stage: entry.stage,
+                modelId: entry.modelId,
+                seed: entry.seed,
+                status: "skipped" as const,
+                reason: entry.reason,
+              }
+            }
+            const artifact = ExecutionProtocol.ModelRunArtifact.parse(
+              await Bun.file(inside(output, entry.artifactPath)).json(),
+            )
+            return {
+              candidateId: entry.candidateId,
+              ...("stage" in artifact ? { stage: artifact.stage } : {}),
+              modelId: artifact.model.id,
+              seed: entry.seed,
+              status: "completed" as const,
+              parametersHash: artifact.parametersHash,
+              ...("runtime" in artifact ? { runtime: artifact.runtime } : {}),
+              metrics: artifact.metrics,
+            }
+          }),
+        )
+      : []
     return {
       run,
       trial: context.trial,
@@ -729,7 +756,9 @@ export namespace ResearchExecution {
       evaluation,
       manifest,
       modelRuns,
+      modelEvidence,
       generationRuns,
+      pipeline: bundle.format === "autofold.trial-bundle.v4" ? bundle.pipeline : undefined,
       incumbent: context.experiment.incumbentTrialId === run.trialId,
     }
   }

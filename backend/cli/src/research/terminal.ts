@@ -9,6 +9,7 @@ interface Parsed {
 }
 
 const terminalRunStates = new Set(["succeeded", "failed", "cancelled"])
+const terminalJobStates = terminalRunStates
 
 export namespace ResearchTerminal {
   export function parse(argv: string[]): Parsed {
@@ -143,6 +144,69 @@ export namespace ResearchTerminal {
         outputJSON(output, await client.post(`/campaigns/${requiredPosition(parsed, 2, "campaign id")}/activate`))
         return 0
       }
+      if (command === "skills") {
+        outputJSON(output, await client.get(`/campaigns/${requiredPosition(parsed, 1, "campaign id")}/skills`))
+        return 0
+      }
+      if (command === "skill" && noun === "initialize") {
+        outputJSON(output, await client.post(`/campaigns/${requiredPosition(parsed, 2, "campaign id")}/skills/initialize`))
+        return 0
+      }
+      if (command === "skill" && noun === "propose") {
+        const campaignId = requiredPosition(parsed, 2, "campaign id")
+        const skillId = requiredPosition(parsed, 3, "skill id")
+        const file = path.resolve(workspace, requiredFlag(parsed, "file"))
+        if (!(await Bun.file(file).exists())) throw new Error(`Skill file was not found: ${file}`)
+        const trajectories = stringFlag(parsed, "trajectories")
+        outputJSON(output, await client.post(`/campaigns/${campaignId}/skills/${skillId}/candidates`, {
+          parentVersionId: requiredFlag(parsed, "parent"),
+          markdown: await Bun.file(file).text(),
+          trajectoryRefs: trajectories ? trajectories.split(",").map((item) => item.trim()).filter(Boolean) : [],
+          createdBy: requiredFlag(parsed, "by"),
+        }))
+        return 0
+      }
+      if (command === "skill" && noun === "refine") {
+        const campaignId = requiredPosition(parsed, 2, "campaign id")
+        const skillId = requiredPosition(parsed, 3, "skill id")
+        outputJSON(output, await client.post(`/campaigns/${campaignId}/skills/${skillId}/refine`, {
+          sessionId: requiredFlag(parsed, "session"),
+          trajectoryRefs: requiredFlag(parsed, "trajectories").split(",").map((item) => item.trim()).filter(Boolean),
+          ...(stringFlag(parsed, "experiment") ? { replayExperimentId: stringFlag(parsed, "experiment") } : {}),
+          replayAgent: stringFlag(parsed, "agent") ?? "biology",
+          replayRepetitions: integerFlag(parsed, "repetitions", 3),
+          ...(stringFlag(parsed, "idempotency-key") ? { idempotencyKey: stringFlag(parsed, "idempotency-key") } : {}),
+        }))
+        return 0
+      }
+      if (command === "skill" && noun === "evaluate") {
+        const campaignId = requiredPosition(parsed, 2, "campaign id")
+        const versionId = requiredPosition(parsed, 3, "skill version id")
+        const file = path.resolve(workspace, requiredFlag(parsed, "file"))
+        if (!(await Bun.file(file).exists())) throw new Error(`Replay file was not found: ${file}`)
+        outputJSON(output, await client.post(
+          `/campaigns/${campaignId}/skill-versions/${versionId}/evaluate`, await Bun.file(file).json(),
+        ))
+        return 0
+      }
+      if (command === "skill" && noun === "replay") {
+        const campaignId = requiredPosition(parsed, 2, "campaign id")
+        const versionId = requiredPosition(parsed, 3, "skill version id")
+        outputJSON(output, await client.post(`/campaigns/${campaignId}/skill-versions/${versionId}/replay`, {
+          experimentId: requiredFlag(parsed, "experiment"),
+          sessionId: requiredFlag(parsed, "session"),
+          agent: stringFlag(parsed, "agent") ?? "biology",
+          repetitions: integerFlag(parsed, "repetitions", 3),
+          ...(stringFlag(parsed, "idempotency-key") ? { idempotencyKey: stringFlag(parsed, "idempotency-key") } : {}),
+        }))
+        return 0
+      }
+      if (command === "skill" && (noun === "rollback" || noun === "promote-library")) {
+        const campaignId = requiredPosition(parsed, 2, "campaign id")
+        const versionId = requiredPosition(parsed, 3, "skill version id")
+        outputJSON(output, await client.post(`/campaigns/${campaignId}/skill-versions/${versionId}/${noun}`))
+        return 0
+      }
       if (command === "literature" && noun === "search") {
         const databases = stringFlag(parsed, "databases")
         outputJSON(
@@ -160,6 +224,7 @@ export namespace ResearchTerminal {
           output,
           await client.post(`/campaigns/${requiredPosition(parsed, 2, "campaign id")}/literature/review`, {
             sessionId: requiredFlag(parsed, "session"),
+            ...(stringFlag(parsed, "idempotency-key") ? { idempotencyKey: stringFlag(parsed, "idempotency-key") } : {}),
             ...(stringFlag(parsed, "question") ? { question: stringFlag(parsed, "question") } : {}),
             maxSources: integerFlag(parsed, "max-sources", 20),
             maxClaims: integerFlag(parsed, "max-claims", 20),
@@ -266,6 +331,7 @@ export namespace ResearchTerminal {
             sessionId: requiredFlag(parsed, "session"),
             iterations: integerFlag(parsed, "iterations", 1),
             ...(stringFlag(parsed, "agent") ? { agent: stringFlag(parsed, "agent") } : {}),
+            ...(stringFlag(parsed, "idempotency-key") ? { idempotencyKey: stringFlag(parsed, "idempotency-key") } : {}),
           }),
         )
         return 0
@@ -290,6 +356,7 @@ export namespace ResearchTerminal {
           output,
           await client.post(`/experiments/${experimentId}/authored-trials`, {
             hypothesis: requiredFlag(parsed, "hypothesis"),
+            intent: stringFlag(parsed, "intent") ?? "optimize",
             designAdapter: stringFlag(parsed, "adapter") ?? "mock",
             program,
             ...(stringFlag(parsed, "parent") ? { parentTrialId: stringFlag(parsed, "parent") } : {}),
@@ -329,6 +396,38 @@ export namespace ResearchTerminal {
       if (command === "artifacts") {
         outputJSON(output, await client.get(`/runs/${requiredPosition(parsed, 1, "run id")}/artifacts`))
         return 0
+      }
+      if (command === "jobs") {
+        outputJSON(output, await client.get("/jobs"))
+        return 0
+      }
+      if (command === "job" && noun === "get") {
+        outputJSON(output, await client.get(`/jobs/${requiredPosition(parsed, 2, "job id")}`))
+        return 0
+      }
+      if (command === "job" && noun === "cancel") {
+        outputJSON(output, await client.post(`/jobs/${requiredPosition(parsed, 2, "job id")}/cancel`))
+        return 0
+      }
+      if (command === "job" && noun === "retry") {
+        outputJSON(output, await client.post(`/jobs/${requiredPosition(parsed, 2, "job id")}/retry`))
+        return 0
+      }
+      if (command === "job" && noun === "watch") {
+        const jobId = requiredPosition(parsed, 2, "job id")
+        const sleep = options.sleep ?? ((milliseconds) => Bun.sleep(milliseconds))
+        let previous = ""
+        while (true) {
+          const job = await client.get<{ status: string; error?: string; result?: unknown }>(`/jobs/${jobId}`)
+          if (job.status !== previous) output(`${new Date().toISOString()}  ${jobId}  ${job.status}`)
+          previous = job.status
+          if (terminalJobStates.has(job.status)) {
+            if (job.status === "succeeded") outputJSON(output, job.result ?? job)
+            else if (job.error) error(job.error)
+            return job.status === "succeeded" ? 0 : 1
+          }
+          await sleep(1_000)
+        }
       }
       if (command === "knowledge" && noun === "status") {
         outputJSON(
@@ -375,6 +474,7 @@ export namespace ResearchTerminal {
           output,
           await client.post(`/campaigns/${campaignId}/literature/review`, {
             sessionId: requiredFlag(parsed, "session"),
+            ...(stringFlag(parsed, "idempotency-key") ? { idempotencyKey: stringFlag(parsed, "idempotency-key") } : {}),
             ...(stringFlag(parsed, "question") ? { question: stringFlag(parsed, "question") } : {}),
             maxSources: integerFlag(parsed, "max-sources", 20),
             maxClaims: integerFlag(parsed, "max-claims", 20),
@@ -390,6 +490,47 @@ export namespace ResearchTerminal {
       }
       if (command === "knowledge") {
         outputJSON(output, await client.get(`/campaigns/${requiredPosition(parsed, 1, "campaign id")}/knowledge`))
+        return 0
+      }
+      if (command === "orchestration" && noun === "observe") {
+        outputJSON(
+          output,
+          await client.get(`/campaigns/${requiredPosition(parsed, 2, "campaign id")}/orchestration/observation`),
+        )
+        return 0
+      }
+      if (command === "campaign" && noun === "loop") {
+        const campaignId = requiredPosition(parsed, 2, "campaign id")
+        outputJSON(
+          output,
+          await client.post(`/campaigns/${campaignId}/orchestration/loops`, {
+            sessionId: requiredFlag(parsed, "session"),
+            maxSteps: integerFlag(parsed, "steps", 3),
+            ...(stringFlag(parsed, "idempotency-key")
+              ? { idempotencyKey: stringFlag(parsed, "idempotency-key") }
+              : {}),
+          }),
+        )
+        return 0
+      }
+      if (command === "move" && (noun === "compile" || noun === "execute")) {
+        const campaignId = requiredPosition(parsed, 2, "campaign id")
+        const moveFile = path.resolve(workspace, requiredFlag(parsed, "file"))
+        if (!(await Bun.file(moveFile).exists())) throw new Error(`Move file was not found: ${moveFile}`)
+        const move = await Bun.file(moveFile).json()
+        outputJSON(
+          output,
+          await client.post(`/campaigns/${campaignId}/orchestration/moves/${noun}`,
+            noun === "compile"
+              ? move
+              : {
+                  move,
+                  sessionId: requiredFlag(parsed, "session"),
+                  ...(stringFlag(parsed, "idempotency-key")
+                    ? { idempotencyKey: stringFlag(parsed, "idempotency-key") }
+                    : {}),
+                }),
+        )
         return 0
       }
       throw new Error(`Unknown command: ${parsed.positionals.join(" ") || "(empty)"}`)
@@ -467,8 +608,17 @@ Commands:
   target add --file TARGET.json [--structure TARGET.cif] [--structure-format pdb|mmcif]
   campaign create --objective TEXT
   campaign activate CMP_ID
+  campaign loop CMP_ID --session SES_ID [--steps N] [--idempotency-key KEY]
+  skills CMP_ID
+  skill initialize CMP_ID
+  skill propose CMP_ID SKILL_ID --parent SKV_ID --file SKILL.md --by ACTOR [--trajectories TRL_ID,EVL_ID]
+  skill refine CMP_ID SKILL_ID --session SES_ID --trajectories TRL_ID,EVL_ID [--experiment EXP_ID] [--agent biology|ml|task] [--repetitions 3..5]
+  skill evaluate CMP_ID SKV_ID --file replay.json
+  skill replay CMP_ID SKV_ID --experiment EXP_ID --session SES_ID [--agent biology|ml|task] [--repetitions 3..5]
+  skill rollback CMP_ID SKV_ID
+  skill promote-library CMP_ID SKV_ID
   literature search CMP_ID --query TEXT [--databases pubmed,europepmc,openalex] [--limit N]
-  literature review CMP_ID --session SES_ID [--question TEXT] [--max-sources N] [--max-claims N]
+  literature review CMP_ID --session SES_ID [--question TEXT] [--max-sources N] [--max-claims N] [--idempotency-key KEY]
   literature CMP_ID
   claim add CMP_ID --statement TEXT --evidence LIT_ID[,LIT_ID] [--kind hypothesis] [--stance context] [--confidence 0.5]
   claim review CMP_ID CLM_ID --by REVIEWER [--status reviewed|contested|deprecated]
@@ -476,21 +626,29 @@ Commands:
   experiments CMP_ID
   experiment create CMP_ID --objective TEXT (--target sha256:... | --target-file TARGET.json) [--target-structure TARGET.cif] [--evaluator ID] [--modality short_peptide]
   experiment activate EXP_ID
-  autoresearch EXP_ID --session SES_ID [--iterations N] [--agent biology|ml|task]
+  autoresearch EXP_ID --session SES_ID [--iterations N] [--agent biology|ml|task] [--idempotency-key KEY]
   history EXP_ID
   template mock|proto
-  trial create EXP_ID --hypothesis TEXT --adapter mock|proto --program trial.py
+  trial create EXP_ID --hypothesis TEXT --adapter mock|proto --program trial.py [--intent optimize|calibrate|negative_control]
   run start TRL_ID --session SES_ID
   run get RUN_ID
   run watch RUN_ID
   artifacts RUN_ID
+  jobs
+  job get JOB_ID
+  job watch JOB_ID
+  job cancel JOB_ID
+  job retry JOB_ID
   knowledge CMP_ID
   knowledge status CMP_ID
   knowledge alignments CMP_ID
   knowledge cycles CMP_ID
-  knowledge refresh CMP_ID --session SES_ID [--question TEXT] [--max-sources N] [--max-claims N] [--force]
+  knowledge refresh CMP_ID --session SES_ID [--question TEXT] [--max-sources N] [--max-claims N] [--force] [--idempotency-key KEY]
     [--resume-proposal PATH --child-session SES_ID]
   alignment review CMP_ID ALN_ID --by REVIEWER [--status reviewed|contested|deprecated]
+  orchestration observe CMP_ID
+  move compile CMP_ID --file move.json
+  move execute CMP_ID --file move.json --session SES_ID [--idempotency-key KEY]
 
 Typical flow: create + activate campaign, create + activate experiment, author a
 trial from a template, start it with a live session ID, then watch the run.`

@@ -5,6 +5,7 @@ import { Lock } from "@/util/lock"
 import { Log } from "@/util/log"
 import { ResearchDomain } from "./domain"
 import { ResearchKnowledge } from "./knowledge"
+import { ResearchSkills } from "./research-skills"
 import { StorageResearchStore, type ResearchState, type ResearchStore } from "./store"
 
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -26,6 +27,7 @@ export namespace ResearchService {
         "claim",
         "alignment",
         "knowledge_cycle",
+        "skill_version",
       ]),
       id: z.string(),
     }),
@@ -47,12 +49,15 @@ export namespace ResearchService {
 
   export const CreateTrialInput = z.object({
     hypothesis: z.string().trim().min(1),
+    intent: ResearchDomain.Trial.shape.intent.default("optimize"),
     designAdapter: z.enum(["mock", "proto"]),
     programPath: z.string().trim().min(1).max(4_000),
     programHash: digest,
     parentTrialId: z.string().startsWith("trl_").optional(),
+    origin: ResearchDomain.Trial.shape.origin.optional(),
+    skills: z.array(ResearchSkills.Reference).max(30).default([]),
   })
-  export type CreateTrialInput = z.infer<typeof CreateTrialInput>
+  export type CreateTrialInput = z.input<typeof CreateTrialInput>
 
   export const RecordEvaluationInput = z
     .object({
@@ -155,6 +160,14 @@ export namespace ResearchService {
         context.addIssue({ code: "custom", path: ["sources"], message: "Literature source keys must be unique" })
       }
       for (const [claimIndex, claim] of review.claims.entries()) {
+        const evidenceKeys = new Set(claim.evidence.map((evidence) => evidence.sourceKey))
+        if (evidenceKeys.size !== claim.evidence.length) {
+          context.addIssue({
+            code: "custom",
+            path: ["claims", claimIndex, "evidence"],
+            message: "Claim evidence source keys must be unique",
+          })
+        }
         for (const [evidenceIndex, evidence] of claim.evidence.entries()) {
           if (!keys.has(evidence.sourceKey)) {
             context.addIssue({
@@ -184,7 +197,7 @@ export namespace ResearchService {
     evaluation: ResearchDomain.Evaluation
     trial: ResearchDomain.Trial
     experiment: ResearchDomain.Experiment
-    decision: "promoted" | "rejected"
+    decision: "promoted" | "rejected" | "observed"
     knowledge: ResearchDomain.KnowledgeConcept
   }
 
@@ -423,6 +436,18 @@ export namespace ResearchService {
       const input = LiteratureReviewInput.parse(raw)
       return this.store.mutate(projectId, (state) => {
         const campaign = this.campaign(state, campaignId)
+        const prior = Object.values(state.knowledgeCycles).find(
+          (cycle) => cycle.campaignId === campaignId && cycle.generated.by === input.generatedBy,
+        )
+        if (prior) {
+          return {
+            records: prior.outputs.literatureIds.map((id) => state.literature[id]!).filter(Boolean),
+            claims: prior.outputs.claimIds.map((id) => state.claims[id]!).filter(Boolean),
+            alignments: prior.outputs.alignmentIds.map((id) => state.alignments[id]!).filter(Boolean),
+            cycle: prior,
+            unresolvedQuestions: prior.outputs.unresolvedQuestions,
+          }
+        }
         for (const knowledgeId of input.inputKnowledgeIds) {
           const concept = state.knowledge[knowledgeId]
           if (!concept || concept.campaignId !== campaignId) {
@@ -666,6 +691,30 @@ export namespace ResearchService {
           })
         }
         ResearchDomain.assertContractIntegrity(experiment)
+        if (input.origin) {
+          const origin = input.origin
+          const existing = Object.values(state.trials).find(
+            (trial) =>
+              trial.experimentId === experimentId &&
+              trial.origin?.jobId === origin.jobId &&
+              trial.origin?.phase === origin.phase,
+          )
+          if (existing) {
+            if (
+              existing.hypothesis !== input.hypothesis ||
+              existing.programHash !== input.programHash ||
+              existing.designAdapter !== input.designAdapter ||
+              existing.intent !== input.intent ||
+              JSON.stringify(existing.skills) !== JSON.stringify(input.skills)
+            ) {
+              throw new ConflictError({
+                code: "trial_origin_conflict",
+                message: `Job phase ${origin.jobId}:${origin.phase} already created a different trial`,
+              })
+            }
+            return existing
+          }
+        }
         const parentTrialId = input.parentTrialId ?? experiment.incumbentTrialId
         if (parentTrialId) {
           const parent = this.trial(state, parentTrialId)
@@ -681,7 +730,10 @@ export namespace ResearchService {
           id: this.id("trl"),
           experimentId,
           parentTrialId,
+          origin: input.origin,
+          skills: input.skills,
           hypothesis: input.hypothesis,
+          intent: input.intent,
           designAdapter: input.designAdapter,
           programPath: input.programPath,
           programHash: input.programHash,
@@ -969,11 +1021,14 @@ export namespace ResearchService {
       const incumbent = experiment.incumbentTrialId
         ? Object.values(state.evaluations).find((candidate) => candidate.trialId === experiment.incumbentTrialId)
         : undefined
-      const promote = ResearchDomain.shouldPromote({
-        candidate: evaluation,
-        incumbent,
-        direction: experiment.contract.evaluator.direction,
-      })
+      const promotionEligible = trial.intent === "optimize"
+      const promote =
+        promotionEligible &&
+        ResearchDomain.shouldPromote({
+          candidate: evaluation,
+          incumbent,
+          direction: experiment.contract.evaluator.direction,
+        })
       const completedTrial = ResearchDomain.transitionTrial(trial, "succeeded", this.now())
       const updatedExperiment = ResearchDomain.Experiment.parse({
         ...experiment,
@@ -981,7 +1036,8 @@ export namespace ResearchService {
         updatedAt: promote ? this.now() : experiment.updatedAt,
       })
       const campaign = this.campaign(state, experiment.campaignId)
-      const decision = promote ? "promoted" : "rejected"
+      const decision = input.valid && !promotionEligible ? "observed" : promote ? "promoted" : "rejected"
+      const decisionTitle = decision === "promoted" ? "Promoted" : decision === "observed" ? "Observed" : "Rejected"
       const knowledge = ResearchDomain.KnowledgeConcept.parse({
         id: this.id("knw"),
         campaignId: campaign.id,
@@ -990,11 +1046,13 @@ export namespace ResearchService {
         evaluationId: evaluation.id,
         runId: run?.id,
         type: "Research Evaluation",
-        title: `${decision === "promoted" ? "Promoted" : "Rejected"} trial ${trial.id}`,
+        title: `${decisionTitle} trial ${trial.id}`,
         description: input.valid
-          ? `Locked evaluation ${decision} trial ${trial.id} with score ${input.score}.`
+          ? decision === "observed"
+            ? `Locked evaluation observed ${trial.intent} trial ${trial.id} with score ${input.score}; it was not promotion-eligible.`
+            : `Locked evaluation ${decision} trial ${trial.id} with score ${input.score}.`
           : `Locked evaluation rejected trial ${trial.id} because its result was invalid.`,
-        tags: ["autofold", "research-evaluation", decision, input.valid ? "valid" : "invalid"],
+        tags: ["autofold", "research-evaluation", trial.intent, decision, input.valid ? "valid" : "invalid"],
         sources: run
           ? [
               {

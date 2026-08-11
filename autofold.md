@@ -11,6 +11,7 @@ Project / workspace
     └── Experiment
         ├── immutable objective, evaluator, and budget
         └── Trial
+            ├── intent: optimize, calibrate, or negative_control
             ├── content-addressed experiment program (immutable once recorded)
             ├── execution runs
             ├── evaluation
@@ -61,6 +62,12 @@ away.
 
 An agent may change the trial program, model combination, parameters, routing, and resource allocation. It may not change the experiment contract or authoritative evaluator. A changed contract starts a new experiment version.
 
+Only `optimize` trials are promotion-eligible. Valid `calibrate` and
+`negative_control` trials are scored by the same locked evaluator and recorded
+as stable `observed` evidence, but can never replace the incumbent—even if their
+numeric score is better. This separates learning about the evaluator from
+optimizing against it.
+
 The experiment score measures quality-adjusted discovery yield and diversity under a fixed compute budget, not the luckiest single candidate.
 
 ## Implemented vertical slice
@@ -84,6 +91,9 @@ bun run research:cli -- run start TRL_ID --session SES_ID
 bun run research:cli -- run watch RUN_ID
 bun run research:cli -- knowledge CMP_ID
 ```
+
+Calibration and specificity checks use the same command with
+`--intent calibrate` or `--intent negative_control`.
 
 The trial fixture proposes deterministic sequences only. Production runs use the worker-owned Boltz adapter; the test suite substitutes a source-hashed deterministic evidence adapter so it can verify the full artifact and evaluator path without GPU inference.
 
@@ -116,6 +126,52 @@ verifies every cited excerpt against the exact fetch transcript, and atomically
 publishes its sources and proposed claims. See
 [docs/literature-rsi-v1.md](docs/literature-rsi-v1.md).
 
+Long-running autoresearch and knowledge refresh operations now use persisted,
+leased background jobs instead of holding HTTP requests open. Jobs support
+idempotent enqueue, heartbeat, bounded retry, restart recovery, cancellation,
+and CLI inspection while scientific GPU work retains its separate `Run`
+lifecycle. See [docs/durable-research-jobs-v1.md](docs/durable-research-jobs-v1.md).
+Expensive phases are checkpointed: completed proposals, originating trials,
+scientific runs, iteration outcomes, and committed knowledge cycles are reused
+after restart rather than regenerated.
+
+The campaign-level recursive supervisor is specified in
+[docs/recursive-orchestration-v1.md](docs/recursive-orchestration-v1.md): a
+dynamic context-injected specialist proposes one typed move, a deterministic
+policy compiler authorizes it, durable jobs execute it, and verified outcomes
+flow back into the next observation.
+The first bounded supervisor is executable with `campaign loop`: every step
+creates a dynamic research-team plan, runs one to four focused biology/ML/task
+specialists in parallel, synthesizes their checkpointed reports into one typed
+move, executes only an authorized move, then rebuilds campaign state before
+deciding again. Approval, rejection, stop, or the step cap terminates the
+durable trajectory.
+
+Injectable skills are domain knowledge, not miniature runtimes. They teach
+specialists how biology and models behave so the agent can revise Proto
+intelligently; commands, endpoints, credentials, containers, and model launch
+logic remain exclusively in typed Proto adapters and the worker. Skills now
+live as campaign-scoped immutable Markdown versions; specialist reports and
+the resulting trials pin their exact IDs and content hashes. Same-budget replay
+gates campaign activation, rollback preserves history, and only skills validated
+across at least three campaigns can enter the project library. See
+[docs/domain-knowledge-skills-v1.md](docs/domain-knowledge-skills-v1.md).
+
+Capability refinement is now a durable campaign operation. The supervisor can
+choose a typed `refine_skill` move, freeze exact trial/evaluation/knowledge
+trajectories, and delegate one bounded `SKILL.md` revision to a dynamically
+created child. The job checkpoints the evidence snapshot, authored proposal,
+and immutable candidate, then stops at `awaiting_replay`; it cannot activate
+the skill using self-authored evidence.
+
+Trusted shadow replay now closes that loop. Parent and candidate skills author
+three paired sets of Proto trials from one frozen context by default; every trial uses the explicit
+non-promotable `shadow_replay` intent and the same locked evaluator and budget.
+Utility, valid-diverse yield, failure, and cost are derived from persisted
+evaluation records. The candidate is activated only through the deterministic
+non-regression rule. Candidate authoring can enqueue this replay automatically,
+so one `refine_skill` campaign move reaches an auditable activate/reject result.
+
 The complete budgeted generation and consensus-validation route is specified in
 [docs/peptide-pipeline-v2.md](docs/peptide-pipeline-v2.md). Trial Bundle v4,
 [Generation Run Index v1](docs/generation-run-index-v1.md), and
@@ -127,10 +183,10 @@ each run freezes the resolved topology before trusted execution.
 
 ## Bounded autoresearch v1
 
-The first experiment-RSI controller is implemented through the existing child-session harness. Each iteration creates a biology, ML, or general child agent; injects the frozen contract, target, incumbent program, verified candidates, recent evaluations, campaign OKF concepts, and a compact pinned Proto tool catalog; then grants write access to exactly one mutable draft `trial.py`. The agent authors both the native Proto `Program` and a literal `AUTOFOLD_WORKFLOW` validation manifest in that file. The draft is preserved under `.autofold/autoresearch`, statically preflighted without importing it, compiled against the live pinned registry, frozen by content hash, executed, and promoted or rejected by the locked evaluator. A rejected trial does not stop the loop; the next iteration still starts from the current incumbent.
+The first experiment-RSI controller is implemented through the existing child-session harness. Each iteration reloads the latest experiment history, active campaign skills, and campaign knowledge, asserts the durable frozen contract hash, then creates a biology, ML, or general child agent. The child receives the target, best locked incumbent, latest attempted `trial.py` search head, verified candidates, recent promoted/rejected/failed trial artifacts, locked diagnostics, predictor-level evidence, specialist findings, campaign OKF concepts, and a compact pinned Proto catalog; it can write exactly one mutable draft `trial.py`. The agent authors both the native Proto `Program` and a literal `AUTOFOLD_WORKFLOW` validation manifest in that file. The draft is preserved under `.autofold/autoresearch`, statically preflighted without importing it, compiled against the live pinned registry, frozen by content hash, executed, and promoted or rejected by the locked evaluator. The mutable code lineage advances through the latest attempt while the incumbent remains the independent promotion baseline, so a rejected or scientifically failed program can be repaired, branched, or reverted on the next iteration.
 
 ```text
 bun run research:cli -- autoresearch EXP_ID --session SES_ID --iterations 3
 ```
 
-The command is deliberately bounded to ten sequential iterations. It stops on authoring, preflight, or scientific execution failure and returns the child session, draft, trial, run, score, and promotion decision for every completed attempt. Existing scientific experiments created before evidence-adapter pinning must be recreated before using this loop.
+The command is deliberately bounded to ten sequential iterations. A typed search policy selects exploitation, generator exploration, workflow ablation, predictor-disagreement investigation, or compute reallocation. Generator portfolios carry frozen per-lane candidate and GPU allocations that are enforced again by the worker. Exact program hashes plus semantic Python/workflow fingerprints prevent equivalent reruns, and plateau or insufficient-evidence conditions stop without being mislabeled as failures. The result returns the child session, draft, trial, run, score, promotion decision, search delta, fingerprints, and stop reason for every attempt. Existing scientific experiments created before evidence-adapter pinning must be recreated before using this loop.

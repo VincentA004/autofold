@@ -95,6 +95,15 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
                 tools_called = generator.get("toolsCalled")
                 if not isinstance(tools_called, list) or not all(isinstance(tool, str) and tool for tool in tools_called):
                     raise ProtocolError("Pipeline generator tools must be string arrays")
+                allocation = generator.get("allocation")
+                if allocation is None and len(declared_generators) == 1:
+                    continue
+                if not isinstance(allocation, dict):
+                    raise ProtocolError("Pipeline generator allocation is invalid")
+                if not isinstance(allocation.get("maximumCandidates"), int) or allocation["maximumCandidates"] <= 0:
+                    raise ProtocolError("Pipeline generator candidate allocation is invalid")
+                if not isinstance(allocation.get("maximumGpuSeconds"), (int, float)) or allocation["maximumGpuSeconds"] <= 0:
+                    raise ProtocolError("Pipeline generator GPU allocation is invalid")
             generation_budget = generation.get("budget")
             if not isinstance(generation_budget, dict):
                 raise ProtocolError("Pipeline generation budget is invalid")
@@ -106,6 +115,16 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
                 not isinstance(maximum_gpu_seconds, (int, float)) or maximum_gpu_seconds <= 0
             ):
                 raise ProtocolError("Pipeline generation GPU budget is invalid")
+            allocations = [generator.get("allocation") for generator in declared_generators]
+            if any(allocation is not None for allocation in allocations):
+                if any(allocation is None for allocation in allocations):
+                    raise ProtocolError("Pipeline generator allocations must be all present or all absent")
+                if sum(allocation["maximumCandidates"] for allocation in allocations) != maximum_candidates:
+                    raise ProtocolError("Pipeline generator allocations do not exhaust the candidate budget")
+                if maximum_gpu_seconds is not None and sum(
+                    allocation["maximumGpuSeconds"] for allocation in allocations
+                ) > maximum_gpu_seconds:
+                    raise ProtocolError("Pipeline generator allocations exceed the GPU budget")
         stage_ids: set[str] = set()
         for stage in pipeline["stages"]:
             if not isinstance(stage, dict):
@@ -206,6 +225,8 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
             raise ProtocolError("Pipeline policy hash does not match its canonical content")
     if value.get("designAdapter") not in {"mock", "proto"}:
         raise ProtocolError("Unsupported design adapter")
+    if value.get("intent", "optimize") not in {"optimize", "calibrate", "negative_control", "shadow_replay"}:
+        raise ProtocolError("Unsupported trial intent")
     require_string(value, "programPath")
     require_string(value, "programHash", "sha256:")
     if value.get("modality") not in {

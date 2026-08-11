@@ -104,8 +104,8 @@ def capture(
         budget = policy["budget"]
         if len(candidate_set["candidates"]) > budget["maximumCandidates"]:
             raise ValueError("Proto generation exceeded its frozen candidate budget")
-        if budget.get("maximumGpuSeconds") and wall_seconds > budget["maximumGpuSeconds"]:
-            raise ValueError("Proto generation exceeded its frozen runtime budget")
+        # Proto owns the GPU request timeout. wall_seconds includes first-use environment and
+        # checkpoint hydration, so it is provenance rather than a measurement of GPU seconds.
         declared = {item["id"]: item for item in policy["generators"]}
         if set(generators) != set(declared):
             raise ValueError(
@@ -117,6 +117,15 @@ def capture(
                 raise ValueError(f"Observed Proto generator {key} does not match its frozen registry declaration")
     sequences = _sequence_inventory(program)
     entries: list[dict[str, Any]] = []
+    allocation_counts: dict[str, int] = {}
+    allocations: dict[str, dict[str, Any]] = {}
+    if policy:
+        allocations = {
+            item["id"]: item["allocation"]
+            for item in policy["generators"]
+            if item.get("allocation") is not None
+        }
+        allocation_counts = {key: 0 for key in allocations}
 
     for candidate in candidate_set["candidates"]:
         matches = sequences.get(candidate["sequence"], [])
@@ -128,6 +137,17 @@ def capture(
         generator_ids = sorted(key for key in metadata if key in generators)
         if not generator_ids:
             generator_ids = sorted(generators)
+        if allocations:
+            if len(generator_ids) != 1:
+                raise ValueError(
+                    "Portfolio candidates must identify exactly one frozen generator in their Proto metadata"
+                )
+            generator_id = generator_ids[0]
+            allocation_counts[generator_id] += 1
+            if allocation_counts[generator_id] > allocations[generator_id]["maximumCandidates"]:
+                raise ValueError(
+                    f"Proto generator {generator_id} exceeded its frozen candidate allocation"
+                )
         selected = [generators[key] for key in generator_ids]
         model_id = "+".join(generator_ids) if generator_ids else "proto-program"
         parameter_identity = {

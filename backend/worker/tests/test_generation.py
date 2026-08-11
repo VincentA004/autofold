@@ -103,6 +103,55 @@ class GenerationCaptureTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "do not match frozen generation policy"):
                 capture(bundle, candidates, program, Path(temporary))
 
+    def test_enforces_candidate_allocation_for_generator_portfolios(self) -> None:
+        def generator(key: str) -> SimpleNamespace:
+            return SimpleNamespace(_spec=SimpleNamespace(key=key, tools_called=[]), config={})
+
+        first = generator("generator-one")
+        second = generator("generator-two")
+        sequences = [
+            SimpleNamespace(sequence="AAAA", _generator_metadata={"generator-one": {}}),
+            SimpleNamespace(sequence="CCCC", _generator_metadata={"generator-one": {}}),
+        ]
+        program = SimpleNamespace(
+            optimizers=[SimpleNamespace(generators=[first]), SimpleNamespace(generators=[second])],
+            constructs=[SimpleNamespace(segments=[SimpleNamespace(result_sequences=sequences)])],
+        )
+        bundle = {
+            "runId": "run_portfolio",
+            "programHash": "sha256:" + "a" * 64,
+            "targetArtifactHash": "sha256:" + "b" * 64,
+            "proto": {"languageCommit": "c" * 40, "toolsCommit": "d" * 40},
+            "pipeline": {
+                "generation": {
+                    "budget": {"maximumCandidates": 2, "maximumGpuSeconds": 20},
+                    "generators": [
+                        {
+                            "id": "generator-one",
+                            "version": "c" * 40,
+                            "toolsCalled": [],
+                            "allocation": {"maximumCandidates": 1, "maximumGpuSeconds": 10},
+                        },
+                        {
+                            "id": "generator-two",
+                            "version": "c" * 40,
+                            "toolsCalled": [],
+                            "allocation": {"maximumCandidates": 1, "maximumGpuSeconds": 10},
+                        },
+                    ],
+                }
+            },
+        }
+        candidates = {
+            "candidates": [
+                {"id": "one", "sequence": "AAAA", "seed": 1},
+                {"id": "two", "sequence": "CCCC", "seed": 2},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(ValueError, "exceeded its frozen candidate allocation"):
+                capture(bundle, candidates, program, Path(temporary))
+
 
 if __name__ == "__main__":
     unittest.main()

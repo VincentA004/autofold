@@ -55,6 +55,8 @@ bun run research:cli -- alignment review CMP_ID ALN_ID --by REVIEWER
 ```
 
 `knowledge refresh` is watermark-aware and exits without starting an agent when no refresh is due. `--force` permits a deliberate bounded review.
+When due, it returns a durable job immediately; `job watch JOB_ID` follows the
+review through persistence without holding an HTTP connection open.
 
 ## OKF projection
 
@@ -74,4 +76,8 @@ Runtime JSON remains the transactional source of truth so OKF files cannot bypas
 
 ## Current boundary
 
-This version implements event-triggered and scheduled knowledge recursion. It does not yet continuously poll in a background daemon. A scheduler can call the due-status endpoint without changing this data model. It also does not claim cryptographic attestation for model runs; run manifests and locked evaluations remain explicit provenance until an attestation ABI is selected.
+This version implements event-triggered knowledge recursion through persisted,
+leased jobs. It does not yet originate scheduled reviews on its own; a scheduler
+can call the due-status and enqueue endpoints without changing this data model.
+It also does not claim cryptographic attestation for model runs; run manifests
+and locked evaluations remain explicit provenance until an attestation ABI is selected.

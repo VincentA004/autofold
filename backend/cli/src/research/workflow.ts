@@ -1,3 +1,4 @@
+import crypto from "node:crypto"
 import path from "node:path"
 import z from "zod"
 import { ResearchDomain } from "./domain"
@@ -22,6 +23,11 @@ export namespace ResearchWorkflow {
       maximumGpuSeconds: z.number().finite().nonnegative(),
       generation: z.object({
         generators: z.array(toolKey).min(1).max(8),
+        allocations: z.array(z.object({
+          generator: toolKey,
+          maximumCandidates: z.number().int().positive(),
+          maximumGpuSeconds: z.number().finite().positive(),
+        })).min(1).max(8).optional(),
         maximumCandidates: z.number().int().positive(),
         maximumGpuSeconds: z.number().finite().positive().optional(),
       }).optional(),
@@ -41,7 +47,6 @@ export namespace ResearchWorkflow {
             optional: z.boolean().default(false),
           }),
         )
-        .min(1)
         .max(64),
     })
     .superRefine((plan, context) => {
@@ -50,6 +55,31 @@ export namespace ResearchWorkflow {
       }
       if (plan.generation && new Set(plan.generation.generators).size !== plan.generation.generators.length) {
         context.addIssue({ code: "custom", path: ["generation", "generators"], message: "Generation tools must be unique" })
+      }
+      if (plan.generation?.generators.length && plan.generation.generators.length > 1 && !plan.generation.allocations) {
+        context.addIssue({
+          code: "custom",
+          path: ["generation", "allocations"],
+          message: "Multi-generator portfolios require explicit per-generator allocations",
+        })
+      }
+      if (plan.generation?.allocations) {
+        const declared = new Set(plan.generation.generators)
+        const allocated = plan.generation.allocations.map((allocation) => allocation.generator)
+        if (new Set(allocated).size !== allocated.length) {
+          context.addIssue({ code: "custom", path: ["generation", "allocations"], message: "Generator allocations must be unique" })
+        }
+        if (allocated.length !== declared.size || allocated.some((generator) => !declared.has(generator))) {
+          context.addIssue({ code: "custom", path: ["generation", "allocations"], message: "Every declared generator requires exactly one allocation" })
+        }
+        const candidates = plan.generation.allocations.reduce((total, allocation) => total + allocation.maximumCandidates, 0)
+        if (candidates !== plan.generation.maximumCandidates) {
+          context.addIssue({ code: "custom", path: ["generation", "allocations"], message: "Generator candidate allocations must equal maximumCandidates" })
+        }
+        const gpuSeconds = plan.generation.allocations.reduce((total, allocation) => total + allocation.maximumGpuSeconds, 0)
+        if (plan.generation.maximumGpuSeconds !== undefined && gpuSeconds > plan.generation.maximumGpuSeconds) {
+          context.addIssue({ code: "custom", path: ["generation", "allocations"], message: "Generator GPU allocations exceed the generation budget" })
+        }
       }
       const ids = new Set(plan.stages.map((stage) => stage.id))
       if (ids.size !== plan.stages.length) {
@@ -97,6 +127,32 @@ export namespace ResearchWorkflow {
     })
   export type Plan = z.infer<typeof Plan>
 
+  export function fingerprint(raw: z.input<typeof Plan>): string {
+    const plan = Plan.parse(raw)
+    const normalized = {
+      ...plan,
+      id: "workflow",
+      generation: plan.generation
+        ? {
+            ...plan.generation,
+            generators: plan.generation.generators.toSorted(),
+            allocations: plan.generation.allocations?.toSorted((left, right) =>
+              left.generator.localeCompare(right.generator),
+            ),
+          }
+        : undefined,
+      stages: plan.stages
+        .map((stage) => ({
+          ...stage,
+          tools: stage.tools.toSorted(),
+          dependsOn: stage.dependsOn.toSorted(),
+          configs: Object.fromEntries(Object.entries(stage.configs).toSorted(([left], [right]) => left.localeCompare(right))),
+        }))
+        .toSorted((left, right) => left.id.localeCompare(right.id)),
+    }
+    return `sha256:${crypto.createHash("sha256").update(JSON.stringify(normalized)).digest("hex")}`
+  }
+
   export const Tool = z.object({
     key: toolKey,
     category: z.string().trim().min(1),
@@ -105,6 +161,15 @@ export namespace ResearchWorkflow {
   export type Tool = z.infer<typeof Tool>
   export const Generator = z.object({
     key: toolKey,
+    label: z.string().trim().min(1).optional(),
+    description: z.string().trim().min(1).optional(),
+    className: z.string().trim().min(1).optional(),
+    classModule: z.string().trim().min(1).optional(),
+    configName: z.string().trim().min(1).optional(),
+    configModule: z.string().trim().min(1).optional(),
+    configFields: z.array(z.string().trim().min(1)).optional(),
+    configSchema: z.unknown().optional(),
+    allowsEmptyStartingSequence: z.boolean().optional(),
     usesGpu: z.boolean(),
     toolsCalled: z.array(toolKey),
   })
@@ -150,11 +215,23 @@ export namespace ResearchWorkflow {
       }
       generation = {
         mode: "proto_program",
-        generators: selected.map((generator) => ({
-          id: generator.key,
-          version: raw.protoLanguageCommit,
-          toolsCalled: generator.toolsCalled,
-        })),
+        generators: selected.map((generator) => {
+          const allocation = plan.generation!.allocations?.find((item) => item.generator === generator.key)
+          return {
+            id: generator.key,
+            version: raw.protoLanguageCommit,
+            toolsCalled: generator.toolsCalled,
+            allocation: allocation
+              ? {
+                  maximumCandidates: allocation.maximumCandidates,
+                  maximumGpuSeconds: allocation.maximumGpuSeconds,
+                }
+              : {
+                  maximumCandidates: plan.generation!.maximumCandidates,
+                  maximumGpuSeconds: plan.generation!.maximumGpuSeconds!,
+                },
+          }
+        }),
         budget: {
           maximumCandidates: plan.generation.maximumCandidates,
           maximumGpuSeconds: plan.generation.maximumGpuSeconds,
@@ -310,7 +387,20 @@ except ModuleNotFoundError as error:
     if error.name != "autofold_worker":
         raise
 print(json.dumps([
-    {"key": spec.key, "usesGpu": spec.uses_gpu, "toolsCalled": spec.tools_called}
+    {
+        "key": spec.key,
+        "label": spec.label,
+        "description": spec.description,
+        "className": spec.generator_class.__name__,
+        "classModule": spec.generator_class.__module__,
+        "configName": spec.config_model.__name__,
+        "configModule": spec.config_model.__module__,
+        "configFields": list(spec.config_model.model_fields),
+        "configSchema": spec.config_model.model_json_schema(),
+        "allowsEmptyStartingSequence": spec.generator_class.allows_empty_starting_sequence,
+        "usesGpu": spec.uses_gpu,
+        "toolsCalled": spec.tools_called,
+    }
     for spec in GeneratorRegistry.list_all()
 ]))
 `

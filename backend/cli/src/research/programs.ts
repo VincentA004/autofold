@@ -1,6 +1,7 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import z from "zod"
+import { ResearchDomain } from "./domain"
 
 const MAX_PROGRAM_BYTES = 256 * 1024
 
@@ -20,6 +21,13 @@ from proto_language.constraint.protein_quality.protein_diversity_constraint impo
 from proto_language.core import Constraint, Construct, Program, Segment
 from proto_language.generator import RandomProteinGenerator, RandomProteinGeneratorConfig
 from proto_language.optimizer import RejectionSamplingOptimizer, RejectionSamplingOptimizerConfig
+
+AUTOFOLD_WORKFLOW = {
+    "format": "autofold.proto-workflow.v1",
+    "id": "proto-language-baseline",
+    "maximumGpuSeconds": 0,
+    "stages": [],
+}
 
 
 def build_program(bundle):
@@ -71,6 +79,7 @@ function inside(workspace: string, relative: string): string {
 export namespace ResearchPrograms {
   export const AuthorInput = z.object({
     hypothesis: z.string().trim().min(1),
+    intent: ResearchDomain.Trial.shape.intent.default("optimize"),
     designAdapter: z.enum(["mock", "proto"]),
     program: z
       .string()
@@ -79,7 +88,7 @@ export namespace ResearchPrograms {
       .refine((value) => Buffer.byteLength(value, "utf8") <= MAX_PROGRAM_BYTES, "Program is too large"),
     parentTrialId: z.string().startsWith("trl_").optional(),
   })
-  export type AuthorInput = z.infer<typeof AuthorInput>
+  export type AuthorInput = z.input<typeof AuthorInput>
 
   export interface AuthoredProgram {
     programPath: string

@@ -594,8 +594,7 @@ export namespace Provider {
     },
     openrouter: async () => {
       const headers = {
-        "HTTP-Referer": "https://syntheticsciences.ai/",
-        "X-Title": "synsci",
+        "X-Title": "Autofold",
       }
       // OpenRouter is the ONE provider with both a managed and a BYOK route, and
       // resolution is deterministic by key presence (mirrors the Atlas server's
@@ -657,8 +656,7 @@ export namespace Provider {
         autoload: false,
         options: {
           headers: {
-            "http-referer": "https://syntheticsciences.ai/",
-            "x-title": "synsci",
+            "x-title": "Autofold",
           },
         },
       }
@@ -724,8 +722,7 @@ export namespace Provider {
         autoload: false,
         options: {
           headers: {
-            "HTTP-Referer": "https://syntheticsciences.ai/",
-            "X-Title": "synsci",
+            "X-Title": "Autofold",
           },
         },
       }
@@ -791,8 +788,7 @@ export namespace Provider {
             // Cloudflare AI Gateway uses cf-aig-authorization for authenticated gateways
             // This enables Unified Billing where Cloudflare handles upstream provider auth
             ...(apiToken ? { "cf-aig-authorization": `Bearer ${apiToken}` } : {}),
-            "HTTP-Referer": "https://syntheticsciences.ai/",
-            "X-Title": "synsci",
+            "X-Title": "Autofold",
           },
           // Custom fetch to handle parameter transformation and auth
           fetch: async (input: RequestInfo | URL, init?: RequestInit) => {

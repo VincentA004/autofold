@@ -120,6 +120,7 @@ function trialBody(trial: ResearchDomain.Trial): string {
       "",
       "## Frozen implementation",
       "",
+      `- Intent: \`${trial.intent}\``,
       `- Design adapter: \`${trial.designAdapter}\``,
       `- Program path: \`${trial.programPath}\``,
       `- Program hash: \`${trial.programHash}\``,
@@ -130,7 +131,7 @@ function trialBody(trial: ResearchDomain.Trial): string {
       title: `Trial ${trial.id}: ${trial.hypothesis}`,
       description: "A versioned trial configuration evaluated under its experiment contract.",
       resource: `autofold://trials/${trial.id}`,
-      tags: ["trial", trial.designAdapter],
+      tags: ["trial", trial.intent, trial.designAdapter],
       status: stable ? "stable" : "draft",
       generated: { by: "process:autofold-research-service", at: trial.createdAt },
       sources: [
@@ -140,6 +141,7 @@ function trialBody(trial: ResearchDomain.Trial): string {
       experiment_id: trial.experimentId,
       trial_id: trial.id,
       trial_status: trial.status,
+      trial_intent: trial.intent,
       program_hash: trial.programHash,
     },
   )

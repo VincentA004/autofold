@@ -17,6 +17,7 @@ export namespace ResearchRemoteCompute {
         protoHome?: string
         boltzgenExecutable?: string
         boltzgenCache?: string
+        pxdesignExecutable?: string
       }
 
   function absoluteRemote(value: string | undefined, label: string): string {
@@ -71,6 +72,12 @@ export namespace ResearchRemoteCompute {
     const boltzgenCache = hasBoltzgen
       ? absoluteRemote(env.AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_CACHE, "AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_CACHE")
       : undefined
+    const pxdesignExecutable = env.AUTOFOLD_RESEARCH_REMOTE_PXDESIGN_EXECUTABLE
+      ? absoluteRemote(
+          env.AUTOFOLD_RESEARCH_REMOTE_PXDESIGN_EXECUTABLE,
+          "AUTOFOLD_RESEARCH_REMOTE_PXDESIGN_EXECUTABLE",
+        )
+      : undefined
     const remoteRun = path.posix.join(root, "runs", runId)
     return {
       kind: "ssh",
@@ -88,6 +95,7 @@ export namespace ResearchRemoteCompute {
       protoHome,
       boltzgenExecutable,
       boltzgenCache,
+      pxdesignExecutable,
     }
   }
 
@@ -103,7 +111,49 @@ export namespace ResearchRemoteCompute {
     }
   }
 
+  export function requiredProtoArtifacts(bundle: unknown, protoHome: string): string[] {
+    const value = bundle as {
+      pipeline?: { stages?: Array<{ models?: Array<{ toolKey?: string; id?: string; config?: Record<string, unknown> }> }> }
+    }
+    const required = new Set<string>()
+    for (const stage of value.pipeline?.stages ?? []) {
+      for (const model of stage.models ?? []) {
+        const key = model.toolKey ?? model.id
+        if (key === "protenix-prediction" && model.config?.model_name === "protenix-v2") {
+          required.add(path.posix.join(protoHome, "proto_model_cache/protenix/checkpoint/protenix-v2.pt"))
+        }
+      }
+    }
+    return [...required]
+  }
+
+  async function assertRemoteArtifacts(profile: Extract<Profile, { kind: "ssh" }>, localRun: string) {
+    if (!profile.protoHome) return
+    const bundle = JSON.parse(await fs.readFile(path.join(localRun, "bundle.json"), "utf8"))
+    const required = requiredProtoArtifacts(bundle, profile.protoHome)
+    if (!required.length) return
+    const address = profile.host.address ? ["-o", `HostName=${profile.host.address}`] : []
+    try {
+      await subprocess([
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=8",
+        ...address,
+        "--",
+        profile.host.host,
+        required.map((artifact) => `test -s ${ComputeJobs.quote(artifact)}`).join(" && "),
+      ])
+    } catch {
+      throw new Error(
+        `Remote Proto runtime is missing required gated model artifacts: ${required.join(", ")}. Install them before launching the GPU workflow.`,
+      )
+    }
+  }
+
   export async function stage(profile: Extract<Profile, { kind: "ssh" }>, localRun: string, workerRoot: string) {
+    await assertRemoteArtifacts(profile, localRun)
     const address = profile.host.address ? ["-o", `HostName=${profile.host.address}`] : []
     await subprocess([
       "ssh",
@@ -203,6 +253,9 @@ export namespace ResearchRemoteCompute {
             `AUTOFOLD_BOLTZGEN_EXECUTABLE=${ComputeJobs.quote(profile.boltzgenExecutable)}`,
             `AUTOFOLD_BOLTZGEN_CACHE=${ComputeJobs.quote(profile.boltzgenCache)}`,
           ]
+        : []),
+      ...(profile.pxdesignExecutable
+        ? [`AUTOFOLD_PXDESIGN_EXECUTABLE=${ComputeJobs.quote(profile.pxdesignExecutable)}`]
         : []),
     ]
     const command = environment.length ? `${environment.join(" ")} ${base}` : base

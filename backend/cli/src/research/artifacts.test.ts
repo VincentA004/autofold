@@ -40,6 +40,18 @@ describe("research scientific artifacts", () => {
     ).toThrow("exceeds chain A length")
   })
 
+  test("reports a missing frozen target with its content identity", async () => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "autofold-target-missing-"))
+    const hash = `sha256:${"a".repeat(64)}`
+    try {
+      await expect(ResearchArtifacts.readTarget(workspace, hash)).rejects.toThrow(
+        `Target artifact ${hash} is missing at .autofold/targets/${"a".repeat(64)}/target.json`,
+      )
+    } finally {
+      await fs.rm(workspace, { recursive: true, force: true })
+    }
+  })
+
   test("stores a declared structure blob and rejects mismatched content", async () => {
     const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "autofold-target-structure-"))
     const structure = new TextEncoder().encode("data_test\n#\n")

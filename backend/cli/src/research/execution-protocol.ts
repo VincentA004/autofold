@@ -6,6 +6,7 @@ export namespace ExecutionProtocol {
   const TrialBundleFields = {
     runId: z.string().startsWith("run_"),
     trialId: z.string().startsWith("trl_"),
+    intent: z.enum(["optimize", "calibrate", "negative_control", "shadow_replay"]).default("optimize"),
     contractHash: Digest,
     designAdapter: z.enum(["mock", "proto"]),
     programPath: z.string().trim().min(1),
@@ -106,6 +107,10 @@ export namespace ExecutionProtocol {
       id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
       version: z.string().trim().min(1),
       toolsCalled: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)),
+      allocation: z.object({
+        maximumCandidates: z.number().int().positive(),
+        maximumGpuSeconds: z.number().finite().positive(),
+      }).optional(),
     })).min(1),
     budget: z.object({
       maximumCandidates: z.number().int().positive(),
@@ -116,6 +121,20 @@ export namespace ExecutionProtocol {
     if (new Set(ids).size !== ids.length) {
       context.addIssue({ code: "custom", path: ["generators"], message: "Generation policy IDs must be unique" })
     }
+    const allocations = generation.generators.flatMap((generator) => generator.allocation ? [generator.allocation] : [])
+    if (allocations.length && allocations.length !== generation.generators.length) {
+      context.addIssue({ code: "custom", path: ["generators"], message: "Generator allocations must be all present or all absent" })
+    }
+    if (allocations.length) {
+      const allocatedCandidates = allocations.reduce((total, allocation) => total + allocation.maximumCandidates, 0)
+      if (allocatedCandidates !== generation.budget.maximumCandidates) {
+        context.addIssue({ code: "custom", path: ["generators"], message: "Generator allocations must exhaust the candidate budget" })
+      }
+      const allocatedGpuSeconds = allocations.reduce((total, allocation) => total + allocation.maximumGpuSeconds, 0)
+      if (generation.budget.maximumGpuSeconds !== undefined && allocatedGpuSeconds > generation.budget.maximumGpuSeconds) {
+        context.addIssue({ code: "custom", path: ["generators"], message: "Generator allocations exceed the GPU budget" })
+      }
+    }
   })
   export const PipelinePolicy = z
     .object({
@@ -123,7 +142,7 @@ export namespace ExecutionProtocol {
       sourceHash: Digest.optional(),
       protoToolsCommit: z.string().regex(/^[a-f0-9]{40}$/).optional(),
       generation: GenerationPolicy.optional(),
-      stages: z.array(PipelineStage).min(1),
+      stages: z.array(PipelineStage).max(64),
     })
     .superRefine((policy, context) => {
       const stages = new Set(policy.stages.map((stage) => stage.id))

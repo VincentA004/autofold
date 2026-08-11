@@ -23,6 +23,23 @@ const protoPython = path.resolve(import.meta.dir, "../../../../.autofold/envs/pr
 const generationExample = path.resolve(import.meta.dir, "../../../worker/examples/rfdiffusion_mpnn_trial.py")
 
 describe("dynamic Proto workflow compiler", () => {
+  test("accepts a CPU-only Proto Language program without external tool stages", () => {
+    const pipeline = ResearchWorkflow.compile({
+      contract: { budget: { ...contract.budget, gpuHours: 0 }, evaluator: contract.evaluator },
+      protoToolsCommit: commit,
+      protoLanguageCommit: languageCommit,
+      tools,
+      plan: {
+        format: "autofold.proto-workflow.v1",
+        id: "proto-language-only",
+        maximumGpuSeconds: 0,
+        stages: [],
+      },
+    })
+    expect(pipeline.stages).toEqual([])
+    expect(pipeline.id).toBe("proto-language-only")
+  })
+
   test("resolves registry tools and topologically freezes an agent-authored graph", () => {
     const pipeline = ResearchWorkflow.compile({
       contract,
@@ -83,8 +100,64 @@ describe("dynamic Proto workflow compiler", () => {
         id: "rfdiffusion-mpnn-binder",
         version: languageCommit,
         toolsCalled: ["rfdiffusion3-design", "proteinmpnn-sample"],
+        allocation: { maximumCandidates: 100, maximumGpuSeconds: 100 },
       },
     ])
+  })
+
+  test("requires and freezes explicit multi-generator portfolio allocations", () => {
+    const portfolioGenerators = [
+      ...generators,
+      { key: "boltzgen-binder", usesGpu: true, toolsCalled: ["boltzgen-design"] },
+    ]
+    const base = {
+      format: "autofold.proto-workflow.v1" as const,
+      id: "portfolio",
+      maximumGpuSeconds: 1_000,
+      generation: {
+        generators: ["rfdiffusion-mpnn-binder", "boltzgen-binder"],
+        maximumCandidates: 5,
+        maximumGpuSeconds: 1_000,
+      },
+      stages: [],
+    }
+    expect(() => ResearchWorkflow.Plan.parse(base)).toThrow("explicit per-generator allocations")
+    const pipeline = ResearchWorkflow.compile({
+      contract,
+      protoToolsCommit: commit,
+      protoLanguageCommit: languageCommit,
+      tools,
+      generators: portfolioGenerators,
+      plan: {
+        ...base,
+        generation: {
+          ...base.generation,
+          allocations: [
+            { generator: "rfdiffusion-mpnn-binder", maximumCandidates: 3, maximumGpuSeconds: 600 },
+            { generator: "boltzgen-binder", maximumCandidates: 2, maximumGpuSeconds: 400 },
+          ],
+        },
+      },
+    })
+    expect(pipeline.generation?.generators.map((generator) => generator.allocation?.maximumCandidates)).toEqual([3, 2])
+  })
+
+  test("fingerprints equivalent workflow DAGs independently of labels and declaration order", () => {
+    const first = {
+      format: "autofold.proto-workflow.v1" as const,
+      id: "first-label",
+      maximumGpuSeconds: 100,
+      stages: [
+        { id: "secondary", capability: "structure_prediction", tools: ["chai1-prediction"], dependsOn: ["primary"] },
+        { id: "primary", capability: "structure_prediction", tools: ["boltz2-prediction"] },
+      ],
+    }
+    const second = {
+      ...first,
+      id: "another-label",
+      stages: first.stages.toReversed(),
+    }
+    expect(ResearchWorkflow.fingerprint(first)).toBe(ResearchWorkflow.fingerprint(second))
   })
 
   test("enforces the frozen experiment compute budget", () => {

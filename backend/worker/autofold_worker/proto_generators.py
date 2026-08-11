@@ -56,8 +56,16 @@ class BoltzGenBinderConfig(BaseConfig):
     target_structure: Structure | str = ConfigField(title="Target Structure", description="Frozen target structure")
     target_chain: str = ConfigField(default="A", title="Target Chain", description="Target protein chain ID")
     hotspots: list[int] = ConfigField(default_factory=list, title="Target Hotspots", description="Target residue positions")
-    executable: str = ConfigField(default="boltzgen", title="BoltzGen Executable", description="Pinned BoltzGen CLI path")
-    cache_dir: str = ConfigField(title="BoltzGen Cache", description="Pinned BoltzGen model cache")
+    executable: str = ConfigField(
+        default_factory=lambda: os.environ.get("AUTOFOLD_BOLTZGEN_EXECUTABLE", "boltzgen"),
+        title="BoltzGen Executable",
+        description="Pinned BoltzGen CLI path supplied by the execution plane",
+    )
+    cache_dir: str = ConfigField(
+        default_factory=lambda: os.environ.get("AUTOFOLD_BOLTZGEN_CACHE", ""),
+        title="BoltzGen Cache",
+        description="Pinned BoltzGen model cache supplied by the execution plane",
+    )
     protocol: Literal["peptide-anything", "protein-anything"] = ConfigField(
         default="peptide-anything", title="Protocol", description="BoltzGen protocol preset"
     )
@@ -89,6 +97,8 @@ class BoltzGenBinderGenerator(Generator):
         return True
 
     def _sample(self) -> None:
+        if not self.config.cache_dir:
+            raise ValueError("BoltzGen requires AUTOFOLD_BOLTZGEN_CACHE in the execution profile")
         segment = self.segment
         for proposal in segment.proposal_sequences:
             proposal.sequence = "X" * segment.sequence_length
@@ -174,7 +184,11 @@ class PXDesignBinderConfig(BaseConfig):
     target_structure: Structure | str = ConfigField(title="Target Structure", description="Frozen target structure")
     target_chains: list[str] = ConfigField(default_factory=lambda: ["A"], title="Target Chains", description="Target protein chain IDs")
     hotspots: list[int] = ConfigField(default_factory=list, title="Target Hotspots", description="Target residue positions")
-    executable: str = ConfigField(default="pxdesign", title="PXDesign Executable", description="Pinned PXDesign CLI path")
+    executable: str = ConfigField(
+        default_factory=lambda: os.environ.get("AUTOFOLD_PXDESIGN_EXECUTABLE", "pxdesign"),
+        title="PXDesign Executable",
+        description="Pinned PXDesign CLI path supplied by the execution plane",
+    )
     preset: Literal["preview", "extended"] = ConfigField(
         default="preview", title="Pipeline Preset", description="PXDesign sequence-design and validation preset"
     )

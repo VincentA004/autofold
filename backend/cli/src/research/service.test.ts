@@ -47,9 +47,16 @@ async function activeExperiment(service: ResearchService.Service, projectId: str
   return service.activateExperiment(projectId, experiment.id)
 }
 
-async function evaluatingTrial(service: ResearchService.Service, projectId: string, experimentId: string, label: string) {
+async function evaluatingTrial(
+  service: ResearchService.Service,
+  projectId: string,
+  experimentId: string,
+  label: string,
+  intent: ResearchDomain.Trial["intent"] = "optimize",
+) {
   let trial = await service.createTrial(projectId, experimentId, {
     hypothesis: label,
+    intent,
     designAdapter: "mock",
     programPath: `trials/${label}.py`,
     programHash: digest(label === "baseline" ? "c" : "d"),
@@ -60,6 +67,25 @@ async function evaluatingTrial(service: ResearchService.Service, projectId: stri
 }
 
 describe("research service", () => {
+  test("pins exact campaign skill versions on a trial", async () => {
+    const { service, projectId } = fixture()
+    const experiment = await activeExperiment(service, projectId)
+    const reference = {
+      id: "skill_bionemo.sequence-design",
+      version: 3,
+      versionId: "skv_sequence_v3",
+      contentHash: digest("e"),
+    }
+    const trial = await service.createTrial(projectId, experiment.id, {
+      hypothesis: "Use the replay-validated sequence policy",
+      designAdapter: "mock",
+      programPath: "trials/skill-pinned.py",
+      programHash: digest("f"),
+      skills: [reference],
+    })
+    expect(trial.skills).toEqual([reference])
+  })
+
   test("atomically ingests a bounded literature-agent review", async () => {
     const { service, store, projectId } = fixture()
     const campaign = await service.createCampaign(projectId, { objective: "Find selective peptide binders" })
@@ -364,6 +390,35 @@ describe("research service", () => {
     expect(result.experiment.incumbentTrialId).toBe(baseline.id)
   })
 
+  test("observes a valid negative control without replacing the incumbent", async () => {
+    const { service, projectId } = fixture()
+    const experiment = await activeExperiment(service, projectId)
+    const baseline = await evaluatingTrial(service, projectId, experiment.id, "baseline")
+    await service.recordEvaluation(projectId, baseline.id, {
+      contractHash: experiment.contractHash,
+      evaluatorHash: experiment.contract.evaluator.sourceHash,
+      valid: true,
+      score: 0.42,
+      diagnostics: {},
+    })
+
+    const control = await evaluatingTrial(service, projectId, experiment.id, "scrambled-control", "negative_control")
+    const result = await service.recordEvaluation(projectId, control.id, {
+      contractHash: experiment.contractHash,
+      evaluatorHash: experiment.contract.evaluator.sourceHash,
+      valid: true,
+      score: 0.1,
+      diagnostics: { agreement: 0.9 },
+    })
+
+    expect(control.parentTrialId).toBe(baseline.id)
+    expect(result.decision).toBe("observed")
+    expect(result.experiment.incumbentTrialId).toBe(baseline.id)
+    expect(result.knowledge.decision).toBe("observed")
+    expect(result.knowledge.status).toBe("stable")
+    expect(result.knowledge.description).toContain("not promotion-eligible")
+  })
+
   test("rejects an evaluation produced by another contract", async () => {
     const { service, projectId } = fixture()
     const experiment = await activeExperiment(service, projectId)
@@ -586,5 +641,58 @@ describe("research service", () => {
     } finally {
       await fs.rm(workspace, { recursive: true, force: true })
     }
+  })
+
+  test("reuses the exact trial created by a replayed job phase", async () => {
+    const { service, store, projectId } = fixture()
+    const experiment = await activeExperiment(service, projectId)
+    const input = {
+      hypothesis: "Checkpointed agent proposal",
+      designAdapter: "proto" as const,
+      programPath: "trials/checkpointed.py",
+      programHash: digest("a"),
+      origin: { jobId: "job_replay", phase: "iteration:1" },
+    }
+    const first = await service.createTrial(projectId, experiment.id, input)
+    expect(await service.createTrial(projectId, experiment.id, input)).toEqual(first)
+    expect(Object.values((await store.read(projectId)).trials)).toEqual([first])
+    await expect(
+      service.createTrial(projectId, experiment.id, { ...input, hypothesis: "Conflicting replay" }),
+    ).rejects.toBeInstanceOf(ResearchService.ConflictError)
+  })
+
+  test("returns the committed knowledge cycle when its child proposal is replayed", async () => {
+    const { service, store, projectId } = fixture()
+    const campaign = await service.createCampaign(projectId, { objective: "Checkpoint knowledge ingestion" })
+    await service.activateCampaign(projectId, campaign.id)
+    const input = {
+      generatedBy: "autofold-literature-review/ses_checkpoint",
+      sources: [
+        {
+          key: "pubmed:checkpoint",
+          database: "pubmed",
+          sourceId: "checkpoint",
+          title: "Checkpointed evidence",
+          excerpts: ["This exact evidence was fetched."],
+          query: "checkpoint peptide evidence",
+        },
+      ],
+      claims: [
+        {
+          kind: "hypothesis" as const,
+          statement: "Checkpointed evidence supports a bounded hypothesis.",
+          stance: "supports" as const,
+          confidence: 0.6,
+          evidence: [{ sourceKey: "pubmed:checkpoint", excerpt: "This exact evidence was fetched." }],
+        },
+      ],
+      unresolvedQuestions: ["Does the result reproduce experimentally?"],
+    }
+    const first = await service.ingestLiteratureReview(projectId, campaign.id, input)
+    const replay = await service.ingestLiteratureReview(projectId, campaign.id, input)
+    expect(replay).toEqual(first)
+    const state = await store.read(projectId)
+    expect(Object.values(state.knowledgeCycles)).toHaveLength(1)
+    expect(Object.values(state.claims)).toHaveLength(1)
   })
 })
