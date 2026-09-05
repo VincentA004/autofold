@@ -1,10 +1,16 @@
 import z from "zod"
+import { ExecutionProtocol } from "./execution-protocol"
 import { ResearchSkills } from "./research-skills"
+import { ResearchSearchPolicy } from "./search-policy"
 
 const Digest = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const Timestamp = z.string().datetime()
 
 export namespace ResearchDomain {
+  // Evidence can originate from every persisted scientific plane: execution
+  // trajectories, OKF knowledge/literature/alignment records, lab-notebook
+  // cycles, and versioned campaign skills.
+  export const EvidenceRef = z.string().regex(/^(cmp|exp|trl|evl|run|pep|knw|clm|job|lit|aln|kcy|skv|hyp|sobs|chr)_[A-Za-z0-9_-]+$/)
   export const CampaignStatus = z.enum(["draft", "active", "paused", "completed", "archived"])
   export type CampaignStatus = z.infer<typeof CampaignStatus>
 
@@ -42,6 +48,23 @@ export namespace ResearchDomain {
         id: z.string().trim().min(1),
         version: z.string().trim().min(1),
         sourceHash: Digest,
+        scoringPipelineHash: Digest.optional(),
+        scoringPipeline: ExecutionProtocol.ScoringPipeline.optional(),
+      })
+      .superRefine((adapter, context) => {
+        if (adapter.scoringPipeline && !adapter.scoringPipelineHash) {
+          context.addIssue({
+            code: "custom",
+            path: ["scoringPipelineHash"],
+            message: "Frozen scoring pipeline content requires its canonical hash",
+          })
+        }
+        if (
+          adapter.scoringPipeline &&
+          adapter.scoringPipelineHash !== ExecutionProtocol.hashScoringPipeline(adapter.scoringPipeline)
+        ) {
+          context.addIssue({ code: "custom", path: ["scoringPipelineHash"], message: "Frozen scoring pipeline hash does not match its content" })
+        }
       })
       .optional(),
     direction: z.enum(["minimize", "maximize"]),
@@ -81,6 +104,131 @@ export namespace ResearchDomain {
   })
   export type Campaign = z.infer<typeof Campaign>
 
+  /**
+   * Evidence strength is deliberately ordinal. Agent-authored prose may ask
+   * for any level, but the trusted research service derives the highest level
+   * supported by persisted observations and never lets computational evidence
+   * become an experimental confirmation.
+   */
+  export const EpistemicLevel = z.enum([
+    "model_observation",
+    "computational_support",
+    "cross_model_support",
+    "multi_seed_support",
+    "experimental_support",
+    "experimentally_confirmed",
+  ])
+  export type EpistemicLevel = z.infer<typeof EpistemicLevel>
+
+  export const CampaignCharter = z.object({
+    id: z.string().startsWith("chr_"),
+    campaignId: z.string().startsWith("cmp_"),
+    version: z.literal(1),
+    objective: z.string().trim().min(1).max(4_000),
+    successCriteria: z.array(z.object({
+      id: z.string().regex(/^[a-z][a-z0-9_-]{1,60}$/),
+      statement: z.string().trim().min(1).max(2_000),
+      requiredEvidenceLevel: EpistemicLevel,
+      status: z.enum(["open", "met", "invalidated"]),
+    })).min(1).max(20),
+    requiredControls: z.array(z.string().trim().min(1).max(2_000)).max(20),
+    stopConditions: z.array(z.object({
+      kind: z.enum([
+        "budget_exhausted",
+        "improvement_plateau",
+        "repeated_equivalent_proposals",
+        "insufficient_evidence",
+        "breakthrough",
+        "approval_required",
+      ]),
+      criterion: z.string().trim().min(1).max(2_000),
+    })).min(1).max(20),
+    constraints: z.object({
+      maximumCampaignGpuHours: z.number().finite().positive().optional(),
+      maximumCampaignTrials: z.number().int().positive().optional(),
+      requireMatchedControlCardinality: z.boolean(),
+      requireMultiSeedConfirmation: z.boolean(),
+    }),
+    status: z.enum(["active", "completed", "superseded"]),
+    createdAt: Timestamp,
+    updatedAt: Timestamp,
+  })
+  export type CampaignCharter = z.infer<typeof CampaignCharter>
+
+  export const ResearchHypothesis = z.object({
+    id: z.string().startsWith("hyp_"),
+    campaignId: z.string().startsWith("cmp_"),
+    category: z.enum(["biology", "method", "workflow", "calibration"]),
+    statement: z.string().trim().min(1).max(4_000),
+    status: z.enum(["proposed", "supported", "weakened", "refuted", "unresolved"]),
+    confidence: z.number().finite().min(0).max(1),
+    evidenceLevel: EpistemicLevel,
+    supportingEvidenceRefs: z.array(EvidenceRef).max(100),
+    opposingEvidenceRefs: z.array(EvidenceRef).max(100),
+    prediction: z.string().trim().min(1).max(2_000),
+    falsificationCriterion: z.string().trim().min(1).max(2_000),
+    recommendedExperiment: z.string().trim().min(1).max(2_000),
+    limitations: z.array(z.string().trim().min(1).max(2_000)).max(20),
+    generated: z.object({
+      by: z.string().trim().min(1),
+      at: Timestamp,
+    }),
+    createdAt: Timestamp,
+    updatedAt: Timestamp,
+  })
+  export type ResearchHypothesis = z.infer<typeof ResearchHypothesis>
+
+  export const GeneratorDiagnostics = z.object({
+    format: z.literal("autofold.generator-diagnostics.v1"),
+    generator: z.literal("freebindcraft"),
+    rejectedCandidates: z.number().int().nonnegative(),
+    rejectionFilters: z.record(z.string().trim().min(1), z.number().int().nonnegative()),
+    trajectoryFailures: z.number().int().nonnegative(),
+    trajectoryFailureFilters: z.record(z.string().trim().min(1), z.number().int().nonnegative()),
+    trajectoriesObserved: z.number().int().nonnegative(),
+    acceptedCandidates: z.number().int().nonnegative(),
+    sourceFiles: z.array(z.string().trim().min(1)).min(1),
+  })
+  export type GeneratorDiagnostics = z.infer<typeof GeneratorDiagnostics>
+
+  export const SearchObservation = z.object({
+    id: z.string().startsWith("sobs_"),
+    campaignId: z.string().startsWith("cmp_"),
+    experimentId: z.string().startsWith("exp_"),
+    trialId: z.string().startsWith("trl_"),
+    runId: z.string().startsWith("run_"),
+    evaluationId: z.string().startsWith("evl_").optional(),
+    knowledgeId: z.string().startsWith("knw_"),
+    knowledgeCycleId: z.string().startsWith("kcy_"),
+    intent: z.enum(["optimize", "calibrate", "negative_control", "shadow_replay"]),
+    programHash: Digest,
+    pipelineHash: Digest.optional(),
+    semanticProgramFingerprint: Digest.optional(),
+    workflowFingerprint: Digest.optional(),
+    calibrationClass: z.enum(["known_positive", "known_negative", "neutral"]).optional(),
+    calibrationReplicateOfTrialId: z.string().startsWith("trl_").optional(),
+    generationReplicateId: z.string().startsWith("grep_").optional(),
+    realizedCandidateSetHash: Digest.optional(),
+    generationStochasticity: z.enum(["deterministic", "seeded", "upstream_uncontrolled", "mixed", "unknown"]).optional(),
+    generationWallSeconds: z.number().finite().nonnegative().optional(),
+    parentTrialId: z.string().startsWith("trl_").optional(),
+    generatorPortfolio: z.array(z.string().trim().min(1)).max(30),
+    generatorAllocations: z.array(ResearchSearchPolicy.Allocation).max(30).default([]),
+    generatorDiagnostics: z.array(GeneratorDiagnostics).max(30).default([]),
+    candidateSequences: z.array(z.string().regex(/^[ACDEFGHIKLMNPQRSTVWY]+$/)).max(100),
+    modelIds: z.array(z.string().trim().min(1)).max(100),
+    seeds: z.array(z.number().int()).max(1_024),
+    score: z.number().finite().nullable(),
+    priorBestScore: z.number().finite().nullable().optional(),
+    scoreDeltaFromPriorBest: z.number().finite().nullable().optional(),
+    decision: z.enum(["promoted", "rejected", "observed", "failed"]),
+    diagnostics: z.record(z.string(), z.number().finite()),
+    hypothesis: z.string().trim().min(1).max(4_000),
+    epistemicLevel: EpistemicLevel,
+    createdAt: Timestamp,
+  })
+  export type SearchObservation = z.infer<typeof SearchObservation>
+
   export const Experiment = z.object({
     id: z.string().startsWith("exp_"),
     campaignId: z.string().startsWith("cmp_"),
@@ -109,6 +257,8 @@ export namespace ResearchDomain {
     designAdapter: z.enum(["mock", "proto"]),
     programPath: z.string().trim().min(1).max(4_000),
     programHash: Digest,
+    generators: z.array(z.string().trim().min(1)).max(30).default([]),
+    generatorAllocations: z.array(ResearchSearchPolicy.Allocation).max(30).default([]),
     status: TrialStatus,
     createdAt: Timestamp,
     updatedAt: Timestamp,
@@ -205,8 +355,20 @@ export namespace ResearchDomain {
       kind: z.literal("autoresearch"),
       experimentId: z.string().startsWith("exp_"),
       sessionId: z.string().startsWith("ses_"),
-      iterations: z.number().int().min(1).max(10),
+      iterations: z.number().int().min(1).max(100),
       agent: z.enum(["biology", "ml", "task"]),
+      recursionMode: z.enum(["autonomous_discovery", "single_intent"]).optional(),
+      trialIntent: Trial.shape.intent.optional(),
+      baselineTrialId: z.string().startsWith("trl_").optional(),
+      rationale: z.string().trim().min(1).max(4_000).optional(),
+      expectedInformationGain: z.string().trim().min(1).max(2_000).optional(),
+      decisionMode: z.enum(["agent_directed", "policy_guided"]).default("agent_directed"),
+      searchPolicy: ResearchSearchPolicy.Policy.optional(),
+      evidenceRefs: z.array(EvidenceRef).max(100).default([]),
+      allowEquivalent: z.boolean().default(false),
+      equivalenceJustification: z.string().trim().min(1).max(2_000).optional(),
+      staticControlScope: z.enum(["local_derivative", "same_length_scaffold"]).default("local_derivative"),
+      automaticSkillRefinement: z.boolean().default(true),
     }),
     z.object({
       kind: z.literal("knowledge_refresh"),
@@ -221,8 +383,11 @@ export namespace ResearchDomain {
     z.object({
       kind: z.literal("campaign_loop"),
       campaignId: z.string().startsWith("cmp_"),
+      experimentId: z.string().startsWith("exp_").optional(),
       sessionId: z.string().startsWith("ses_"),
       maxSteps: z.number().int().min(1).max(20),
+      maximumTrajectories: z.number().int().min(1).max(100).optional(),
+      continuedFromJobId: z.string().startsWith("job_").optional(),
     }),
     z.object({
       kind: z.literal("capability_refinement"),
@@ -233,6 +398,11 @@ export namespace ResearchDomain {
       replayExperimentId: z.string().startsWith("exp_").optional(),
       replayAgent: z.enum(["biology", "ml", "task"]).default("biology"),
       replayRepetitions: z.number().int().min(3).max(5).default(3),
+      continuation: z.object({
+        sourceCampaignJobId: z.string().startsWith("job_"),
+        remainingSteps: z.number().int().min(1).max(19),
+        remainingTrajectories: z.number().int().min(1).max(100).optional(),
+      }).optional(),
     }),
     z.object({
       kind: z.literal("skill_shadow_replay"),
@@ -242,6 +412,11 @@ export namespace ResearchDomain {
       sessionId: z.string().startsWith("ses_"),
       agent: z.enum(["biology", "ml", "task"]),
       repetitions: z.number().int().min(3).max(5).default(3),
+      continuation: z.object({
+        sourceCampaignJobId: z.string().startsWith("job_"),
+        remainingSteps: z.number().int().min(1).max(19),
+        remainingTrajectories: z.number().int().min(1).max(100).optional(),
+      }).optional(),
     }),
   ])
   export type JobPayload = z.infer<typeof JobPayload>
@@ -449,6 +624,8 @@ export namespace ResearchDomain {
       literatureIds: z.array(z.string().startsWith("lit_")).max(1_000),
       claimIds: z.array(z.string().startsWith("clm_")).max(1_000),
       alignmentIds: z.array(z.string().startsWith("aln_")).max(1_000),
+      hypothesisIds: z.array(z.string().startsWith("hyp_")).max(1_000).default([]),
+      searchObservationIds: z.array(z.string().startsWith("sobs_")).max(1_000).default([]),
       unresolvedQuestions: z.array(z.string().trim().min(1).max(2_000)).max(100),
     }),
     generated: KnowledgeActor,

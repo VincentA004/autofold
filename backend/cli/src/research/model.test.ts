@@ -9,24 +9,29 @@ afterEach(() => {
 })
 
 describe("research model selection", () => {
-  test("defaults to the Autofold DeepSeek worker rather than a parent-session model", () => {
+  test("defaults to the pinned Autofold GLM worker rather than a parent-session model", () => {
     delete process.env.AUTOFOLD_RESEARCH_MODEL
     expect(ResearchModel.select()).toEqual({
       providerID: "openrouter",
-      modelID: "deepseek/deepseek-v4-flash-0731",
+      modelID: "z-ai/glm-5.3-flash",
     })
   })
 
-  test("uses an explicit provider:model operator override", () => {
-    process.env.AUTOFOLD_RESEARCH_MODEL = "openrouter:openai/gpt-oss-120b"
+  test("keeps the pinned GLM model when the override agrees", () => {
+    process.env.AUTOFOLD_RESEARCH_MODEL = "openrouter:z-ai/glm-5.3-flash"
     expect(ResearchModel.select()).toEqual({
       providerID: "openrouter",
-      modelID: "openai/gpt-oss-120b",
+      modelID: "z-ai/glm-5.3-flash",
     })
   })
 
-  test("rejects malformed overrides", () => {
+  test("silently replaces a non-GLM research override", () => {
+    process.env.AUTOFOLD_RESEARCH_MODEL = "openrouter:anthropic/claude-haiku-4.5"
+    expect(ResearchModel.select()).toEqual(ResearchModel.DEFAULT)
+  })
+
+  test("ignores malformed overrides rather than failing the campaign", () => {
     process.env.AUTOFOLD_RESEARCH_MODEL = "openrouter"
-    expect(() => ResearchModel.select()).toThrow("provider:model")
+    expect(ResearchModel.select()).toEqual(ResearchModel.DEFAULT)
   })
 })

@@ -14,10 +14,11 @@ const ProposalArtifact = ResearchService.LiteratureReviewInput.omit({
   trigger: true,
   question: true,
   inputKnowledgeIds: true,
+  searchObservations: true,
 }).extend({
   campaignSummary: z.string().trim().min(1).max(4_000),
   nextExperiment: ResearchDomain.NextExperimentProposal,
-}).superRefine((artifact, context) => {
+}).partial({ hypothesisUpdates: true }).superRefine((artifact, context) => {
   for (const [claimIndex, claim] of artifact.claims.entries()) {
     const sourceKeys = new Set(claim.evidence.map((evidence) => evidence.sourceKey))
     if (sourceKeys.size !== claim.evidence.length) {
@@ -35,6 +36,7 @@ export namespace ResearchLiteratureReview {
     .object({
       campaignId: z.string().startsWith("cmp_"),
       sessionId: z.string().startsWith("ses_"),
+      focusExperimentId: z.string().startsWith("exp_").optional(),
       question: z.string().trim().min(1).max(2_000).optional(),
       maxSources: z.number().int().min(1).max(50).default(20),
       maxClaims: z.number().int().min(1).max(50).default(20),
@@ -66,6 +68,9 @@ export namespace ResearchLiteratureReview {
 
   export interface Context {
     campaign: ResearchDomain.Campaign
+    charter?: ResearchDomain.CampaignCharter
+    hypotheses?: ResearchDomain.ResearchHypothesis[]
+    searchLandscape?: ResearchDomain.SearchObservation[]
     experiments: ResearchDomain.Experiment[]
     runKnowledge: ResearchDomain.KnowledgeConcept[]
     literature: ResearchDomain.LiteratureRecord[]
@@ -73,7 +78,20 @@ export namespace ResearchLiteratureReview {
     alignments: ResearchDomain.KnowledgeAlignment[]
     cycles: ResearchDomain.KnowledgeCycle[]
     newRunKnowledge: ResearchDomain.KnowledgeConcept[]
-    newRunEvidence: unknown[]
+    newRunEvidence: Array<{
+      knowledgeId: string
+      runId: string
+      trial: ResearchDomain.Trial
+      candidates: unknown[]
+      evaluation: unknown
+      pipeline: unknown
+      pipelineHash?: string
+      modelEvidence: Array<{
+        modelId: string
+        seed: number
+        status: "completed" | "skipped"
+      }>
+    }>
   }
 
   export interface Proposal {
@@ -163,17 +181,19 @@ export namespace ResearchLiteratureReview {
     signal?.throwIfAborted()
     const proposal = await dependencies.propose({ context, request })
     signal?.throwIfAborted()
-    await lifecycle.onProposal?.({
-      childSessionId: proposal.childSessionId,
-      proposalPath: proposal.proposalPath,
-    })
-    signal?.throwIfAborted()
+    verifyNextExperimentBoundary(proposal.artifact.nextExperiment)
+    verifyFocusExperimentBoundary(proposal.artifact.nextExperiment, request.focusExperimentId)
     if (proposal.artifact.sources.length > request.maxSources) {
       throw new Error(`Literature agent proposed ${proposal.artifact.sources.length} sources; maximum is ${request.maxSources}`)
     }
     if (proposal.artifact.claims.length > request.maxClaims) {
       throw new Error(`Literature agent proposed ${proposal.artifact.claims.length} claims; maximum is ${request.maxClaims}`)
     }
+    await lifecycle.onProposal?.({
+      childSessionId: proposal.childSessionId,
+      proposalPath: proposal.proposalPath,
+    })
+    signal?.throwIfAborted()
     const persisted = await dependencies.persist({ campaignId: request.campaignId, proposal, context, request })
     signal?.throwIfAborted()
     return Result.parse({
@@ -186,6 +206,31 @@ export namespace ResearchLiteratureReview {
     })
   }
 
+  export function verifyNextExperimentBoundary(proposal: ResearchDomain.NextExperimentProposal): void {
+    if (proposal.action !== "continue_experiment") return
+    const description = [proposal.hypothesis, proposal.rationale, proposal.successCriterion].join(" ")
+    const explicitlyRequiresNewContract = [
+      /\brequires? (?:a )?new experiment(?: contract)?\b/i,
+      /\bneeds? (?:a )?new experiment(?: contract)?\b/i,
+      /\bnew experiment contract\b/i,
+      /\bchanges? (?:the )?(?:target|evaluator|seed(?:s)?|budget|promotion rule)\b/i,
+    ].some((pattern) => pattern.test(description))
+    if (!explicitlyRequiresNewContract) return
+    throw new Error(
+      "A continue_experiment proposal explicitly requires a new frozen experiment contract; use new_experiment and omit experimentId",
+    )
+  }
+
+  export function verifyFocusExperimentBoundary(
+    proposal: ResearchDomain.NextExperimentProposal,
+    focusExperimentId?: string,
+  ): void {
+    if (!focusExperimentId || proposal.action !== "continue_experiment" || proposal.experimentId === focusExperimentId) return
+    throw new Error(
+      `Trajectory closeout for ${focusExperimentId} cannot continue a different experiment ${proposal.experimentId}`,
+    )
+  }
+
   function productionDependencies(): Dependencies {
     return { context: loadContext, propose, persist }
   }
@@ -195,13 +240,14 @@ export namespace ResearchLiteratureReview {
     const campaigns = await Research.listCampaigns(projectId)
     const campaign = campaigns.find((item) => item.id === campaignId)
     if (!campaign) throw new ResearchService.NotFoundError({ entity: "campaign", id: campaignId })
-    const [experiments, runKnowledge, literature, claims, alignments, cycles] = await Promise.all([
+    const [experiments, runKnowledge, literature, claims, alignments, cycles, researchState] = await Promise.all([
       Research.listExperiments(projectId, campaignId),
       Research.listKnowledge(projectId, campaignId),
       Research.listLiterature(projectId, campaignId),
       Research.listClaims(projectId, campaignId),
       Research.listAlignments(projectId, campaignId),
       Research.listKnowledgeCycles(projectId, campaignId),
+      Research.campaignResearchState(projectId, campaignId),
     ])
     const processedKnowledge = new Set(cycles.flatMap((cycle) => cycle.inputs.knowledgeIds))
     const newRunKnowledge = runKnowledge.filter((concept) => !processedKnowledge.has(concept.id)).slice(0, 30)
@@ -218,6 +264,9 @@ export namespace ResearchLiteratureReview {
             candidates: artifacts.candidates.candidates.slice(0, 12),
             evaluation: artifacts.evaluation,
             pipeline: artifacts.pipeline,
+            pipelineHash: "pipelineHash" in artifacts.manifest && typeof artifacts.manifest.pipelineHash === "string"
+              ? artifacts.manifest.pipelineHash
+              : undefined,
             modelEvidence: artifacts.modelEvidence.slice(0, 50),
           }
         }),
@@ -225,6 +274,9 @@ export namespace ResearchLiteratureReview {
     ).filter((item) => item !== undefined)
     return {
       campaign,
+      charter: researchState.charter,
+      hypotheses: researchState.hypotheses.slice(0, 30),
+      searchLandscape: researchState.searchObservations.slice(0, 50),
       experiments: experiments.slice(0, 20),
       runKnowledge: runKnowledge.slice(0, 30),
       literature: literature.slice(0, 50),
@@ -240,12 +292,12 @@ export namespace ResearchLiteratureReview {
     const { Session } = await import("@/session")
     const { SessionPrompt } = await import("@/session/prompt")
     if (input.request.resumeProposalPath && input.request.resumeChildSessionId) {
-      return loadOrRepairCompletedProposal({
+      return ensureProposalBudget(await loadOrRepairCompletedProposal({
         campaignId: input.request.campaignId,
         parentSessionId: input.request.sessionId,
         proposalPath: input.request.resumeProposalPath,
         childSessionId: input.request.resumeChildSessionId,
-      })
+      }), input.request)
     }
     const relative = path.posix.join(
       ".autofold",
@@ -255,7 +307,7 @@ export namespace ResearchLiteratureReview {
       "review.json",
     )
     const absolute = insideWorkspace(relative)
-    await fs.mkdir(path.dirname(absolute), { recursive: true })
+    await prepareAgentDraft(absolute)
     const child = await Session.create({
       parentID: input.request.sessionId,
       title: `Literature review for ${input.request.campaignId}`,
@@ -275,25 +327,14 @@ export namespace ResearchLiteratureReview {
       ],
     })
     const model = ResearchModel.select()
-    const packet = {
-      campaign: input.context.campaign,
-      question: input.request.question ?? input.context.campaign.objective,
-      experiments: input.context.experiments,
-      verifiedRunKnowledge: input.context.runKnowledge,
-      existingLiterature: input.context.literature,
-      existingClaims: input.context.claims,
-      existingAlignments: input.context.alignments,
-      priorKnowledgeCycles: input.context.cycles,
-      newExperimentOutcomes: input.context.newRunKnowledge,
-      verifiedNewRunEvidence: input.context.newRunEvidence,
-      limits: { sources: input.request.maxSources, claims: input.request.maxClaims },
-    }
+    const packet = compactKnowledgePacket(input.context, input.request)
     const prompt = [
       "Run one bounded evidence-focused literature review for this Autofold campaign.",
       "Use science_list_dbs, science_search, and science_fetch to search multiple appropriate literature databases and fetch promising records.",
       "Prefer primary sources. Note contradictions and limitations. Do not invent identifiers, titles, URLs, summaries, or excerpts.",
       "Every evidence excerpt must be copied exactly from a fetched record and must also appear verbatim in that source's excerpts array.",
       "Do not mark claims reviewed; this step proposes claims for later human or independent-agent review.",
+      "The campaign packet is a compact decision view. Exact IDs, sequences, hashes, scores, seeds, and numeric metrics are preserved; clipped prose is marked with an ellipsis. Use the referenced persisted artifacts when a conclusion requires detail absent from the packet.",
       `Write only the final JSON artifact to ${absolute}.`,
       "The JSON shape is:",
       JSON.stringify(
@@ -335,11 +376,31 @@ export namespace ResearchLiteratureReview {
             rationale: "Why this is the highest-information next step given the outcomes and literature",
             successCriterion: "The locked evaluator result that would support the hypothesis",
           },
+          hypothesisUpdates: [
+            {
+              hypothesisId: "hyp_existing_id_or_omit_for_new",
+              category: "biology",
+              statement: "One precise competing hypothesis",
+              status: "supported",
+              confidence: 0.7,
+              evidenceLevel: "cross_model_support",
+              supportingEvidenceRefs: ["knw_exact_id_from_campaign_context"],
+              opposingEvidenceRefs: [],
+              prediction: "The exact observation expected if this hypothesis is correct",
+              falsificationCriterion: "The exact observation that would weaken or refute it",
+              recommendedExperiment: "The smallest experiment that discriminates this hypothesis",
+              limitations: ["Computational evidence does not establish physical binding"],
+            },
+          ],
         },
         null,
         2,
       ),
       "Allowed claim kinds: mechanism, design_rule, assay_fact, limitation, hypothesis.",
+      "Update the typed hypothesis ledger in hypothesisUpdates. Use an existing hypothesisId only when it appears in campaign_context; otherwise omit hypothesisId. Every supported, weakened, or refuted status requires exact persisted evidence refs.",
+      "Evidence levels are model_observation, computational_support, cross_model_support, multi_seed_support, experimental_support, experimentally_confirmed. Use only the weakest level justified by exact evidence. Model scores and structures can never establish experimental_support or experimentally_confirmed.",
+      "Use 'supports under the frozen computational evaluator' for model-derived evidence. Never write confirmed binding, confirmed specificity, validated binder, or physical engagement unless campaign_context contains an explicit experimental evidence record.",
+      "Respect campaignCharter.requiredControls. A control with unmatched panel cardinality is confounded and cannot by itself establish sequence specificity.",
       "Allowed stances: supports, refutes, context. Confidence is an agent estimate from 0 to 1, not an experimental score.",
       "Align claims only to exact knowledge IDs present in campaign_context. Use relation supports, refutes, context, or unresolved.",
       "An alignment is proposed interpretation, never experimental verification. Record contradictions rather than averaging them away.",
@@ -347,6 +408,10 @@ export namespace ResearchLiteratureReview {
       "Within each claim, cite each sourceKey at most once; choose one exact excerpt when multiple passages come from the same record.",
       "End with one compact campaign summary and exactly one advisory nextExperiment. Prefer the experiment that maximizes information gain, not merely score.",
       "Use continue_experiment only with an exact active experiment ID from campaign_context. This proposal cannot create or modify an experiment.",
+      input.request.focusExperimentId
+        ? `This is a trajectory closeout for ${input.request.focusExperimentId}. If action=continue_experiment, experimentId must be exactly ${input.request.focusExperimentId}; use new_experiment for a contract boundary.`
+        : "No single experiment focus was supplied; choose among active campaign experiments using evidence and the charter.",
+      "If the proposed test changes the target, evaluator, evidence adapter, seeds, budget, or promotion rule, action MUST be new_experiment and experimentId MUST be omitted. Never label a contract-changing test continue_experiment, and never compare its future score numerically against an incumbent from another contract.",
       "Finish only after the JSON file exists and parses.",
       "",
       "<campaign_context>",
@@ -361,12 +426,170 @@ export namespace ResearchLiteratureReview {
       parts: [{ type: "text", text: prompt }],
     })
     ResearchAgentResponse.assert(response, `Literature reviewer ${child.id}`)
-    return loadOrRepairCompletedProposal({
+    return ensureProposalBudget(await loadOrRepairCompletedProposal({
       campaignId: input.request.campaignId,
       parentSessionId: input.request.sessionId,
       proposalPath: relative,
       childSessionId: child.id,
+    }), input.request)
+  }
+
+  export function compactKnowledgePacket(context: Context, request: Pick<Input, "question" | "maxSources" | "maxClaims">): unknown {
+    return {
+      campaign: compactValue(context.campaign, 1_200, 12),
+      campaignCharter: compactValue(context.charter, 1_200, 20),
+      hypothesisLedger: uniqueById(context.hypotheses ?? []).slice(0, 16).map((item) => compactValue(item, 900, 10)),
+      searchLandscape: uniqueById(context.searchLandscape ?? []).slice(0, 24).map((item) => compactValue(item, 800, 16)),
+      question: request.question ?? context.campaign.objective,
+      experiments: uniqueById(context.experiments).slice(0, 16).map((item) => compactValue(item, 900, 16)),
+      verifiedRunKnowledge: uniqueById(context.runKnowledge).slice(0, 12).map(compactKnowledgeConcept),
+      existingLiterature: uniqueById(context.literature).slice(0, 16).map((item) => ({
+        id: item.id,
+        database: item.database,
+        sourceId: item.sourceId,
+        title: clip(item.title, 300),
+        summary: clip(item.summary, 600),
+        url: item.url,
+        query: clip(item.query, 500),
+        contentHash: item.contentHash,
+        retrievedAt: item.retrievedAt,
+      })),
+      existingClaims: uniqueById(context.claims).slice(0, 20).map((item) => ({
+        id: item.id,
+        kind: item.kind,
+        statement: clip(item.statement, 800),
+        stance: item.stance,
+        confidence: item.confidence,
+        evidence: item.evidence.slice(0, 12).map((evidence) => ({ literatureId: evidence.literatureId })),
+        status: item.status,
+        createdAt: item.createdAt,
+      })),
+      existingAlignments: uniqueById(context.alignments).slice(0, 30).map((item) => ({
+        id: item.id,
+        claimId: item.claimId,
+        knowledgeId: item.knowledgeId,
+        relation: item.relation,
+        rationale: clip(item.rationale, 700),
+        status: item.status,
+        createdAt: item.createdAt,
+      })),
+      priorKnowledgeCycles: uniqueById(context.cycles).slice(0, 6).map((item) => compactValue(item, 900, 12)),
+      newExperimentOutcomes: uniqueById(context.newRunKnowledge).slice(0, 12).map(compactKnowledgeConcept),
+      verifiedNewRunEvidence: uniqueById(context.newRunEvidence, (item) => item.runId).slice(0, 10).map((item) => ({
+        knowledgeId: item.knowledgeId,
+        runId: item.runId,
+        trial: compactValue(item.trial, 1_000, 16),
+        candidates: item.candidates.slice(0, 12).map((candidate) => compactValue(candidate, 700, 12)),
+        evaluation: compactValue(item.evaluation, 1_000, 20),
+        pipeline: compactValue(item.pipeline, 600, 12),
+        pipelineHash: item.pipelineHash,
+        modelEvidence: item.modelEvidence.slice(0, 24).map((evidence) => compactValue(evidence, 400, 10)),
+      })),
+      limits: { sources: request.maxSources, claims: request.maxClaims },
+    }
+  }
+
+  function compactKnowledgeConcept(item: ResearchDomain.KnowledgeConcept): unknown {
+    return {
+      id: item.id,
+      experimentId: item.experimentId,
+      trialId: item.trialId,
+      evaluationId: item.evaluationId,
+      runId: item.runId,
+      type: item.type,
+      title: clip(item.title, 300),
+      description: clip(item.description, 800),
+      status: item.status,
+      score: item.score,
+      decision: item.decision,
+      error: clip(item.error, 1_000),
+      diagnostics: item.diagnostics,
+      provenance: item.provenance,
+      createdAt: item.createdAt,
+    }
+  }
+
+  function compactValue(value: unknown, stringLimit: number, arrayLimit: number, depth = 0): unknown {
+    if (typeof value === "string") return clip(value, stringLimit)
+    if (typeof value !== "object" || value === null) return value
+    if (depth >= 8) return "[nested value omitted]"
+    if (Array.isArray(value)) {
+      return value.slice(0, arrayLimit).map((item) => compactValue(item, stringLimit, arrayLimit, depth + 1))
+    }
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key,
+      compactValue(item, stringLimit, arrayLimit, depth + 1),
+    ]))
+  }
+
+  function uniqueById<T>(items: T[], key?: (item: T) => string | undefined): T[] {
+    const seen = new Set<string>()
+    return items.filter((item, index) => {
+      const fallback = typeof item === "object" && item !== null && "id" in item && typeof item.id === "string"
+        ? item.id
+        : undefined
+      const value = key?.(item) ?? fallback ?? `index:${index}`
+      if (seen.has(value)) return false
+      seen.add(value)
+      return true
     })
+  }
+
+  function clip(value: string | undefined, maximum: number): string | undefined {
+    if (!value || value.length <= maximum) return value
+    return `${value.slice(0, Math.max(0, maximum - 1))}…`
+  }
+
+  export async function prepareAgentDraft(file: string): Promise<void> {
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    try {
+      // Several tool-using models read a requested artifact before their first
+      // edit. Give that workflow a real file while leaving schema validation to
+      // reject an unedited placeholder.
+      await fs.writeFile(file, "{}\n", { flag: "wx", mode: 0o600 })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+    }
+  }
+
+  async function ensureProposalBudget(proposal: Proposal, request: Input): Promise<Proposal> {
+    let current = proposal
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const sourceOverflow = current.artifact.sources.length - request.maxSources
+      const claimOverflow = current.artifact.claims.length - request.maxClaims
+      if (sourceOverflow <= 0 && claimOverflow <= 0) return current
+      const { SessionPrompt } = await import("@/session/prompt")
+      const absolute = insideWorkspace(current.proposalPath)
+      const response = await SessionPrompt.prompt({
+        sessionID: current.childSessionId,
+        model: ResearchModel.select(),
+        agent: "autofold-knowledge-review",
+        system: "Repair only the existing literature-review JSON artifact. Do not fetch new sources or modify any other file.",
+        parts: [{
+          type: "text",
+          text: [
+            `The review artifact at ${absolute} exceeds its frozen review budget.`,
+            `Keep at most ${request.maxSources} sources and ${request.maxClaims} claims.`,
+            "Remove the least relevant excess sources. Also remove any claim or evidence reference that depends on a removed source; never leave a dangling sourceKey.",
+            "Preserve the strongest exact fetched evidence, campaign summary, unresolved questions, and next experiment. Do not add new facts or sources.",
+            `Current counts: ${current.artifact.sources.length} sources and ${current.artifact.claims.length} claims.`,
+            "Finish only after the same file parses as JSON.",
+          ].join("\n"),
+        }],
+      })
+      ResearchAgentResponse.assert(response, `Literature reviewer budget repair ${current.childSessionId}`)
+      current = await loadCompletedProposal(
+        { childSessionId: current.childSessionId },
+        { normalized: current.proposalPath, absolute },
+      )
+    }
+    if (current.artifact.sources.length > request.maxSources) {
+      throw new Error(`Literature agent proposed ${current.artifact.sources.length} sources; maximum is ${request.maxSources}`)
+    }
+    if (current.artifact.claims.length > request.maxClaims) {
+      throw new Error(`Literature agent proposed ${current.artifact.claims.length} claims; maximum is ${request.maxClaims}`)
+    }
+    return current
   }
 
   async function loadOrRepairCompletedProposal(input: {
@@ -446,11 +669,49 @@ export namespace ResearchLiteratureReview {
   }
 
   async function persist(input: { campaignId: string; proposal: Proposal; context: Context; request: Input }) {
+    const evidenceByKnowledge = new Map(input.context.newRunEvidence.map((evidence) => [evidence.knowledgeId, evidence]))
+    const searchObservations = input.context.newRunKnowledge.flatMap((concept) => {
+      const evidence = evidenceByKnowledge.get(concept.id)
+      if (!evidence || !concept.runId) return []
+      const candidates = evidence.candidates.flatMap((candidate) => {
+        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return []
+        const record = candidate as Record<string, unknown>
+        if (typeof record.sequence !== "string") return []
+        const generation = record.generation && typeof record.generation === "object" && !Array.isArray(record.generation)
+          ? record.generation as Record<string, unknown>
+          : undefined
+        return [{
+          sequence: record.sequence,
+          generator: typeof generation?.model === "string" ? generation.model : undefined,
+        }]
+      })
+      return [{
+        experimentId: concept.experimentId,
+        trialId: concept.trialId,
+        runId: concept.runId,
+        evaluationId: concept.evaluationId,
+        knowledgeId: concept.id,
+        intent: evidence.trial.intent,
+        programHash: evidence.trial.programHash,
+        pipelineHash: evidence.pipelineHash,
+        generatorPortfolio: [...new Set(candidates.flatMap((candidate) => candidate.generator ? [candidate.generator] : []))],
+        candidateSequences: candidates.map((candidate) => candidate.sequence),
+        modelIds: [...new Set(evidence.modelEvidence
+          .filter((item) => item.status === "completed")
+          .map((item) => item.modelId))],
+        seeds: [...new Set(evidence.modelEvidence.map((item) => item.seed))],
+        score: concept.score,
+        decision: concept.decision,
+        diagnostics: concept.diagnostics,
+        hypothesis: evidence.trial.hypothesis,
+      }]
+    })
     const result = await Research.ingestLiteratureReview(Instance.project.id, input.campaignId, {
       generatedBy: `autofold-literature-review/${input.proposal.childSessionId}`,
       question: input.request.question ?? input.context.campaign.objective,
       trigger: input.context.newRunKnowledge.length ? "run_completed" : "literature_review",
       inputKnowledgeIds: input.context.newRunKnowledge.map((concept) => concept.id),
+      searchObservations,
       ...input.proposal.artifact,
     })
     await Research.publishCampaignKnowledge(Instance.project.id, input.campaignId, Instance.directory)

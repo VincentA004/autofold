@@ -82,8 +82,14 @@ describe("research service", () => {
       programPath: "trials/skill-pinned.py",
       programHash: digest("f"),
       skills: [reference],
+      generators: ["boltzgen-binder"],
+      generatorAllocations: [{ generator: "boltzgen-binder", maximumCandidates: 12, maximumGpuSeconds: 900 }],
     })
     expect(trial.skills).toEqual([reference])
+    expect(trial.generators).toEqual(["boltzgen-binder"])
+    expect(trial.generatorAllocations).toEqual([
+      { generator: "boltzgen-binder", maximumCandidates: 12, maximumGpuSeconds: 900 },
+    ])
   })
 
   test("atomically ingests a bounded literature-agent review", async () => {
@@ -286,6 +292,86 @@ describe("research service", () => {
     } finally {
       await fs.rm(workspace, { recursive: true, force: true })
     }
+  })
+
+  test("atomically reinforces a typed hypothesis and trusted search landscape without upgrading computational evidence to experimental confirmation", async () => {
+    const { service, store, projectId } = fixture()
+    const experiment = await activeExperiment(service, projectId)
+    const trial = await service.createTrial(projectId, experiment.id, {
+      hypothesis: "A cross-model portfolio will retain its ranking across the frozen seeds.",
+      designAdapter: "mock",
+      programPath: "trials/recursive-state.py",
+      programHash: digest("e"),
+    })
+    const run = await service.beginRun(projectId, trial.id, {
+      bundlePath: ".autofold/runs/run/bundle.json",
+      outputPath: ".autofold/runs/run/output",
+    })
+    await service.attachRunJob(projectId, run.id, "compute-one")
+    const completed = await service.completeRun(projectId, run.id, {
+      contractHash: experiment.contractHash,
+      evaluatorHash: experiment.contract.evaluator.sourceHash,
+      valid: true,
+      score: 0.31,
+      diagnostics: { panel_diversity: 0.8 },
+    }, digest("f"))
+
+    const review = await service.ingestLiteratureReview(projectId, experiment.campaignId, {
+      generatedBy: "autofold-literature-review/ses_recursive_state",
+      trigger: "run_completed",
+      inputKnowledgeIds: [completed.knowledge.id],
+      sources: [],
+      claims: [],
+      unresolvedQuestions: ["Physical binding remains experimentally unresolved."],
+      searchObservations: [{
+        experimentId: experiment.id,
+        trialId: trial.id,
+        runId: run.id,
+        evaluationId: completed.evaluation.id,
+        knowledgeId: completed.knowledge.id,
+        intent: "optimize",
+        programHash: trial.programHash,
+        pipelineHash: digest("1"),
+        generatorPortfolio: ["boltzgen-binder", "pxdesign-binder"],
+        candidateSequences: ["ACDEFGHIK"],
+        modelIds: ["boltz2-prediction", "chai1-prediction"],
+        seeds: [41, 42],
+        score: completed.evaluation.score,
+        decision: completed.decision,
+        diagnostics: completed.evaluation.diagnostics,
+        hypothesis: trial.hypothesis,
+      }],
+      hypothesisUpdates: [{
+        category: "biology",
+        statement: "The candidate is a physically confirmed selective binder.",
+        status: "supported",
+        confidence: 0.9,
+        evidenceLevel: "experimentally_confirmed",
+        supportingEvidenceRefs: [completed.knowledge.id],
+        opposingEvidenceRefs: [],
+        prediction: "Independent assays will reproduce selective binding.",
+        falsificationCriterion: "A matched experimental assay fails to detect selective binding.",
+        recommendedExperiment: "Run a matched physical binding and selectivity assay.",
+        limitations: [],
+      }],
+    })
+
+    const state = await store.read(projectId)
+    const observation = Object.values(state.searchObservations)[0]!
+    const hypothesis = Object.values(state.hypotheses)[0]!
+    expect(observation).toMatchObject({
+      knowledgeId: completed.knowledge.id,
+      epistemicLevel: "multi_seed_support",
+      generatorPortfolio: ["boltzgen-binder", "pxdesign-binder"],
+    })
+    expect(hypothesis.evidenceLevel).toBe("multi_seed_support")
+    expect(hypothesis.statement).toBe("The candidate is a computationally supported selective binder.")
+    expect(hypothesis.limitations.join(" ")).toContain("computational evidence cannot establish physical binding")
+    expect(hypothesis.limitations.join(" ")).toContain("trusted service bounded it to computational support")
+    expect(review.cycle.outputs.hypothesisIds).toEqual([hypothesis.id])
+    expect(review.cycle.outputs.searchObservationIds).toEqual([observation.id])
+    expect((await service.campaignResearchState(projectId, experiment.campaignId)).charter.constraints)
+      .toMatchObject({ requireMatchedControlCardinality: true, requireMultiSeedConfirmation: true })
   })
 
   test("compounds immutable literature records into evidence-linked campaign claims", async () => {
@@ -629,6 +715,33 @@ describe("research service", () => {
         programHash: trial.programHash,
       })
 
+      await service.ingestLiteratureReview(projectId, experiment.campaignId, {
+        generatedBy: "autofold-trusted-failure-closeout/v1",
+        trigger: "run_completed",
+        inputKnowledgeIds: [concepts[0]!.id],
+        sources: [],
+        claims: [],
+        unresolvedQuestions: ["Can the repaired execution path complete the frozen evaluator?"],
+        searchObservations: [{
+          experimentId: experiment.id,
+          trialId: trial.id,
+          runId: run.id,
+          knowledgeId: concepts[0]!.id,
+          intent: trial.intent,
+          programHash: trial.programHash,
+          generatorPortfolio: ["boltzgen-binder", "pxdesign-binder"],
+          candidateSequences: [],
+          modelIds: ["boltz2-prediction", "chai1-prediction"],
+          seeds: [41, 42],
+          score: null,
+          decision: "failed",
+          diagnostics: {},
+          hypothesis: trial.hypothesis,
+        }],
+      })
+      const failureObservation = (await service.listSearchObservations(projectId, experiment.campaignId))[0]
+      expect(failureObservation?.epistemicLevel).toBe("model_observation")
+
       const root = path.join(workspace, ".autofold", "campaigns", experiment.campaignId, "knowledge")
       const index = await Bun.file(path.join(root, "index.md")).text()
       const concept = await Bun.file(path.join(root, "concepts", `${concepts[0]?.id}.md`)).text()
@@ -638,6 +751,29 @@ describe("research service", () => {
       expect(frontmatter.evaluation_id).toBeUndefined()
       expect(frontmatter.error).toBe("Worker exited with code 2")
       expect(frontmatter.sources[0].resource).toBe("autofold://runs/run_failure")
+
+      const reopened = await service.reopenRunFinalization(projectId, run.id)
+      expect(reopened).toMatchObject({ id: run.id, status: "running", jobId: "job-failure" })
+      expect(reopened.error).toBeUndefined()
+      expect((await service.getTrialContext(projectId, trial.id)).trial.status).toBe("running")
+      await expect(service.reopenRunFinalization(projectId, run.id)).rejects.toBeInstanceOf(
+        ResearchService.ConflictError,
+      )
+      await service.completeRun(projectId, run.id, {
+        contractHash: experiment.contractHash,
+        evaluatorHash: experiment.contract.evaluator.sourceHash,
+        valid: true,
+        score: 0.25,
+        diagnostics: { recovered: 1 },
+      }, digest("9"), workspace)
+      const recoveredState = await store.read(projectId)
+      expect(recoveredState.knowledge[concepts[0]!.id]).toMatchObject({
+        status: "deprecated",
+        tags: expect.arrayContaining(["recovered", "superseded-by-evaluation"]),
+      })
+      expect(Object.values(recoveredState.knowledge)).toContainEqual(
+        expect.objectContaining({ type: "Research Evaluation", runId: run.id, status: "stable" }),
+      )
     } finally {
       await fs.rm(workspace, { recursive: true, force: true })
     }

@@ -67,6 +67,8 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
         require_string(adapter, "id")
         require_string(adapter, "version")
         require_string(adapter, "sourceHash", "sha256:")
+        if "scoringPipelineHash" in adapter:
+            require_string(adapter, "scoringPipelineHash", "sha256:")
     if value["format"] == "autofold.trial-bundle.v4":
         pipeline = value.get("pipeline")
         if not isinstance(pipeline, dict) or not isinstance(pipeline.get("stages"), list) or not pipeline["stages"]:
@@ -77,6 +79,13 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
         if "protoToolsCommit" in pipeline:
             if require_string(pipeline, "protoToolsCommit") != value["proto"]["toolsCommit"]:
                 raise ProtocolError("Pipeline policy uses another proto-tools commit")
+        authored_diagnostics = pipeline.get("authoredDiagnostics", [])
+        if not isinstance(authored_diagnostics, list) or not all(
+            isinstance(stage, dict) for stage in authored_diagnostics
+        ):
+            raise ProtocolError("Pipeline authoredDiagnostics must be an array of stage objects")
+        if any(stage.get("role") != "diagnostic" for stage in authored_diagnostics):
+            raise ProtocolError("Pipeline authoredDiagnostics may contain only diagnostic stages")
         generation = pipeline.get("generation")
         if generation is not None:
             if not isinstance(generation, dict) or generation.get("mode") != "proto_program":
@@ -130,6 +139,8 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(stage, dict):
                 raise ProtocolError("Pipeline stages must be objects")
             stage_id = require_string(stage, "id")
+            if stage.get("role", "scoring") not in {"scoring", "diagnostic"}:
+                raise ProtocolError("Pipeline stage role must be scoring or diagnostic")
             if stage_id in stage_ids:
                 raise ProtocolError("Pipeline stage IDs must be unique")
             stage_ids.add(stage_id)
@@ -218,6 +229,31 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
         for stage in pipeline["stages"]:
             if any(positions[dependency] >= positions[stage["id"]] for dependency in dependencies[stage["id"]]):
                 raise ProtocolError("Frozen pipeline stages must be topologically ordered")
+        scoring_hash = adapter.get("scoringPipelineHash")
+        if scoring_hash:
+            scoring = [stage for stage in pipeline["stages"] if stage.get("role", "scoring") == "scoring"]
+            if not scoring:
+                raise ProtocolError("Frozen experiment has no scoring stages")
+            scoring_ids = {stage["id"] for stage in scoring}
+            for stage in scoring:
+                if (
+                    not stage["required"]
+                    or stage["allowSkip"]
+                    or stage.get("condition") is not None
+                    or stage.get("candidateRouting") is not None
+                ):
+                    raise ProtocolError("Scoring stages must evaluate every submitted candidate")
+                if any(dependency not in scoring_ids for dependency in dependencies[stage["id"]]):
+                    raise ProtocolError("Scoring stages cannot depend on diagnostic stages")
+            scoring_policy = {
+                "format": "autofold.scoring-pipeline.v1",
+                "protoToolsCommit": pipeline.get("protoToolsCommit"),
+                "stages": scoring,
+            }
+            scoring_canonical = json.dumps(scoring_policy, sort_keys=True, separators=(",", ":"))
+            observed_scoring_hash = "sha256:" + hashlib.sha256(scoring_canonical.encode("utf-8")).hexdigest()
+            if observed_scoring_hash != scoring_hash:
+                raise ProtocolError("Scoring pipeline hash does not match the frozen experiment")
         require_string(value, "pipelineHash", "sha256:")
         canonical = json.dumps(pipeline, sort_keys=True, separators=(",", ":"))
         pipeline_hash = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()

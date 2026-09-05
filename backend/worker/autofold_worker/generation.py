@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .proto_portfolio import ProtoPortfolioProgram, _lane_generator
+
 
 def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -71,13 +73,38 @@ def _generator_inventory(program: Any, bundle: dict[str, Any]) -> dict[str, dict
     return inventory
 
 
-def _sequence_inventory(program: Any) -> dict[str, list[Any]]:
-    inventory: dict[str, list[Any]] = {}
-    for construct in getattr(program, "constructs", []):
-        for segment in getattr(construct, "segments", []):
-            for sequence in getattr(segment, "result_sequences", []):
-                inventory.setdefault(str(getattr(sequence, "sequence", sequence)), []).append(sequence)
+def _sequence_inventory(program: Any) -> dict[str, list[tuple[Any, str | None]]]:
+    """Index generated sequence objects with a trusted portfolio-lane origin.
+
+    Native Proto metadata remains useful generator diagnostics, but it is not
+    the authority for lane identity. A composite portfolio owns independent
+    Program objects, so the runtime can derive exactly one generator from each
+    lane before flattening their constructs.
+    """
+    inventory: dict[str, list[tuple[Any, str | None]]] = {}
+    lanes = (
+        [(lane.program, _lane_generator(lane.program)) for lane in program.lanes]
+        if isinstance(program, ProtoPortfolioProgram)
+        else [(program, None)]
+    )
+    for lane, generator in lanes:
+        for construct in getattr(lane, "constructs", []):
+            for segment in getattr(construct, "segments", []):
+                for sequence in getattr(segment, "result_sequences", []):
+                    key = str(getattr(sequence, "sequence", sequence))
+                    inventory.setdefault(key, []).append((sequence, generator))
     return inventory
+
+
+def _sampling_inventory(program: Any) -> list[dict[str, Any]]:
+    """Expose the agent-authored request and trusted effective lane breadth."""
+    sampling: dict[str, dict[str, Any]] = {}
+    for optimizer in getattr(program, "optimizers", []):
+        for generator in getattr(optimizer, "generators", []):
+            observed = getattr(generator, "_autofold_sampling", None)
+            if isinstance(observed, dict) and isinstance(observed.get("generator"), str):
+                sampling[observed["generator"]] = _json_safe(observed)
+    return [sampling[key] for key in sorted(sampling)]
 
 
 def _structure_cif(sequence: Any) -> str | None:
@@ -129,12 +156,13 @@ def capture(
 
     for candidate in candidate_set["candidates"]:
         matches = sequences.get(candidate["sequence"], [])
-        observed = next(
-            (item for item in matches if getattr(item, "_generator_metadata", {})),
+        matched = next(
+            (item for item in matches if getattr(item[0], "_generator_metadata", {})),
             matches[0] if matches else None,
         )
+        observed, trusted_generator = matched if matched is not None else (None, None)
         metadata = _json_safe(getattr(observed, "_generator_metadata", {})) if observed is not None else {}
-        generator_ids = sorted(key for key in metadata if key in generators)
+        generator_ids = [trusted_generator] if trusted_generator in generators else sorted(key for key in metadata if key in generators)
         if not generator_ids:
             generator_ids = sorted(generators)
         if allocations:
@@ -206,6 +234,49 @@ def capture(
             }
         )
 
+    realized_identity = sorted(
+        [
+            {
+                "generator": entry["modelId"],
+                "seed": entry["seed"],
+                "sequence": next(
+                    candidate["sequence"]
+                    for candidate in candidate_set["candidates"]
+                    if candidate["id"] == entry["candidateId"]
+                ),
+            }
+            for entry in entries
+        ],
+        key=lambda item: (item["generator"], item["seed"], item["sequence"]),
+    )
+    candidate_set_hash = _digest_text(_canonical(realized_identity))
+    observed_generator_seeds: list[dict[str, Any]] = []
+    controls: set[str] = set()
+    for candidate in candidate_set["candidates"]:
+        # Generation metadata is attached to the per-candidate artifact rather
+        # than candidates.json. Read it from the same observed Proto sequence.
+        matches = sequences.get(candidate["sequence"], [])
+        matched = next((item for item in matches if getattr(item[0], "_generator_metadata", {})), None)
+        observed = matched[0] if matched is not None else None
+        metadata = _json_safe(getattr(observed, "_generator_metadata", {})) if observed is not None else {}
+        for generator, details in metadata.items():
+            if not isinstance(details, dict) or not isinstance(details.get("seed"), int):
+                continue
+            seed_control = details.get("seedControl")
+            control = "upstream_unavailable" if seed_control == "upstream_cli_unavailable" else "controlled"
+            controls.add(control)
+            observed_generator_seeds.append({"generator": generator, "seed": details["seed"], "control": control})
+    if not generators:
+        stochasticity = "deterministic"
+    elif controls == {"controlled"}:
+        stochasticity = "seeded"
+    elif controls == {"upstream_unavailable"}:
+        stochasticity = "upstream_uncontrolled"
+    elif len(controls) > 1:
+        stochasticity = "mixed"
+    else:
+        stochasticity = "unknown"
+
     _write_json(
         output / "generation-runs" / "index.json",
         {
@@ -213,6 +284,25 @@ def capture(
             "runId": bundle["runId"],
             "programHash": bundle["programHash"],
             "runtime": {"wallSeconds": wall_seconds},
+            **(
+                {
+                    "replicate": {
+                        "id": bundle["generationReplicateId"],
+                        "requestedSeeds": bundle["seeds"],
+                        "realizedCandidateSetHash": candidate_set_hash,
+                        "stochasticity": stochasticity,
+                        "observedGeneratorSeeds": sorted(
+                            observed_generator_seeds,
+                            key=lambda item: (item["generator"], item["seed"], item["control"]),
+                        ),
+                    }
+                }
+                if bundle.get("generationReplicateId")
+                else {}
+            ),
+            "sampling": _sampling_inventory(program),
+            "portfolioFailures": _json_safe(getattr(program, "lane_failures", [])),
+            "generatorDiagnostics": _json_safe(getattr(program, "_autofold_generator_diagnostics", [])),
             "entries": entries,
         },
     )

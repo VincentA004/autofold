@@ -184,6 +184,10 @@ describe("durable research jobs", () => {
     const late = await jobs.succeed(projectId, queued.id, claimed!.leaseId!, { cycleId: "kcy_too_late" })
     expect(late.status).toBe("cancelled")
     expect(late.result).toBeUndefined()
+
+    const resumed = await jobs.retry(projectId, queued.id)
+    expect(resumed).toMatchObject({ status: "queued", attempts: 0 })
+    expect(resumed.cancelRequestedAt).toBeUndefined()
   })
 
   test("preserves immutable phase checkpoints across lease recovery", async () => {
@@ -211,7 +215,8 @@ describe("durable research jobs", () => {
       jobs.checkpoint(projectId, queued.id, claimed!.leaseId!, checkpoint.phase, { runId: "run_other" }),
     ).rejects.toBeInstanceOf(ResearchJobService.ConflictError)
     advance(1_001)
-    await jobs.claim(projectId, 1_000)
+    const resumed = await jobs.claim(projectId, 1_000)
+    expect(resumed).toMatchObject({ id: queued.id, status: "running", attempts: 1, leaseId: "lease-2" })
     expect((await jobs.get(projectId, queued.id)).checkpoints[checkpoint.phase]).toEqual(checkpoint)
   })
 })

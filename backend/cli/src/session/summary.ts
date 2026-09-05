@@ -166,8 +166,7 @@ export namespace SessionSummary {
         tools: {},
         model: agent.model
           ? await Provider.getModel(agent.model.providerID, agent.model.modelID)
-          : ((await Provider.getSmallModel(userMsg.model.providerID)) ??
-            (await Provider.getModel(userMsg.model.providerID, userMsg.model.modelID))),
+          : await summaryModel(userMsg),
         small: true,
         messages: [
           {
@@ -195,6 +194,28 @@ export namespace SessionSummary {
         }
       })
     }
+  }
+
+  /**
+   * Autofold's model selection is part of its reproducible control-plane
+   * provenance. Auxiliary message-title generation must not escape that model
+   * through the provider's generic small-model picker (OpenRouter currently
+   * prefers Claude Haiku there). Reuse the exact recorded Autofold model;
+   * preserve the normal inexpensive small-model behavior for interactive
+   * agents.
+   */
+  export async function summaryModel(user: Pick<MessageV2.User, "agent" | "model">) {
+    if (summaryUsesRecordedModel(user.agent)) {
+      return Provider.getModel(user.model.providerID, user.model.modelID)
+    }
+    return (
+      (await Provider.getSmallModel(user.model.providerID)) ??
+      (await Provider.getModel(user.model.providerID, user.model.modelID))
+    )
+  }
+
+  export function summaryUsesRecordedModel(agent: string): boolean {
+    return agent.startsWith("autofold-")
   }
 
   async function updateUserMessage(message: MessageV2.User, editor: (draft: MessageV2.User) => void) {

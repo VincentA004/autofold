@@ -6,6 +6,32 @@ describe("research remote compute", () => {
     expect(ResearchRemoteCompute.profile("run_abc", true, {})).toEqual({ kind: "local" })
   })
 
+  test("reports local generator readiness before a scientist allocates lanes", async () => {
+    const readiness = await ResearchRemoteCompute.probe(
+      { kind: "local" },
+      ["boltzgen-binder", "pxdesign-binder", "rfdiffusion-mpnn-binder"],
+      {
+        env: {
+          AUTOFOLD_BOLTZGEN_EXECUTABLE: "/bin/sh",
+          AUTOFOLD_BOLTZGEN_CACHE: "/tmp",
+          AUTOFOLD_PXDESIGN_EXECUTABLE: "/definitely/missing/pxdesign",
+        },
+      },
+    )
+    expect(readiness.compute).toBe("local")
+    expect(readiness.generators).toEqual([
+      { generator: "boltzgen-binder", configured: true, ready: true },
+      {
+        generator: "pxdesign-binder",
+        configured: false,
+        ready: false,
+        reason: "Local PXDesign executable was not found",
+      },
+      { generator: "rfdiffusion-mpnn-binder", configured: true, ready: true },
+    ])
+    expect(readiness.ready).toBe(false)
+  })
+
   test("builds a bounded SSH profile", () => {
     const profile = ResearchRemoteCompute.profile("run_abc", true, {
       AUTOFOLD_RESEARCH_COMPUTE: "ssh:workstation_4090",
@@ -36,6 +62,64 @@ describe("research remote compute", () => {
       boltzgenCache: "/home/vincent/boltzgen/cache",
       pxdesignExecutable: "/home/vincent/pxdesign/bin/pxdesign",
     })
+  })
+
+  test("preserves SSH alias resolution when the configured endpoint repeats the alias", () => {
+    expect(ResearchRemoteCompute.sshAddressOptions("workstation_4090", "workstation_4090")).toEqual([])
+    expect(ResearchRemoteCompute.sshAddressOptions("workstation_4090", "100.88.23.66")).toEqual([
+      "-o",
+      "HostName=100.88.23.66",
+    ])
+  })
+
+  test("deduplicates remote readiness to the configured generator set", () => {
+    const profile = ResearchRemoteCompute.profile("catalog_probe", true, {
+      AUTOFOLD_RESEARCH_COMPUTE: "ssh:workstation_4090",
+      AUTOFOLD_RESEARCH_REMOTE_ROOT: "/srv/autofold",
+      AUTOFOLD_RESEARCH_REMOTE_PYTHON: "/srv/venv/bin/python",
+      AUTOFOLD_RESEARCH_REMOTE_PROTO_ROOT: "/srv/proto",
+      AUTOFOLD_RESEARCH_REMOTE_PROTO_HOME: "/srv/proto-home",
+      AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_EXECUTABLE: "/srv/boltzgen/bin/boltzgen",
+      AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_CACHE: "/srv/boltzgen/cache",
+    })
+    expect(ResearchRemoteCompute.configuredGenerators(profile, [
+      { key: "boltzgen-binder" },
+      { key: "pxdesign-binder" },
+      { key: "rfdiffusion-mpnn-binder" },
+    ])).toEqual([
+      { key: "boltzgen-binder" },
+      { key: "rfdiffusion-mpnn-binder" },
+    ])
+  })
+
+  test("isolates remote readiness failures to the affected generator lane", async () => {
+    const profile = ResearchRemoteCompute.profile("catalog_probe", true, {
+      AUTOFOLD_RESEARCH_COMPUTE: "ssh:workstation_4090",
+      AUTOFOLD_RESEARCH_REMOTE_ROOT: "/srv/autofold",
+      AUTOFOLD_RESEARCH_REMOTE_PYTHON: "/srv/venv/bin/python",
+      AUTOFOLD_RESEARCH_REMOTE_PROTO_ROOT: "/srv/proto",
+      AUTOFOLD_RESEARCH_REMOTE_PROTO_HOME: "/srv/proto-home",
+      AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_EXECUTABLE: "/srv/boltzgen/bin/boltzgen",
+      AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_CACHE: "/srv/boltzgen/cache",
+      AUTOFOLD_RESEARCH_REMOTE_PXDESIGN_EXECUTABLE: "/srv/pxdesign/bin/pxdesign",
+    })
+    const readiness = await ResearchRemoteCompute.probe(
+      profile,
+      ["boltzgen-binder", "pxdesign-binder", "rfdiffusion-mpnn-binder"],
+      {
+        assertReady: async (_profile, pipeline) => {
+          if (pipeline?.generation?.generators[0]?.id === "pxdesign-binder") {
+            throw new Error("PXDesign cache missing")
+          }
+        },
+      },
+    )
+    expect(readiness.ready).toBe(false)
+    expect(readiness.generators).toEqual([
+      { generator: "boltzgen-binder", configured: true, ready: true },
+      { generator: "pxdesign-binder", configured: true, ready: false, reason: "PXDesign cache missing" },
+      { generator: "rfdiffusion-mpnn-binder", configured: true, ready: true },
+    ])
   })
 
   test("rejects shell-shaped SSH configuration", () => {
@@ -90,6 +174,19 @@ describe("research remote compute", () => {
     expect(launch.command).toContain("AUTOFOLD_PXDESIGN_EXECUTABLE='/srv/pxdesign/bin/pxdesign'")
     expect(launch.command).toContain("'/srv/venv/bin/python'")
     expect(launch.command).not.toContain("/local/")
+  })
+
+  test("rejects a selected remote generator that has no execution-plane configuration", async () => {
+    const profile = ResearchRemoteCompute.profile("run_abc", true, {
+      AUTOFOLD_RESEARCH_COMPUTE: "ssh:workstation_4090",
+      AUTOFOLD_RESEARCH_REMOTE_ROOT: "/srv/autofold",
+      AUTOFOLD_RESEARCH_REMOTE_PYTHON: "/srv/venv/bin/python",
+      AUTOFOLD_RESEARCH_REMOTE_PROTO_ROOT: "/srv/proto",
+      AUTOFOLD_RESEARCH_REMOTE_PROTO_HOME: "/srv/proto-home",
+    })
+    await expect(ResearchRemoteCompute.assertReady(profile, {
+      generation: { generators: [{ id: "pxdesign-binder" }] },
+    })).rejects.toThrow("does not configure selected generators: pxdesign-binder")
   })
 
   test("requires gated Protenix v2 weights before a remote launch", () => {

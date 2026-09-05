@@ -36,6 +36,27 @@ export namespace ResearchSearchPolicy {
   })
   export type GeneratorOutcome = z.infer<typeof GeneratorOutcome>
 
+  export const LandscapeArm = z.object({
+    generator: z.string().trim().min(1),
+    attempts: z.number().int().nonnegative(),
+    successes: z.number().int().nonnegative(),
+    failures: z.number().int().nonnegative(),
+    validResults: z.number().int().nonnegative(),
+    bestScore: z.number().finite().optional(),
+    meanScore: z.number().finite().optional(),
+    explorationBonus: z.number().finite().min(0),
+    failureRisk: z.number().finite().min(0).max(1),
+    acquisitionScore: z.number().finite(),
+  })
+  export type LandscapeArm = z.infer<typeof LandscapeArm>
+
+  export const Landscape = z.object({
+    direction: z.enum(["minimize", "maximize"]),
+    totalAttempts: z.number().int().nonnegative(),
+    arms: z.array(LandscapeArm),
+  })
+  export type Landscape = z.infer<typeof Landscape>
+
   export const Allocation = z.object({
     generator: z.string().trim().min(1),
     maximumCandidates: z.number().int().positive(),
@@ -46,8 +67,11 @@ export namespace ResearchSearchPolicy {
   export const Policy = z.object({
     move: Move,
     rationale: z.string().trim().min(1).max(4_000),
-    preferredGenerators: z.array(z.string().trim().min(1)).min(1).max(8),
-    allocations: z.array(Allocation).min(1).max(8),
+    // Generator-free negative controls may still describe the workflow
+    // ablation being tested. Their canonical allocation is the empty set;
+    // optimize moves are checked by the orchestration compiler below.
+    preferredGenerators: z.array(z.string().trim().min(1)).max(8).default([]),
+    allocations: z.array(Allocation).max(8).default([]),
     targetStage: z.string().trim().min(1).optional(),
     workflowVariant: WorkflowVariant.default("full_consensus"),
     generatorStrategy: GeneratorStrategy.default("incumbent_family"),
@@ -81,6 +105,51 @@ export namespace ResearchSearchPolicy {
       maximumCandidates: baseCandidates + (index < remainderCandidates ? 1 : 0),
       maximumGpuSeconds: baseGpuSeconds,
     }))
+  }
+
+  export function landscape(input: {
+    availableGenerators: string[]
+    direction?: "minimize" | "maximize"
+    outcomes?: GeneratorOutcome[]
+  }): Landscape {
+    const direction = input.direction ?? "minimize"
+    const outcomes = input.outcomes ?? []
+    const available = [...new Set(input.availableGenerators)]
+    const raw = available.map((generator) => {
+      const arm = outcomes.filter((outcome) => outcome.generator === generator)
+      const scores = arm.flatMap((outcome) => outcome.status === "succeeded" && outcome.valid && outcome.score != null
+        ? [outcome.score]
+        : [])
+      const failures = arm.filter((outcome) => outcome.status === "failed").length
+      return {
+        generator,
+        attempts: arm.length,
+        successes: arm.length - failures,
+        failures,
+        validResults: scores.length,
+        bestScore: scores.length ? direction === "minimize" ? Math.min(...scores) : Math.max(...scores) : undefined,
+        meanScore: scores.length ? scores.reduce((sum, score) => sum + score, 0) / scores.length : undefined,
+        explorationBonus: 1 / Math.sqrt(arm.length + 1),
+        failureRisk: arm.length ? failures / arm.length : 0,
+      }
+    })
+    const rankedObserved = raw
+      .filter((arm) => arm.bestScore !== undefined)
+      .toSorted((left, right) => direction === "minimize"
+        ? left.bestScore! - right.bestScore!
+        : right.bestScore! - left.bestScore!)
+    const quality = new Map(rankedObserved.map((arm, index) => [
+      arm.generator,
+      rankedObserved.length === 1 ? 1 : 1 - index / (rankedObserved.length - 1),
+    ]))
+    return Landscape.parse({
+      direction,
+      totalAttempts: outcomes.length,
+      arms: raw.map((arm) => ({
+        ...arm,
+        acquisitionScore: arm.explorationBonus + (quality.get(arm.generator) ?? 0) * 0.35 - arm.failureRisk * 0.5,
+      })).toSorted((left, right) => right.acquisitionScore - left.acquisitionScore),
+    })
   }
 
   export function derive(input: {
@@ -135,14 +204,7 @@ export namespace ResearchSearchPolicy {
     let targetStage: string | undefined
     let workflowVariant: WorkflowVariant
     let generatorStrategy: GeneratorStrategy
-    if (input.predictorDisagreement) {
-      move = "investigate_predictor_disagreement"
-      selected = [empiricalBest]
-      targetStage = "independent"
-      workflowVariant = "disagreement_gated_resolution"
-      generatorStrategy = "interface_hotspot"
-      rationale = `Use the best-supported ${empiricalBest} arm while isolating the largest independent-predictor disagreement.`
-    } else if (unexplored.length) {
+    if (unexplored.length) {
       move = "explore_generator"
       selected = unexplored.slice(0, Math.min(unexplored.length, input.candidateBudget))
       workflowVariant = "full_consensus"
@@ -150,6 +212,13 @@ export namespace ResearchSearchPolicy {
       rationale = selected.length === 1
         ? `Explore the untested ${selected[0]} generator under an explicit frozen allocation.`
         : `Compare untested generator arms ${selected.join(", ")} in one frozen candidate portfolio.`
+    } else if (input.predictorDisagreement) {
+      move = "investigate_predictor_disagreement"
+      selected = [empiricalBest]
+      targetStage = "independent"
+      workflowVariant = "disagreement_gated_resolution"
+      generatorStrategy = "interface_hotspot"
+      rationale = `Use the best-supported ${empiricalBest} arm while isolating the largest independent-predictor disagreement.`
     } else if (available.length > 1 && input.candidateBudget > 1 && input.iteration % 3 === 0) {
       move = "reallocate_compute"
       selected = ranked.slice(0, Math.min(available.length, input.candidateBudget))

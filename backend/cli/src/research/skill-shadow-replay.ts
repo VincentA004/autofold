@@ -20,7 +20,10 @@ export namespace SkillShadowReplay {
   const LoadedSkill = ResearchSkills.DomainKnowledge.extend({ versionId: z.string().startsWith("skv_") })
   export const Prepared = z.object({
     capturedAt: z.string().datetime(),
-    context: ResearchAutoresearch.Context,
+    // Autoresearch and shadow replay call one another at runtime. Resolve these
+    // schemas lazily so module initialization order cannot expose a partially
+    // initialized ResearchAutoresearch namespace.
+    context: z.lazy(() => ResearchAutoresearch.Context),
     parent: LoadedSkill,
     candidate: LoadedSkill,
   })
@@ -31,8 +34,8 @@ export namespace SkillShadowReplay {
 
   export const Pair = z.object({
     repetition: z.number().int().positive(),
-    parent: ResearchAutoresearch.Iteration,
-    candidate: ResearchAutoresearch.Iteration,
+    parent: z.lazy(() => ResearchAutoresearch.Iteration),
+    candidate: z.lazy(() => ResearchAutoresearch.Iteration),
   })
   export const Result = z.object({
     campaignId: Input.shape.campaignId,
@@ -81,6 +84,10 @@ export namespace SkillShadowReplay {
     onFinal?(value: ResearchDomain.SkillVersion): Promise<void>
   }
 
+  export function armWorkspaceKey(jobId: string, repetition: number, arm: Arm): string {
+    return `${jobId}-r${repetition}-${arm}`
+  }
+
   export async function run(
     raw: Input,
     lifecycle: Lifecycle,
@@ -123,7 +130,11 @@ export namespace SkillShadowReplay {
       throw new Error("Shadow replay is inconclusive because neither arm produced a valid locked evaluation")
     }
     const replayInput = CampaignSkills.ReplayInput.parse({
-      benchmarkId: `shadow:${prepared.context.experiment.contractHash}:${request.candidateVersionId}:n${request.repetitions}`,
+      // v2 denotes independent mutable scientist workspaces per paired arm.
+      // Keep it in the immutable replay identity so results from the former
+      // sequential/shared-workspace harness cannot be mistaken for this A/B
+      // protocol in later campaign or library decisions.
+      benchmarkId: `shadow-v2:${prepared.context.experiment.contractHash}:${request.candidateVersionId}:n${request.repetitions}`,
       sameBudget: true,
       baseline,
       candidate,
@@ -191,6 +202,13 @@ export namespace SkillShadowReplay {
         iterations: input.resume.iteration ? { 1: input.resume.iteration } : {},
         originJobId: input.jobId,
         originPhasePrefix: `shadow:${input.repetition}:${input.arm}:`,
+        // A replay pair shares one frozen scientific context, but each arm
+        // must start from an independent mutable trial, notebook, and agent
+        // session. Otherwise the candidate arm inherits the parent arm's
+        // edits/conversation and the skill comparison is sequential adaptation
+        // rather than a paired benchmark.
+        workspaceKey: armWorkspaceKey(input.jobId, input.repetition, input.arm),
+        isolatedWorkspace: true,
         skillRefs: [ResearchSkills.reference(skill)],
         skillKnowledge: [skill],
         frozenContext: input.prepared.context,

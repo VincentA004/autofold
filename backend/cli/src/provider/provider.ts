@@ -40,6 +40,7 @@ import { createPerplexity } from "@ai-sdk/perplexity"
 import { createVercel } from "@ai-sdk/vercel"
 import { createGitLab } from "@gitlab/gitlab-ai-provider"
 import { ProviderTransform } from "./transform"
+import { ResearchModel } from "@/research/model"
 
 export namespace Provider {
   const log = Log.create({ service: "provider" })
@@ -1595,6 +1596,18 @@ export namespace Provider {
             provider.models[wlid] = _syntheticOpenRouterModel(wlid)
           }
         }
+      }
+
+      // The research model can be newer than the bundled models.dev snapshot.
+      // Keep the explicitly pinned OpenRouter route dispatchable without
+      // widening Autofold to another model or trusting a stale catalog.
+      if (
+        providerID === ResearchModel.DEFAULT.providerID &&
+        !(ResearchModel.DEFAULT.modelID in provider.models)
+      ) {
+        provider.models[ResearchModel.DEFAULT.modelID] = _syntheticOpenRouterModel(
+          ResearchModel.DEFAULT.modelID,
+        )
       }
 
       if (Object.keys(provider.models).length === 0) {

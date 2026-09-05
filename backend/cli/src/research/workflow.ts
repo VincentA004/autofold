@@ -6,15 +6,56 @@ import { ExecutionProtocol } from "./execution-protocol"
 
 const stageId = z.string().regex(/^[a-z][a-z0-9_-]*$/)
 const toolKey = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)
+const routingMetric = z.enum([
+  "confidence_score",
+  "protein_iptm",
+  "iptm",
+  "ptm",
+  "complex_plddt",
+  "avg_plddt",
+  "avg_pae",
+])
+const implicitRemoteMsaTools = new Set([
+  "boltz2-prediction",
+  "chai1-prediction",
+  "protenix-prediction",
+])
 
 export namespace ResearchWorkflow {
+  export const ProgramGeneration = z.object({
+    generators: z.array(toolKey).min(1).max(8),
+    allocations: z.array(z.object({
+      generator: toolKey,
+      maximumCandidates: z.number().int().positive(),
+      maximumGpuSeconds: z.number().int().positive(),
+    })).min(1).max(8),
+    maximumCandidates: z.number().int().positive(),
+    maximumGpuSeconds: z.number().int().positive(),
+  }).superRefine((generation, context) => {
+    const declared = new Set(generation.generators)
+    const allocated = generation.allocations.map((item) => item.generator)
+    if (declared.size !== generation.generators.length || new Set(allocated).size !== allocated.length) {
+      context.addIssue({ code: "custom", path: ["generators"], message: "Composite generator lanes must be unique" })
+    }
+    if (allocated.length !== declared.size || allocated.some((generator) => !declared.has(generator))) {
+      context.addIssue({ code: "custom", path: ["allocations"], message: "Every composite lane requires one allocation" })
+    }
+    if (generation.allocations.reduce((total, item) => total + item.maximumCandidates, 0) !== generation.maximumCandidates) {
+      context.addIssue({ code: "custom", path: ["maximumCandidates"], message: "Composite candidate allocations must equal the total" })
+    }
+    if (generation.allocations.reduce((total, item) => total + item.maximumGpuSeconds, 0) !== generation.maximumGpuSeconds) {
+      context.addIssue({ code: "custom", path: ["maximumGpuSeconds"], message: "Composite GPU allocations must equal the total" })
+    }
+  })
+  export type ProgramGeneration = z.infer<typeof ProgramGeneration>
+
   export const Condition = z.object({
     source: stageId,
     metric: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
     operator: z.enum(["lt", "lte", "gt", "gte"]),
     value: z.number().finite(),
   })
-  export const CandidateRouting = ExecutionProtocol.CandidateRouting
+  export const CandidateRouting = ExecutionProtocol.CandidateRouting.extend({ metric: routingMetric })
 
   export const Plan = z
     .object({
@@ -35,6 +76,7 @@ export namespace ResearchWorkflow {
         .array(
           z.object({
             id: stageId,
+            role: z.enum(["scoring", "diagnostic"]).optional(),
             capability: z.string().trim().min(1),
             tools: z.array(toolKey).min(1).max(8),
             configs: z.record(toolKey, z.record(z.string(), z.unknown())).default({}),
@@ -175,17 +217,63 @@ export namespace ResearchWorkflow {
   })
   export type Generator = z.infer<typeof Generator>
 
+  export const AuthoredTrial = z.object({
+    generation: ProgramGeneration.nullable().optional(),
+    diagnostics: z.array(z.unknown()).max(64).default([]),
+    declaration: z.object({
+      intent: z.enum(["optimize", "calibrate", "negative_control", "shadow_replay"]),
+      calibrationClass: z.enum(["known_positive", "known_negative", "neutral"]).optional(),
+      replicateOfTrialId: z.string().startsWith("trl_").optional(),
+    }),
+    hypothesis: z.string().trim().min(1).max(20_000),
+  })
+  export type AuthoredTrial = z.infer<typeof AuthoredTrial>
+
   export interface CompileInput {
     plan: z.input<typeof Plan>
     tools: Tool[]
     generators?: Generator[]
     contract: {
       budget: ResearchDomain.ExperimentContract["budget"]
-      evaluator: Pick<ResearchDomain.ExperimentContract["evaluator"], "submissionSize">
+      evaluator: Pick<ResearchDomain.ExperimentContract["evaluator"], "submissionSize" | "evidenceAdapter">
     }
     protoToolsCommit: string
     protoLanguageCommit: string
     allowedCapabilities?: string[]
+    bindSource?: boolean
+  }
+
+  export function fromComposite(input: {
+    id?: string
+    generation: ProgramGeneration
+    diagnostics?: unknown[]
+    contract: CompileInput["contract"] & { budget: ResearchDomain.ExperimentContract["budget"] }
+  }): Plan {
+    const generation = ProgramGeneration.parse(input.generation)
+    const scoring = input.contract.evaluator.evidenceAdapter?.scoringPipeline
+    return Plan.parse({
+      format: "autofold.proto-workflow.v1",
+      id: input.id ?? "direct-proto-composite",
+      maximumGpuSeconds: input.contract.budget.gpuHours * 3_600,
+      generation,
+      stages: [
+        ...(input.diagnostics ?? []).map((stage) => ({
+          ...(stage as Record<string, unknown>),
+          role: "diagnostic" as const,
+        })),
+        ...(scoring?.stages.map((stage) => ({
+        id: stage.id,
+        role: "scoring" as const,
+        capability: "structure_prediction",
+        tools: stage.models.map((model) => model.toolKey ?? model.id),
+        configs: Object.fromEntries(stage.models.map((model) => [model.toolKey ?? model.id, model.config ?? {}])),
+        dependsOn: stage.dependsOn,
+        maximumCandidates: stage.budget?.maximumCandidates,
+        maximumGpuSeconds: stage.budget?.maximumGpuSeconds,
+        optional: false,
+        })) ?? []),
+      ],
+    })
   }
 
   export function compile(raw: CompileInput): ExecutionProtocol.PipelinePolicy {
@@ -260,6 +348,14 @@ export namespace ResearchWorkflow {
       if (selected.length === 0 && !stage.optional) {
         throw new Error(`Workflow stage ${stage.id} has no available Proto tool`)
       }
+      for (const tool of selected) {
+        if (implicitRemoteMsaTools.has(tool.key) && stage.configs[tool.key]?.use_msa !== false) {
+          throw new Error(
+            `Proto tool ${tool.key} must set use_msa=false until the workflow supplies a frozen MSA artifact; ` +
+            "implicit remote MMseqs2 searches are mutable, unbounded external evidence",
+          )
+        }
+      }
       if (stage.maximumCandidates && stage.maximumCandidates > raw.contract.budget.maximumCandidates) {
         throw new Error(
           `Workflow stage ${stage.id} requests ${stage.maximumCandidates} candidates; experiment permits ${raw.contract.budget.maximumCandidates}`,
@@ -283,6 +379,7 @@ export namespace ResearchWorkflow {
       ]
       return {
         id: stage.id,
+        role: stage.role ?? "scoring",
         models: selected.map((tool) => ({
           id: tool.key,
           toolKey: tool.key,
@@ -304,12 +401,61 @@ export namespace ResearchWorkflow {
     if (stages.some((stage) => stage.models.length === 0)) {
       throw new Error("Optional stages with no available tools must be removed before freezing")
     }
-    return ExecutionProtocol.PipelinePolicy.parse({
+    const pipeline = ExecutionProtocol.PipelinePolicy.parse({
       id: plan.id,
-      sourceHash: hash(plan),
+      ...(raw.bindSource === false ? {} : { sourceHash: hash(plan) }),
       protoToolsCommit: raw.protoToolsCommit,
       generation,
+      authoredDiagnostics: plan.stages
+        .filter((stage) => stage.role === "diagnostic")
+        .map((stage) => ({
+          id: stage.id,
+          role: "diagnostic",
+          capability: stage.capability,
+          tools: stage.tools,
+          configs: stage.configs,
+          selection: stage.selection,
+          dependsOn: stage.dependsOn,
+          ...(stage.condition ? { condition: stage.condition } : {}),
+          ...(stage.candidateRouting ? { candidateRouting: stage.candidateRouting } : {}),
+          ...(stage.maximumCandidates ? { maximumCandidates: stage.maximumCandidates } : {}),
+          ...(stage.maximumGpuSeconds ? { maximumGpuSeconds: stage.maximumGpuSeconds } : {}),
+          optional: stage.optional,
+        })),
       stages,
+    })
+    const frozenScoringHash = raw.contract.evaluator.evidenceAdapter?.scoringPipelineHash
+    if (frozenScoringHash) {
+      const scoringIds = new Set(pipeline.stages.filter((stage) => stage.role === "scoring").map((stage) => stage.id))
+      if (scoringIds.size === 0) throw new Error("Frozen experiments require at least one scoring stage")
+      for (const stage of pipeline.stages.filter((item) => item.role === "scoring")) {
+        if (!stage.required || stage.allowSkip || stage.condition || stage.candidateRouting) {
+          throw new Error(
+            `Scoring stage ${stage.id} must evaluate every submitted candidate without routing, conditions, or optional skips`,
+          )
+        }
+        if (stage.dependsOn.some((dependency) => !scoringIds.has(dependency))) {
+          throw new Error(`Scoring stage ${stage.id} cannot depend on an agent-mutable diagnostic stage`)
+        }
+      }
+      const observed = scoringPipelineHash(pipeline)
+      if (observed !== frozenScoringHash) {
+        throw new Error(`Authored scoring pipeline changed: expected ${frozenScoringHash}, received ${observed}`)
+      }
+    }
+    return pipeline
+  }
+
+  export function scoringPipelineHash(raw: ExecutionProtocol.PipelinePolicy): string {
+    return ExecutionProtocol.hashScoringPipeline(scoringPipeline(raw))
+  }
+
+  export function scoringPipeline(raw: ExecutionProtocol.PipelinePolicy): ExecutionProtocol.ScoringPipeline {
+    const pipeline = ExecutionProtocol.PipelinePolicy.parse(raw)
+    return ExecutionProtocol.ScoringPipeline.parse({
+      format: "autofold.scoring-pipeline.v1",
+      protoToolsCommit: pipeline.protoToolsCommit,
+      stages: pipeline.stages.filter((stage) => stage.role === "scoring"),
     })
   }
 
@@ -345,6 +491,58 @@ print(json.dumps(ast.literal_eval(matches[0].value)))
     if (code === 3) return undefined
     if (code !== 0) throw new Error((stderr || stdout).trim() || "Cannot extract AUTOFOLD_WORKFLOW")
     return Plan.parse(JSON.parse(stdout))
+  }
+
+  /** Construct the single agent-authored trial object without running Proto. */
+  export async function describeTrial(
+    programPath: string,
+    python: string,
+    bundle: Record<string, unknown>,
+  ): Promise<AuthoredTrial> {
+    const source = String.raw`
+import importlib.util, json, pathlib, sys
+trial_path = pathlib.Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("autofold_describe_trial", trial_path)
+if spec is None or spec.loader is None:
+    raise SystemExit(f"Cannot load Proto trial module: {trial_path}")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+from autofold_worker.proto_trial import load_authored_trial
+trial = load_authored_trial(module, json.loads(sys.stdin.read()))
+generation = None
+try:
+    from autofold_worker.proto_portfolio import ProtoPortfolioProgram
+    if isinstance(trial.program, ProtoPortfolioProgram):
+        generation = trial.program.autofold_generation_plan()
+except (ImportError, ModuleNotFoundError):
+    pass
+print(json.dumps({
+    "generation": generation,
+    "diagnostics": trial.autofold_diagnostic_plan(),
+    "declaration": trial.autofold_declaration(),
+    "hypothesis": trial.hypothesis,
+}))
+`
+    const process = Bun.spawn([python, "-c", source, programPath], {
+      cwd: path.dirname(programPath),
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...Bun.env,
+        PYTHONDONTWRITEBYTECODE: "1",
+        PYTHONPATH: [path.resolve(import.meta.dir, "../../../worker"), Bun.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+      },
+    })
+    process.stdin.write(JSON.stringify(bundle))
+    process.stdin.end()
+    const [code, stdout, stderr] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+    ])
+    if (code !== 0) throw new Error((stderr || stdout).trim() || "Cannot construct ProtoTrial")
+    return AuthoredTrial.parse(JSON.parse(stdout))
   }
 
   export async function discover(python: string, cwd: string): Promise<Tool[]> {

@@ -63,6 +63,7 @@ export namespace ExecutionProtocol {
   export const PipelineStage = z
     .object({
       id: z.string().regex(/^[a-z][a-z0-9_-]*$/),
+      role: z.enum(["scoring", "diagnostic"]).default("scoring"),
       models: z
         .array(
           z.object({
@@ -136,12 +137,50 @@ export namespace ExecutionProtocol {
       }
     }
   })
+  export const ScoringPipeline = z
+    .object({
+      format: z.literal("autofold.scoring-pipeline.v1"),
+      protoToolsCommit: z.string().regex(/^[a-f0-9]{40}$/),
+      stages: z.array(PipelineStage).min(1).max(64),
+    })
+    .superRefine((pipeline, context) => {
+      const ids = new Set(pipeline.stages.map((stage) => stage.id))
+      if (ids.size !== pipeline.stages.length) {
+        context.addIssue({ code: "custom", path: ["stages"], message: "Scoring stage IDs must be unique" })
+      }
+      for (const [index, stage] of pipeline.stages.entries()) {
+        if (stage.role !== "scoring") {
+          context.addIssue({ code: "custom", path: ["stages", index, "role"], message: "Frozen scoring pipelines contain only scoring stages" })
+        }
+        if (!stage.required || stage.allowSkip || stage.condition || stage.candidateRouting) {
+          context.addIssue({
+            code: "custom",
+            path: ["stages", index],
+            message: "Scoring stages must evaluate every submitted candidate",
+          })
+        }
+        if (stage.dependsOn.some((dependency) => !ids.has(dependency))) {
+          context.addIssue({ code: "custom", path: ["stages", index, "dependsOn"], message: "Scoring dependencies must remain inside the frozen scoring pipeline" })
+        }
+      }
+    })
+  export type ScoringPipeline = z.infer<typeof ScoringPipeline>
+
+  export function hashScoringPipeline(raw: ScoringPipeline): string {
+    const pipeline = ScoringPipeline.parse(raw)
+    return `sha256:${new Bun.CryptoHasher("sha256").update(JSON.stringify(canonical(pipeline))).digest("hex")}`
+  }
   export const PipelinePolicy = z
     .object({
       id: z.string().trim().min(1),
       sourceHash: Digest.optional(),
       protoToolsCommit: z.string().regex(/^[a-f0-9]{40}$/).optional(),
       generation: GenerationPolicy.optional(),
+      // Compiler-owned mirror of the diagnostic graph returned by
+      // build_trial(ctx). The remote worker re-derives and compares it before
+      // execution; it is never used as an alternative source of scientific
+      // decisions.
+      authoredDiagnostics: z.array(z.record(z.string(), z.unknown())).max(64).default([]),
       stages: z.array(PipelineStage).max(64),
     })
     .superRefine((policy, context) => {
@@ -210,6 +249,7 @@ export namespace ExecutionProtocol {
     .object({
       format: z.literal("autofold.trial-bundle.v4"),
       ...TrialBundleFields,
+      generationReplicateId: z.string().startsWith("grep_").optional(),
       targetArtifactHash: Digest,
       targetArtifactPath: z.string().trim().min(1),
       targetStructurePath: z.string().trim().min(1).optional(),
@@ -217,6 +257,7 @@ export namespace ExecutionProtocol {
         id: z.string().trim().min(1),
         version: z.string().trim().min(1),
         sourceHash: Digest,
+        scoringPipelineHash: Digest.optional(),
       }),
       pipeline: PipelinePolicy,
       pipelineHash: Digest,
@@ -320,11 +361,64 @@ export namespace ExecutionProtocol {
   })
   export type GenerationRunArtifactV1 = z.infer<typeof GenerationRunArtifactV1>
 
+  export const GenerationSamplingV1 = z.object({
+    generator: z.string().trim().min(1),
+    allocatedCandidates: z.number().int().positive(),
+    maximumGpuSeconds: z.number().int().positive(),
+    candidateCap: z.number().int().positive().optional(),
+    authoredSamples: z.number().int().positive().optional(),
+    effectiveSamples: z.number().int().positive().optional(),
+    authoredProposalBatchSize: z.number().int().positive().optional(),
+    effectiveProposalBatchSize: z.number().int().positive().optional(),
+    authoredResults: z.number().int().positive().optional(),
+    effectiveResults: z.number().int().positive().optional(),
+  })
+
+  export const GenerationReplicateV1 = z.object({
+    id: z.string().startsWith("grep_"),
+    requestedSeeds: z.array(z.number().int()).min(1),
+    realizedCandidateSetHash: Digest,
+    stochasticity: z.enum(["deterministic", "seeded", "upstream_uncontrolled", "mixed", "unknown"]),
+    observedGeneratorSeeds: z.array(z.object({
+      generator: z.string().trim().min(1),
+      seed: z.number().int(),
+      control: z.enum(["controlled", "upstream_unavailable", "unknown"]),
+    })).default([]),
+  })
+  export type GenerationReplicateV1 = z.infer<typeof GenerationReplicateV1>
+
+  export const GeneratorDiagnosticsV1 = z.object({
+    format: z.literal("autofold.generator-diagnostics.v1"),
+    generator: z.literal("freebindcraft"),
+    rejectedCandidates: z.number().int().nonnegative(),
+    rejectionFilters: z.record(z.string().trim().min(1), z.number().int().nonnegative()),
+    trajectoryFailures: z.number().int().nonnegative(),
+    trajectoryFailureFilters: z.record(z.string().trim().min(1), z.number().int().nonnegative()),
+    trajectoriesObserved: z.number().int().nonnegative(),
+    acceptedCandidates: z.number().int().nonnegative(),
+    sourceFiles: z.array(z.enum([
+      "rejected_mpnn_full_stats.csv",
+      "failure_csv.csv",
+      "trajectory_stats.csv",
+      "final_design_stats.csv",
+    ])).min(1),
+  })
+  export type GeneratorDiagnosticsV1 = z.infer<typeof GeneratorDiagnosticsV1>
+
   export const GenerationRunIndexV1 = z.object({
     format: z.literal("autofold.generation-run-index.v1"),
     runId: z.string().startsWith("run_"),
     programHash: Digest,
     runtime: z.object({ wallSeconds: z.number().finite().nonnegative() }),
+    replicate: GenerationReplicateV1.optional(),
+    sampling: z.array(GenerationSamplingV1).default([]),
+    portfolioFailures: z.array(z.object({
+      lane: z.number().int().nonnegative(),
+      generator: z.string().trim().min(1).optional(),
+      errorType: z.string().trim().min(1).max(200),
+      message: z.string().trim().min(1).max(4096),
+    })).default([]),
+    generatorDiagnostics: z.array(GeneratorDiagnosticsV1).default([]),
     entries: z.array(z.object({
       candidateId: z.string().trim().min(1),
       seed: z.number().int(),

@@ -1009,6 +1009,14 @@ export namespace ProviderTransform {
 
   export function smallOptions(model: Provider.Model) {
     const apiID = model.api.id.toLowerCase()
+    // GLM 5.3 Flash requires reasoning on every OpenRouter endpoint, including
+    // title, summary, and compaction requests.
+    if (/glm-5[.-]3-flash\b/.test(apiID)) {
+      if (model.api.npm === "@openrouter/ai-sdk-provider" || model.providerID === "openrouter") {
+        return { reasoning: { effort: "low" } }
+      }
+      return { reasoningEffort: "low" }
+    }
     // Grok 4.5 cannot disable reasoning. Use its lowest valid effort for titles,
     // summaries, and compaction instead of emitting an invalid/ignored off flag
     // or falling back to the expensive high default.

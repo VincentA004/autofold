@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 import { ResearchDomain } from "./domain"
 import { ResearchLiteratureReview } from "./literature-review"
 
@@ -17,6 +20,94 @@ function campaign(): ResearchDomain.Campaign {
 }
 
 describe("bounded literature review", () => {
+  test("confines a trajectory closeout continuation to its frozen experiment", () => {
+    expect(() => ResearchLiteratureReview.verifyFocusExperimentBoundary({
+      action: "continue_experiment",
+      experimentId: "exp_other",
+      hypothesis: "Continue elsewhere",
+      rationale: "Wrong trajectory",
+      successCriterion: "A score",
+    }, "exp_focus")).toThrow("cannot continue a different experiment")
+  })
+
+  test("compacts recursive knowledge context while preserving exact scientific provenance", () => {
+    const huge = "mechanistic narrative ".repeat(600)
+    const concept = ResearchDomain.KnowledgeConcept.parse({
+      id: "knw_compact", campaignId: "cmp_review", experimentId: "exp_compact", trialId: "trl_compact",
+      evaluationId: "evl_compact", runId: "run_compact", type: "Research Evaluation", title: huge,
+      description: huge, tags: ["portfolio"], sources: [{ id: "run_compact", resource: "runs/run_compact" }],
+      generated: { by: "test", at: timestamp }, verified: [{ by: "test", at: timestamp }], status: "stable",
+      score: 0.21, decision: "promoted", diagnostics: { predictor_disagreement: 0.28 },
+      provenance: {
+        contractHash: `sha256:${"a".repeat(64)}`, evaluatorHash: `sha256:${"b".repeat(64)}`,
+        programHash: `sha256:${"c".repeat(64)}`, manifestHash: `sha256:${"d".repeat(64)}`,
+      },
+      createdAt: timestamp,
+    })
+    const literature = ResearchDomain.LiteratureRecord.parse({
+      id: "lit_compact", campaignId: "cmp_review", database: "pubmed", sourceId: "123",
+      title: huge, summary: huge, excerpts: [huge.slice(0, 4_000)], query: huge,
+      contentHash: `sha256:${"e".repeat(64)}`, retrievedAt: timestamp,
+    })
+    const claim = ResearchDomain.KnowledgeClaim.parse({
+      id: "clm_compact", campaignId: "cmp_review", kind: "design_rule", statement: huge.slice(0, 8_000),
+      stance: "supports", confidence: 0.7, evidence: [{ literatureId: "lit_compact", excerpt: huge.slice(0, 4_000) }],
+      status: "proposed", generated: { by: "test", at: timestamp }, createdAt: timestamp,
+    })
+    const modelEvidence = {
+      candidateId: "candidate_exact", modelId: "boltz2", seed: 20260809, status: "completed" as const,
+      metrics: { confidence_score: 0.91, nativeNarrative: huge },
+    } as unknown as ResearchLiteratureReview.Context["newRunEvidence"][number]["modelEvidence"][number]
+    const context: ResearchLiteratureReview.Context = {
+      campaign: campaign(),
+      experiments: [],
+      runKnowledge: Array.from({ length: 30 }, () => concept),
+      literature: Array.from({ length: 50 }, () => literature),
+      claims: Array.from({ length: 50 }, () => claim),
+      alignments: [],
+      cycles: [],
+      newRunKnowledge: Array.from({ length: 30 }, () => concept),
+      newRunEvidence: [{
+        knowledgeId: concept.id,
+        runId: "run_compact",
+        trial: ResearchDomain.Trial.parse({
+          id: "trl_compact", experimentId: "exp_compact", hypothesis: huge, intent: "optimize",
+          designAdapter: "proto", programPath: ".autofold/trial.py", programHash: `sha256:${"c".repeat(64)}`,
+          status: "succeeded", createdAt: timestamp, updatedAt: timestamp,
+        }),
+        candidates: [{ id: "candidate_exact", sequence: "SAEEELRKLREELE", narrative: huge }],
+        evaluation: { id: "evl_compact", score: 0.21, diagnostics: { predictor_disagreement: 0.28 } },
+        pipeline: { stages: Array.from({ length: 60 }, (_, index) => ({ id: `stage_${index}`, narrative: huge })) },
+        pipelineHash: `sha256:${"f".repeat(64)}`,
+        modelEvidence: Array.from({ length: 50 }, () => modelEvidence),
+      }],
+    }
+    const serialized = JSON.stringify(ResearchLiteratureReview.compactKnowledgePacket(context, {
+      question: "What should the next iteration test?", maxSources: 8, maxClaims: 8,
+    }))
+    expect(serialized.length).toBeLessThan(140_000)
+    expect(serialized).toContain("SAEEELRKLREELE")
+    expect(serialized).toContain("run_compact")
+    expect(serialized).toContain(`sha256:${"f".repeat(64)}`)
+    expect(serialized).toContain('"seed":20260809')
+    expect(serialized).toContain('"confidence_score":0.91')
+    expect(serialized).not.toContain(huge)
+  })
+
+  test("scaffolds a readable agent artifact without overwriting resumed work", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "autofold-literature-draft-"))
+    const file = path.join(root, "nested", "review.json")
+    try {
+      await ResearchLiteratureReview.prepareAgentDraft(file)
+      expect(await fs.readFile(file, "utf8")).toBe("{}\n")
+      await fs.writeFile(file, '{"preserved":true}\n')
+      await ResearchLiteratureReview.prepareAgentDraft(file)
+      expect(await fs.readFile(file, "utf8")).toBe('{"preserved":true}\n')
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
   test("requires both resume identifiers", () => {
     expect(
       ResearchLiteratureReview.Input.safeParse({
@@ -292,6 +383,50 @@ describe("bounded literature review", () => {
         },
       ),
     ).rejects.toThrow("maximum is 1")
+    expect(persisted).toBe(false)
+  })
+
+  test("rejects a continuation that explicitly requires a new experiment contract", async () => {
+    let persisted = false
+    await expect(
+      ResearchLiteratureReview.run(
+        { campaignId: "cmp_review", sessionId: "ses_parent", maxSources: 1, maxClaims: 1 },
+        {
+          context: async () => ({
+            campaign: campaign(),
+            experiments: [],
+            runKnowledge: [],
+            literature: [],
+            claims: [],
+            alignments: [],
+            cycles: [],
+            newRunKnowledge: [],
+            newRunEvidence: [],
+          }),
+          propose: async () => ({
+            childSessionId: "ses_child",
+            proposalPath: "review.json",
+            artifact: {
+              sources: [],
+              claims: [],
+              unresolvedQuestions: [],
+              campaignSummary: "Target specificity remains unresolved.",
+              nextExperiment: {
+                action: "continue_experiment",
+                experimentId: "exp_review",
+                hypothesis: "Score the incumbent against an unrelated receptor.",
+                rationale: "Changing the target requires a new experiment contract.",
+                successCriterion: "Observe the locked result without cross-contract comparison.",
+              },
+            },
+          }),
+          persist: async () => {
+            persisted = true
+            throw new Error("should not persist")
+          },
+        },
+      ),
+    ).rejects.toThrow("use new_experiment")
     expect(persisted).toBe(false)
   })
 })

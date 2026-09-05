@@ -23,6 +23,7 @@ import {
   SkillShadowReplay,
 } from "@/research"
 import { lazy } from "@/util/lazy"
+import { MAX_AUTONOMOUS_ITERATIONS } from "@/research/autoresearch"
 
 const CampaignParam = z.object({ campaignId: z.string().startsWith("cmp_") })
 const CampaignSkillParam = CampaignParam.extend({ skillId: z.string().regex(/^skill_[a-z0-9._-]+$/) })
@@ -336,6 +337,17 @@ export const ResearchRoutes = lazy(() =>
                 sessionId: input.sessionId,
                 iterations: decision.move.iterations,
                 agent: decision.move.agent,
+                recursionMode: decision.move.recursionMode,
+                trialIntent: decision.move.trialIntent,
+                baselineTrialId: decision.move.baselineTrialId,
+                rationale: decision.move.rationale,
+                expectedInformationGain: decision.move.expectedInformationGain,
+                decisionMode: decision.move.decisionMode,
+                searchPolicy: decision.move.searchPolicy,
+                evidenceRefs: decision.move.evidenceRefs,
+                allowEquivalent: decision.move.allowEquivalent,
+                equivalenceJustification: decision.move.equivalenceJustification,
+                staticControlScope: decision.move.staticControlScope,
               }
             : {
                 kind: "knowledge_refresh" as const,
@@ -366,6 +378,8 @@ export const ResearchRoutes = lazy(() =>
         z.object({
           sessionId: z.string().startsWith("ses_"),
           maxSteps: z.number().int().min(1).max(20).default(3),
+          experimentId: z.string().startsWith("exp_").optional(),
+          maximumTrajectories: z.number().int().min(1).max(100).optional(),
           idempotencyKey: z.string().trim().min(1).max(500).optional(),
         }),
       ),
@@ -387,8 +401,10 @@ export const ResearchRoutes = lazy(() =>
           payload: {
             kind: "campaign_loop",
             campaignId,
+            experimentId: input.experimentId,
             sessionId: input.sessionId,
             maxSteps: input.maxSteps,
+            maximumTrajectories: input.maximumTrajectories,
           },
         })
         ResearchJobRunner.wake()
@@ -633,6 +649,8 @@ export const ResearchRoutes = lazy(() =>
         ResearchAutoresearch.Input.omit({ experimentId: true }).extend({
           iterations: ResearchAutoresearch.Input.shape.iterations.optional(),
           agent: ResearchAutoresearch.Input.shape.agent.optional(),
+          recursionMode: z.enum(["autonomous_discovery", "single_intent"]).optional(),
+          automaticSkillRefinement: z.boolean().optional(),
           idempotencyKey: z.string().trim().min(1).max(500).optional(),
         }),
       ),
@@ -644,12 +662,31 @@ export const ResearchRoutes = lazy(() =>
             kind: "autoresearch",
             experimentId: c.req.valid("param").experimentId,
             sessionId: body.sessionId,
-            iterations: body.iterations ?? 1,
+            iterations: body.iterations ?? (
+              body.recursionMode === "single_intent" ? 1 : MAX_AUTONOMOUS_ITERATIONS
+            ),
             agent: body.agent ?? "biology",
+            recursionMode: body.recursionMode,
+            automaticSkillRefinement: body.automaticSkillRefinement ?? true,
           },
         })
         ResearchJobRunner.wake()
         return c.json(job, 202)
+      },
+    )
+    .get(
+      "/experiments/:experimentId/discovery-benchmark",
+      describeRoute({
+        summary: "Audit recursive discovery progress",
+        description:
+          "Projects the frozen-contract lineage into direction-normalized improvement, evidence response, executable diversity, generator coverage, observational baselines, and evaluator calibration.",
+        operationId: "research.experiment.discovery-benchmark",
+        responses: { 200: { description: "Deterministic recursive-discovery benchmark" } },
+      }),
+      validator("param", ExperimentParam),
+      async (c) => {
+        const context = await ResearchAutoresearch.loadContext(c.req.valid("param").experimentId)
+        return c.json(ResearchAutoresearch.discoveryBenchmark(context))
       },
     )
     .get(
@@ -769,6 +806,16 @@ export const ResearchRoutes = lazy(() =>
       validator("param", RunParam),
       async (c) => c.json(await ResearchExecution.get(c.req.valid("param").runId)),
     )
+    .post(
+      "/runs/:runId/reconcile",
+      describeRoute({
+        summary: "Retry verified finalization after remote transport failure",
+        operationId: "research.run.reconcile",
+        responses: { 200: { description: "Reconciled research run" } },
+      }),
+      validator("param", RunParam),
+      async (c) => c.json(await ResearchExecution.reconcile(c.req.valid("param").runId)),
+    )
     .get(
       "/runs/:runId/artifacts",
       describeRoute({
@@ -817,7 +864,7 @@ export const ResearchRoutes = lazy(() =>
     .post(
       "/jobs/:jobId/retry",
       describeRoute({
-        summary: "Retry a failed durable research job",
+        summary: "Retry a failed or cancelled durable research job",
         operationId: "research.job.retry",
         responses: { 200: { description: "Requeued job" } },
       }),

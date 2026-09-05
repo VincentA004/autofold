@@ -477,7 +477,23 @@ export namespace ComputeJobs {
         "exit $code",
       ].join("; ")
     }
-    return `${enter} && exec bash -lc ${quote(run)}`
+    const seconds = input.resources?.time_minutes
+      ? Math.max(60, Math.ceil(input.resources.time_minutes * 60))
+      : undefined
+    const bounded = seconds
+      ? `timeout --signal=TERM --kill-after=30s ${seconds}s bash -lc ${quote(run)}`
+      : run
+    const pidfile = `${folder}/${input.id}.pid`
+    return [
+      enter,
+      `rm -f ${quote(pidfile)}`,
+      `setsid bash -lc ${quote(bounded)} & child=$!`,
+      `printf %s "$child" > ${quote(pidfile)}`,
+      'wait "$child"',
+      "code=$?",
+      `rm -f ${quote(pidfile)}`,
+      'exit "$code"',
+    ].join("; ")
   }
 
   function ssh(host: Host, script: string): string[] {
@@ -1033,21 +1049,29 @@ export namespace ComputeJobs {
     const cancelled = result.job
     const runtime = active.get(keyOf(scope.root, id))
     const proc = runtime?.process
-    if (proc) {
-      await Shell.killTree(proc, {
-        detached: runtime.detached,
-        exited: () => proc.exitCode !== null,
+    const host = cancellationHost(job, options.hosts)
+    // For scheduler-free SSH jobs, the live SSH wrapper owns the only remote
+    // pidfile. Killing that local transport first lets its EXIT cleanup remove
+    // the marker while native model grandchildren remain reparented on the GPU
+    // host. Cancel the remote process tree while the marker is still durable,
+    // then tear down the local transport.
+    if (host && host.scheduler === "none") {
+      const action = cancellationAction(job.id)
+      const spec = command(
+        { id: `cancel-${job.id}`, name: `Cancel ${job.name}`, command: action, cwd: job.cwd },
+        host,
+      )
+      const proc = spawn(spec.argv[0]!, spec.argv.slice(1), {
+        cwd: job.authority?.workspace,
+        env: await RuntimePolicy.subprocessEnv(process.env),
+        windowsHide: true,
+        stdio: "ignore",
       })
-    } else if (job.pid) {
-      try {
-        if (process.platform === "win32") process.kill(job.pid, "SIGTERM")
-        else process.kill(-job.pid, "SIGTERM")
-      } catch {}
-    }
-    if (runtime) active.delete(keyOf(scope.root, id))
-    const hostId = job.target.kind === "ssh" ? job.target.host_id : undefined
-    const host = hostId ? options.hosts?.find((item) => item.id === hostId) : undefined
-    if (host && host.scheduler !== "none") {
+      await new Promise<void>((resolve) => {
+        proc.once("error", () => resolve())
+        proc.once("exit", () => resolve())
+      })
+    } else if (host && host.scheduler !== "none") {
       const action =
         host.scheduler === "slurm"
           ? `scancel --name ${quote(`os-${job.id}`)}`
@@ -1076,7 +1100,55 @@ export namespace ComputeJobs {
         proc.once("exit", () => resolve())
       })
     }
+    if (proc) {
+      await Shell.killTree(proc, {
+        detached: runtime.detached,
+        exited: () => proc.exitCode !== null,
+      })
+    } else if (job.pid) {
+      try {
+        if (process.platform === "win32") process.kill(job.pid, "SIGTERM")
+        else process.kill(-job.pid, "SIGTERM")
+      } catch {}
+    }
+    if (runtime) active.delete(keyOf(scope.root, id))
     return cancelled
+  }
+
+  /**
+   * Resolve enough connection identity to cancel a remote job even after the
+   * submitting request (and its in-memory Host object) has ended. Environment
+   * profiles commonly use an SSH alias as host_id, which is itself a complete
+   * reconnectable destination. Explicit saved host settings still win because
+   * they may carry a user, port, or address override.
+   */
+  export function cancellationHost(job: Job, hosts: Host[] = []): Host | undefined {
+    if (job.target.kind !== "ssh") return undefined
+    const hostId = job.target.host_id
+    return hosts.find((item) => item.id === hostId) ?? Host.parse({
+      id: hostId,
+      label: job.target_label || hostId,
+      host: hostId,
+      scheduler: job.scheduler,
+      workdir: job.cwd,
+    })
+  }
+
+  export function cancellationAction(jobId: string): string {
+    const pidfile = `.openscience/jobs/${jobId}.pid`
+    return [
+      `if test -f ${quote(pidfile)}`,
+      `then child=$(cat ${quote(pidfile)})`,
+      'descendants() { test -r "/proc/$1/task/$1/children" || return; for pid in $(cat "/proc/$1/task/$1/children"); do descendants "$pid"; printf "%s\\n" "$pid"; done; }',
+      'nested=$(descendants "$child")',
+      'for pid in $nested; do kill -TERM -- -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true; done',
+      'kill -TERM -- -"$child" 2>/dev/null || true',
+      "sleep 1",
+      'for pid in $nested; do kill -KILL -- -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true; done',
+      'kill -KILL -- -"$child" 2>/dev/null || true',
+      `rm -f ${quote(pidfile)}`,
+      "fi",
+    ].join("; ")
   }
 
   async function cancelActive(match: (runtime: Runtime) => boolean): Promise<number> {

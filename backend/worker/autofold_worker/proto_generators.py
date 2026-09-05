@@ -164,7 +164,7 @@ class BoltzGenBinderGenerator(Generator):
                 "--cache",
                 self.config.cache_dir,
             ]
-            subprocess.run(command, check=True)
+            subprocess.run(command, check=True, timeout=getattr(self, "_autofold_timeout", None))
             designs = _designs(output, {self.config.target_chain}, segment.num_proposals, segment.sequence_length)
             if not designs:
                 raise RuntimeError("BoltzGen produced no parseable binder designs")
@@ -224,8 +224,12 @@ class PXDesignBinderGenerator(Generator):
         seed = self._next_seed()
         with tempfile.TemporaryDirectory(prefix="autofold-pxdesign-") as temporary:
             root = Path(temporary)
-            target_path = root / "target.cif"
-            target.write_cif(target_path)
+            # PXDesign's public YAML accepts PDB or CIF, but its conversion path
+            # needs author/entity metadata that Proto's compact CIF writer does
+            # not preserve. The portable PDB path is converted to PXDesign's own
+            # complete CIF/bioassembly representation before inference.
+            target_path = root / "target.pdb"
+            target.write_pdb(target_path)
             chains = {
                 chain: {**({"hotspots": self.config.hotspots} if self.config.hotspots else {})}
                 for chain in self.config.target_chains
@@ -273,7 +277,17 @@ class PXDesignBinderGenerator(Generator):
                 if compiler.exists() and compiler_cxx.exists():
                     environment.setdefault("CC", str(compiler))
                     environment.setdefault("CXX", str(compiler_cxx))
-            subprocess.run(command, check=True, env=environment)
+            completed = subprocess.run(
+                command,
+                check=False,
+                env=environment,
+                timeout=getattr(self, "_autofold_timeout", None),
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode:
+                diagnostic = (completed.stderr or completed.stdout or "PXDesign emitted no diagnostic output").strip()
+                raise RuntimeError(f"PXDesign exited {completed.returncode}: {diagnostic[-8000:]}")
             designs = _designs(output, set(self.config.target_chains), segment.num_proposals, segment.sequence_length)
             if not designs:
                 raise RuntimeError("PXDesign produced no parseable binder designs")

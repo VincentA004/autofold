@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from autofold_worker.evidence_boltz2_v1 import _enrich_v4, _structure_cif
+from autofold_worker.evidence_pipeline_v3 import _enrich_v4 as _enrich_v4_v3
 
 
 class StructureCifCompatibilityTest(unittest.TestCase):
@@ -175,6 +176,77 @@ class StructureCifCompatibilityTest(unittest.TestCase):
                 _enrich_v4(bundle, candidates, root / "output", Registry)
             artifact = next((root / "output" / "model-runs").glob("**/model-run.json"))
             self.assertEqual(json.loads(artifact.read_text())["runtime"]["wallSeconds"], 20.0)
+
+    def test_records_diagnostic_models_without_adding_them_to_locked_candidate_evidence(self) -> None:
+        class Model:
+            model_fields: dict[str, object] = {}
+
+            def __init__(self, **values: object) -> None:
+                self.values = values
+
+            def model_dump(self, mode: str) -> dict[str, object]:
+                return self.values
+
+        class Metrics:
+            def __init__(self, iptm: float, ptm: float) -> None:
+                self.iptm = iptm
+                self.ptm = ptm
+
+            def model_dump(self, mode: str) -> dict[str, float]:
+                return {"iptm": self.iptm, "ptm": self.ptm}
+
+        def spec(iptm: float, ptm: float) -> object:
+            return SimpleNamespace(
+                category="structure_prediction",
+                config_model=Model,
+                input_model=lambda **values: values,
+                function=lambda inputs, config: SimpleNamespace(
+                    success=True,
+                    structures=[SimpleNamespace(structure_cif="data_role\n#\n", metrics=Metrics(iptm, ptm))],
+                ),
+            )
+
+        class Registry:
+            @staticmethod
+            def get(key: str) -> object:
+                return spec(0.8, 0.7) if key == "locked" else spec(0.1, 0.2)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target.json"
+            target.write_text(json.dumps({"chains": [{"sequence": "ACDEFG"}]}), encoding="utf-8")
+            stage = lambda stage_id, role, model: {
+                "id": stage_id,
+                "role": role,
+                "models": [{"id": model, "toolKey": model, "version": "d" * 40}],
+                "dependsOn": [],
+                "required": True,
+                "allowSkip": False,
+                "allowedSkips": [],
+                "budget": {"maximumGpuSeconds": 10},
+            }
+            bundle = {
+                "format": "autofold.trial-bundle.v4",
+                "runId": "run_roles",
+                "trialId": "trl_roles",
+                "targetArtifactHash": "sha256:" + "a" * 64,
+                "targetArtifactPath": str(target),
+                "evidenceAdapter": {"sourceHash": "sha256:" + "b" * 64},
+                "proto": {"languageCommit": "c" * 40, "toolsCommit": "d" * 40},
+                "programHash": "sha256:" + "e" * 64,
+                "pipelineHash": "sha256:" + "f" * 64,
+                "modality": "short_peptide",
+                "seeds": [7],
+                "pipeline": {"stages": [stage("locked-score", "scoring", "locked"), stage("explore", "diagnostic", "diagnostic")]},
+            }
+            candidates = {"candidates": [{"id": "cand_one", "sequence": "ACDEFGHIK"}]}
+            enriched = _enrich_v4_v3(bundle, candidates, root / "output", Registry)
+            evidence = enriched["candidates"][0]["evidence"]
+            index = json.loads((root / "output" / "model-runs" / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(index["entries"]), 2)
+            self.assertEqual(evidence["interfaceConfidence"], 0.8)
+            self.assertEqual(evidence["foldConfidence"], 0.7)
+            self.assertEqual([item["model"] for item in evidence["predictors"]], ["locked"])
 
 
 if __name__ == "__main__":

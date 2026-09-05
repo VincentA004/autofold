@@ -16,6 +16,7 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import path from "node:path"
+import { ResearchModel } from "@/research/model"
 
 export namespace SessionCompaction {
   const log = Log.create({ service: "session.compaction" })
@@ -323,9 +324,10 @@ Output exactly this Markdown structure, keeping every section (write "(none)" wh
   }) {
     const userMessage = input.messages.findLast((m) => m.info.id === input.parentID)!.info as MessageV2.User
     const agent = await Agent.get("compaction")
-    const model = agent.model
-      ? await Provider.getModel(agent.model.providerID, agent.model.modelID)
-      : await Provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
+    const modelSelection = userMessage.agent.startsWith("autofold-") || ResearchModel.isResearchModel(userMessage.model)
+      ? ResearchModel.DEFAULT
+      : agent.model ?? userMessage.model
+    const model = await Provider.getModel(modelSelection.providerID, modelSelection.modelID)
     // Split the transcript into a verbatim recent tail + a head to summarize (P3.2). The
     // tail is kept in the CONVERSATION and re-rendered to the conversation's model on the
     // next turn — so size it against THAT model's window, not the compaction agent's (which

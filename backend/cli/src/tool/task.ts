@@ -13,6 +13,7 @@ import { Config } from "../config/config"
 import { PermissionNext } from "@/permission/next"
 import { RLMState } from "../session/rlm/state"
 import { HierarchicalSemaphore } from "../util/semaphore"
+import { ResearchModel } from "@/research/model"
 
 const ARTIFACT_AGENTS = ["research", "biology", "ml"]
 const COMPUTE_SUBAGENTS = new Set(["biology", "ml", "physics"])
@@ -129,8 +130,12 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       if (msg.info.role !== "assistant") throw new Error("Not an assistant message")
 
       const model = await (async () => {
-        if (agent.model) return agent.model
         const assistant = msg.info as MessageV2.Assistant
+        if (assistant.agent.startsWith("autofold-") || ResearchModel.isResearchModel({
+          providerID: assistant.providerID,
+          modelID: assistant.modelID,
+        })) return ResearchModel.DEFAULT
+        if (agent.model) return agent.model
         return { modelID: assistant.modelID, providerID: assistant.providerID }
       })()
 

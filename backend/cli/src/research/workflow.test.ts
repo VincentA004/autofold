@@ -23,6 +23,136 @@ const protoPython = path.resolve(import.meta.dir, "../../../../.autofold/envs/pr
 const generationExample = path.resolve(import.meta.dir, "../../../worker/examples/rfdiffusion_mpnn_trial.py")
 
 describe("dynamic Proto workflow compiler", () => {
+  test("derives a frozen scoring workflow from a direct composite portfolio", () => {
+    const directContract = {
+      budget: { maximumCandidates: 4, gpuHours: 1, wallTimeMinutes: 60 },
+      evaluator: { submissionSize: 3 },
+    }
+    const plan = ResearchWorkflow.fromComposite({
+      generation: {
+        generators: ["boltzgen-binder", "rfdiffusion-mpnn-binder"],
+        allocations: [
+          { generator: "boltzgen-binder", maximumCandidates: 2, maximumGpuSeconds: 600 },
+          { generator: "rfdiffusion-mpnn-binder", maximumCandidates: 2, maximumGpuSeconds: 1200 },
+        ],
+        maximumCandidates: 4,
+        maximumGpuSeconds: 1800,
+      },
+      contract: directContract,
+    })
+    const pipeline = ResearchWorkflow.compile({
+      plan,
+      tools,
+      generators: [
+        { key: "boltzgen-binder", usesGpu: true, toolsCalled: ["boltzgen-design"] },
+        ...generators,
+      ],
+      contract: directContract,
+      protoToolsCommit: "a".repeat(40),
+      protoLanguageCommit: "b".repeat(40),
+      bindSource: false,
+    })
+    expect(pipeline.sourceHash).toBeUndefined()
+    expect(pipeline.generation?.generators.map((item) => item.id)).toEqual([
+      "boltzgen-binder",
+      "rfdiffusion-mpnn-binder",
+    ])
+  })
+  test("compiles agent-authored diagnostics beside the injected frozen scorer", () => {
+    const frozenContract = {
+      budget: { maximumCandidates: 2, gpuHours: 1, wallTimeMinutes: 60 },
+      evaluator: {
+        submissionSize: 1,
+        evidenceAdapter: {
+          id: "proto-structure-pipeline",
+          version: "3",
+          sourceHash: `sha256:${"1".repeat(64)}`,
+          scoringPipelineHash: undefined,
+          scoringPipeline: {
+            format: "autofold.scoring-pipeline.v1" as const,
+            protoToolsCommit: "a".repeat(40),
+            stages: [{
+              id: "boltz2-score",
+              role: "scoring" as const,
+              models: [{ id: "boltz2-prediction", version: "a".repeat(40), toolKey: "boltz2-prediction", config: { use_msa: false } }],
+              dependsOn: [],
+              budget: { maximumGpuSeconds: 600 },
+              required: true,
+              allowSkip: false,
+              allowedSkips: [],
+            }],
+          },
+        },
+      },
+    }
+    const diagnostic = {
+      id: "chai-ablation",
+      role: "diagnostic" as const,
+      capability: "structure_prediction",
+      tools: ["chai1-prediction"],
+      configs: { "chai1-prediction": { use_msa: false } },
+      dependsOn: [],
+      maximumGpuSeconds: 300,
+      optional: true,
+    }
+    const plan = ResearchWorkflow.fromComposite({
+      generation: {
+        generators: ["rfdiffusion-mpnn-binder"],
+        allocations: [{ generator: "rfdiffusion-mpnn-binder", maximumCandidates: 2, maximumGpuSeconds: 1200 }],
+        maximumCandidates: 2,
+        maximumGpuSeconds: 1200,
+      },
+      diagnostics: [diagnostic],
+      contract: frozenContract,
+    })
+    const pipeline = ResearchWorkflow.compile({
+      plan,
+      tools,
+      generators,
+      contract: frozenContract,
+      protoToolsCommit: "a".repeat(40),
+      protoLanguageCommit: "b".repeat(40),
+      bindSource: false,
+    })
+    expect(pipeline.authoredDiagnostics).toEqual([{
+      ...diagnostic,
+      selection: "all",
+    }])
+    expect(pipeline.stages.map((stage) => [stage.id, stage.role])).toEqual([
+      ["chai-ablation", "diagnostic"],
+      ["boltz2-score", "scoring"],
+    ])
+  })
+  test("rejects routing on metrics that predictors do not emit", () => {
+    const plan = {
+      format: "autofold.proto-workflow.v1" as const,
+      id: "invalid-routing-metric",
+      maximumGpuSeconds: 20,
+      stages: [
+      {
+        id: "source",
+        capability: "structure_prediction",
+        tools: ["boltz2-prediction"],
+        configs: {},
+        dependsOn: [],
+        optional: true,
+        maximumGpuSeconds: 10,
+      },
+      {
+        id: "routed",
+        capability: "structure_prediction",
+        tools: ["chai1-prediction"],
+        configs: {},
+        dependsOn: ["source"],
+        optional: true,
+        maximumGpuSeconds: 10,
+        candidateRouting: { source: "source", metric: "loss", direction: "minimize", maximumCandidates: 1 },
+      },
+      ],
+    }
+    expect(() => ResearchWorkflow.Plan.parse(plan)).toThrow()
+  })
+
   test("accepts a CPU-only Proto Language program without external tool stages", () => {
     const pipeline = ResearchWorkflow.compile({
       contract: { budget: { ...contract.budget, gpuHours: 0 }, evaluator: contract.evaluator },
@@ -61,6 +191,7 @@ describe("dynamic Proto workflow compiler", () => {
             id: "resolve_disagreement",
             capability: "structure_prediction",
             tools: ["protenix-prediction"],
+            configs: { "protenix-prediction": { use_msa: false } },
             dependsOn: ["primary", "independent"],
             condition: { source: "independent", metric: "predictor_disagreement", operator: "gt", value: 0.15 },
             candidateRouting: { source: "independent", metric: "confidence_score", direction: "maximize", maximumCandidates: 2 },
@@ -80,6 +211,7 @@ describe("dynamic Proto workflow compiler", () => {
             id: "independent",
             capability: "structure_prediction",
             tools: ["missing-predictor", "chai1-prediction"],
+            configs: { "chai1-prediction": { use_msa: false } },
             selection: "first_available",
             dependsOn: ["primary"],
             maximumCandidates: 20,
@@ -103,6 +235,92 @@ describe("dynamic Proto workflow compiler", () => {
         allocation: { maximumCandidates: 100, maximumGpuSeconds: 100 },
       },
     ])
+  })
+
+  test("freezes the locked scoring lane while leaving diagnostic composition agent-editable", () => {
+    const plan = ResearchWorkflow.Plan.parse({
+      format: "autofold.proto-workflow.v1" as const,
+      id: "scoring-plus-diagnostics",
+      maximumGpuSeconds: 900,
+      stages: [
+        {
+          id: "locked-boltz",
+          role: "scoring" as const,
+          capability: "structure_prediction",
+          tools: ["boltz2-prediction"],
+          configs: { "boltz2-prediction": { use_msa: false, sampling_steps: 200 } },
+          maximumGpuSeconds: 300,
+        },
+        {
+          id: "locked-chai",
+          role: "scoring" as const,
+          capability: "structure_prediction",
+          tools: ["chai1-prediction"],
+          configs: { "chai1-prediction": { use_msa: false, num_diffn_samples: 5 } },
+          maximumGpuSeconds: 300,
+        },
+        {
+          id: "exploratory-protenix",
+          role: "diagnostic" as const,
+          capability: "structure_prediction",
+          tools: ["protenix-prediction"],
+          configs: { "protenix-prediction": { use_msa: false, model_name: "protenix-v2" } },
+          dependsOn: ["locked-chai"],
+          candidateRouting: { source: "locked-chai", metric: "iptm" as const, direction: "maximize" as const, maximumCandidates: 1 },
+          maximumGpuSeconds: 300,
+          optional: true,
+        },
+      ],
+    })
+    const baseline = ResearchWorkflow.compile({
+      contract, protoToolsCommit: commit, protoLanguageCommit: languageCommit, tools, plan,
+    })
+    const scoringPipelineHash = ResearchWorkflow.scoringPipelineHash(baseline)
+    const frozenContract = {
+      ...contract,
+      evaluator: {
+        submissionSize: 3,
+        evidenceAdapter: {
+          id: "proto-structure-pipeline",
+          version: "2",
+          sourceHash: `sha256:${"c".repeat(64)}`,
+          scoringPipelineHash,
+        },
+      },
+    }
+    const diagnosticAblation = {
+      ...plan,
+      stages: plan.stages.map((stage) => stage.id === "exploratory-protenix"
+        ? { ...stage, configs: { "protenix-prediction": { use_msa: false, model_name: "protenix-v2", num_recycles: 1 } } }
+        : stage),
+    }
+    expect(() => ResearchWorkflow.compile({
+      contract: frozenContract, protoToolsCommit: commit, protoLanguageCommit: languageCommit, tools, plan: diagnosticAblation,
+    })).not.toThrow()
+
+    const scoringMutation = {
+      ...plan,
+      stages: plan.stages.map((stage) => stage.id === "locked-boltz"
+        ? { ...stage, configs: { "boltz2-prediction": { use_msa: false, sampling_steps: 20 } } }
+        : stage),
+    }
+    expect(() => ResearchWorkflow.compile({
+      contract: frozenContract, protoToolsCommit: commit, protoLanguageCommit: languageCommit, tools, plan: scoringMutation,
+    })).toThrow("Authored scoring pipeline changed")
+
+    const routedScoring = {
+      ...plan,
+      stages: plan.stages.map((stage) => stage.id === "locked-chai"
+        ? {
+            ...stage,
+            dependsOn: ["locked-boltz"],
+            candidateRouting: { source: "locked-boltz", metric: "iptm" as const, direction: "maximize" as const, maximumCandidates: 1 },
+          }
+        : stage),
+    }
+    expect(() => ResearchWorkflow.compile({
+      contract: frozenContract, protoToolsCommit: commit, protoLanguageCommit: languageCommit, tools, plan: routedScoring,
+    })).toThrow("must evaluate every submitted candidate")
   })
 
   test("requires and freezes explicit multi-generator portfolio allocations", () => {
@@ -182,6 +400,26 @@ describe("dynamic Proto workflow compiler", () => {
         },
       }),
     ).toThrow("experiment permits 3600")
+  })
+
+  test("rejects implicit mutable remote MSA searches from frozen predictor workflows", () => {
+    expect(() => ResearchWorkflow.compile({
+      contract,
+      protoToolsCommit: commit,
+      protoLanguageCommit: languageCommit,
+      tools,
+      plan: {
+        format: "autofold.proto-workflow.v1",
+        id: "implicit-network-msa",
+        maximumGpuSeconds: 10,
+        stages: [{
+          id: "primary",
+          capability: "structure_prediction",
+          tools: ["boltz2-prediction"],
+          maximumGpuSeconds: 10,
+        }],
+      },
+    })).toThrow("use_msa=false")
   })
 
   test("reserves seed, timeout, and device for the trusted runtime", () => {

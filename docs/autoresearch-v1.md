@@ -1,99 +1,131 @@
-# Autofold bounded autoresearch v1
+# Autofold persistent scientist loop
 
-Autoresearch v1 is the first executable experiment-level RSI loop. Its only
-agent-editable object is a proposed Proto `trial.py`; the target, experiment
-contract, evidence adapter, evaluator, seeds, and budget remain frozen.
-
-## Iteration
+Autofold's normal experiment recursion is one persistent GLM scientist,
+one mutable `trial.py`, and a trusted execution boundary. The harness does not
+choose a generator portfolio, rank prose strategies, or prescribe a workflow
+permutation.
 
 ```text
-fresh verified experiment context
-→ child biology/ML/task session
-→ one scoped draft trial.py
-→ static source and workflow-manifest preflight
-→ compile against the pinned Proto registry
-→ immutable program hash and trial
-→ sandboxed scientific run
-→ trusted model evidence
-→ locked score and promotion decision
-→ refreshed context for the next child
+latest trusted evidence + scientist notebook
+                  ↓
+       persistent scientist session
+                  ↓ edits
+       mutable trial.py → ProtoTrial
+                  ↓
+ contract assertion → AST/workflow preflight → immutable snapshot
+                  ↓
+        GPU execution → locked score
+                  ↓
+       trusted provenance/OKF evidence
+                  ↓
+      same scientist session continues
 ```
 
-The child receives the incumbent source, recent evaluations and diagnostics,
-verified campaign OKF concepts, a small set of incumbent candidates, and a
-compact catalog of relevant tools in the pinned Proto registry. Its filesystem
-rules deny all mutations except the assigned draft. Child sessions and draft
-files remain available for audit.
+## Ownership
 
-The mutable source follows a Karpathy-style lineage. Autofold copies the latest
-attempted optimize trial—not merely the best-scoring incumbent—into the next
-draft. The author receives both programs: the search head is the code to repair,
-branch, or revert, while the incumbent remains the locked promotion baseline.
-Rejected and failed trials therefore remain productive points in the program
-lineage instead of disappearing after their score or exception is recorded.
+The scientist owns the hypothesis, falsification test, trial intent, Proto
+program, generator/model composition, configuration, diagnostic DAG, routing,
+and compute allocation. New source exports `build_trial(ctx) -> ProtoTrial`;
+the returned object declares `optimize`, `calibrate`, `negative_control`, or
+`shadow_replay`. Only optimize trials are promotion eligible.
 
-Each live iteration reloads experiment history and campaign knowledge after the
-preceding scientific run. The next child therefore receives a compact recent
-trajectory containing promoted and rejected candidates, locked evaluation
-diagnostics, predictor-level model evidence, and terminal run failures. A
-durable contract-lock checkpoint pins the experiment ID and contract hash at
-job start; every refreshed context must retain that exact hash, including after
-process restart. Shadow replay remains the deliberate exception: it uses one
-frozen context snapshot for paired comparability while enforcing the same lock.
+The trusted harness owns the frozen experiment contract, target, evaluator,
+evidence adapter, seeds, budget, submission rule, promotion decision, immutable
+program snapshot, model artifacts, and locked score. Those constraints are
+validated after every edit and cannot be changed from `trial.py`.
 
-Preflight parses the Python AST without importing or executing the proposal. It
-requires `build_program(bundle)` and a literal `AUTOFOLD_WORKFLOW`, requires the source to derive work from both
-`candidateBudget` and `submissionSize`, permits only a small standard-library
-and Proto import set, blocks obvious dynamic execution and direct file calls, and
-rejects attempts to author trusted `evidence` or `generation` fields. The
-workflow compiler then resolves registry tools, DAG dependencies, conditions,
-and budgets before a trial is recorded.
+## Durable working state
 
-Each iteration also receives an evidence-derived, advisory search policy. The initial move set is
-`exploit_incumbent_family`, `explore_generator`, `workflow_ablation`,
-`investigate_predictor_disagreement`, and `reallocate_compute`. The policy
-suggests a generator portfolio and per-generator candidate/GPU allocation. The
-program author can select another registered composition when the trajectory
-supports it; the trusted compiler records the actual portfolio, allocations,
-program fingerprint, and workflow/config manifest. Multi-generator Proto programs must declare one
-allocation and one assigned generator lane per generator; both the TypeScript
-compiler and trusted worker reject budget drift or candidate attribution that
-exceeds a lane's allocation.
+Each autoresearch job uses one stable draft directory, while the scientist lab
+belongs to the experiment so a new durable job does not reset its reasoning:
 
-The trusted preflight records an exact program hash, a formatting-insensitive
-Python AST fingerprint, and a normalized workflow-DAG fingerprint. Exact or
-semantically equivalent repeats stop before another GPU run. Scientific GPU
-failures are published as evidence and do not by themselves terminate the
-lineage: the next iteration reloads the failed workflow, exception, current
-skills, and knowledge and can repair it or explore another arm. Plateau stopping
-is considered only after the registered binder arms have evidence. Exhausting
-the requested iteration budget is recorded separately from authoring failure.
+```text
+.autofold/autoresearch/<experiment>/<job-or-session>/
+  README.md         # operating guide and paths
+  contract.json     # frozen contract and compute readiness
+  FRONTIER.md       # deterministic empirical frontier view
+  trial.py          # mutable scientist-owned program
+  incumbent.py      # current locked comparison baseline
+  lab-state.json    # small index, contract, and current failure
+  latest-result.json # most recent settled result and diagnostics
+  api/              # tested capability pages and examples
+  skills.json       # active campaign skill references
+.autofold/autoresearch/<experiment>/LAB.md
+                    # mutable scientist-owned interpretation and next deltas
+.autofold/autoresearch/<experiment>/EVENTS.md
+                    # deterministic mirror of trusted completed trajectories
+.autofold/autoresearch/<experiment>/scientist.json
+                    # campaign-long scientist session identity and contract
+```
+
+The scientist session is resumed across validation repairs and empirical
+iterations and durable jobs. It has read access for inspection and mutation
+access to `trial.py` and its untrusted `LAB.md`. The initial prompt contains paths and invariants rather than an
+inline encyclopedia. Full skills, artifacts, model catalogs, and evidence are
+read on demand from the indexed state.
+
+The scientist calls `autofold_validate_trial` after editing. Trusted AST,
+contract, registry, workflow, allocation, and budget validation runs without
+executing the draft; an exact compiler error returns as an ordinary tool result
+to the same session for immediate repair. It then calls
+`autofold_evaluate_trial`, which checkpoints the prepared proposal, snapshots
+the exact source, launches or resumes the authorized worker run, applies the
+locked evaluator and promotion rule, publishes trusted evidence, and returns
+compact candidate/model diagnostics to the same session. There is no fixed total
+authoring-attempt cap: changed drafts may continue until job cancellation or a
+real resource boundary. Three identical program/error failures are treated as
+stagnation. Program, semantic-AST, and workflow fingerprints remain provenance;
+semantic reuse is not automatically rejected. Exact unchanged incumbent source
+remains a no-op; prior non-incumbent workflows may be deliberately replicated.
+
+Candidate allocation is executable search breadth. A lane allocated `N`
+candidates is bounded to at most `N` optimizer samples/results, and the trusted
+generation index records the authored and effective sample counts. GPU seconds
+are a deadline, not a proxy for breadth: increasing time without requesting
+additional samples does not explore more candidates. The scientist may put the
+whole frozen candidate budget into one generator, split it unevenly, or compare
+one candidate from several generators according to its current hypothesis.
+
+Advisory specialist or student agents are outside the current empirical kernel.
+They may later be added as optional readers without changing ownership of
+`trial.py`, the frozen contract, or trusted execution.
+
+The locked empirical packet returns directly to the scientist, which interprets
+the run and updates `LAB.md` in the active tool turn. Trusted code then records
+an idempotent search observation and `EVENTS.md` mirror without launching
+another model. Literature and skill refinement are campaign-plane operations;
+they do not interrupt every empirical step, and skill changes remain
+replay-gated before activation.
+
+Every iteration reloads experiment history, OKF knowledge, notebook cycles,
+active campaign skills, run failures, candidates, locked scores, and predictor
+diagnostics, then reasserts the original contract hash. A rejected or failed
+program remains the mutable search head; the best comparable locked score
+remains the independent incumbent.
 
 ## Command
 
 ```text
 bun run research:cli -- autoresearch EXP_ID \
   --session SES_ID \
-  --iterations 3 \
+  --mode autonomous_discovery \
   --agent biology
 ```
 
-The command returns a durable `job_...` record immediately. Use `job watch
-JOB_ID` to follow it. Iterations are sequential and capped at ten. Rejected,
-invalid, and failed scientific trials update the next search context. Authoring
-or preflight failure remains terminal because no trusted executable trial was
-created.
+The command creates a durable job with leases, cancellation, checkpoints, and
+restart recovery. Autonomous mode defaults to a 100-trajectory authorization
+and may stop earlier from evidence. `--iterations N` narrows that authorization;
+`--mode single_intent` defaults to one. GPU runs remain exact-once through the
+existing trial/run checkpoint boundary.
 
-## Current limits
+## Remaining simplification
 
-- The controller is a leased, persisted background job with heartbeat, bounded
-  retry, cancellation, and restart recovery when the workspace is next opened.
-  Proposals, trials, runs, iteration outcomes, and the frozen contract lock are
-  checkpointed. Child-session creation remains the final at-least-once boundary.
-- Production structure-model execution still requires each selected
-  proto-tools CUDA environment and model weights.
-- Proto generation calls are pinned by the immutable program, frozen generator
-  declarations, explicit lane allocations, and worker-observed generation-run
-  artifacts. Native generator subprocess receipts can still be made richer.
-- Capability/skill refinement remains a separate loop. This controller consumes
-  workflow knowledge and changes experiment programs and validation manifests.
+Validation and empirical evaluation are inside the scientist tool loop. The
+trusted outer job retains leases, exact-once checkpoints, cancellation, and the
+authorized trajectory budget; it does not choose the scientist's program. A
+sole active experiment bypasses campaign planning and receives the remaining
+campaign trial budget, up to 100 trajectories, rather than one trajectory per
+campaign step. Literature refresh and replay-gated skill refinement are
+campaign-plane operations checked at the authorized discovery horizon or
+another explicit plane boundary. Durable continuation then resumes the scientist
+with refreshed knowledge or the replay-decided active skill.

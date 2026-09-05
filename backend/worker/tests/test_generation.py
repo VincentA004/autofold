@@ -2,15 +2,49 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
 from autofold_worker.generation import capture
+from autofold_worker.generator_diagnostics import GeneratorDiagnosticsCapture
+from autofold_worker.proto_portfolio import ProtoPortfolioLane, ProtoPortfolioProgram
 
 
 class GenerationCaptureTest(unittest.TestCase):
+    def test_captures_transient_freebindcraft_filter_diagnostics(self) -> None:
+        previous = os.environ.get("TMPDIR")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            with GeneratorDiagnosticsCapture(output, enabled=True) as diagnostics:
+                run = Path(os.environ["TMPDIR"]) / "bindcraft_test" / "designs"
+                run.mkdir(parents=True)
+                (run / "rejected_mpnn_full_stats.csv").write_text(
+                    "Design,Sequence,Surface_Hydrophobicity,n_InterfaceResidues,pLDDT\n"
+                    "one,AAAA,1,1,0\n"
+                    "two,CCCC,1,0,1\n",
+                    encoding="utf-8",
+                )
+                (run / "failure_csv.csv").write_text(
+                    "Trajectory_final_pLDDT,Trajectory_InterfaceResidues\n2,1\n",
+                    encoding="utf-8",
+                )
+                diagnostics.scan()
+            summary = diagnostics.summary()
+
+            self.assertFalse(diagnostics.root.exists())
+            self.assertEqual(os.environ.get("TMPDIR"), previous)
+            self.assertEqual(summary[0]["generator"], "freebindcraft")
+            self.assertEqual(summary[0]["rejectedCandidates"], 2)
+            self.assertEqual(summary[0]["rejectionFilters"], {
+                "Surface_Hydrophobicity": 2,
+                "n_InterfaceResidues": 1,
+                "pLDDT": 1,
+            })
+            self.assertEqual(summary[0]["trajectoryFailures"], 3)
+
     def test_records_observed_generator_components_and_structure(self) -> None:
         class Config:
             def model_dump(self, mode: str) -> dict[str, object]:
@@ -40,6 +74,8 @@ class GenerationCaptureTest(unittest.TestCase):
         )
         bundle = {
             "runId": "run_generation",
+            "generationReplicateId": "grep_generation",
+            "seeds": [7],
             "programHash": "sha256:" + "a" * 64,
             "targetArtifactHash": "sha256:" + "b" * 64,
             "proto": {"languageCommit": "c" * 40, "toolsCommit": "d" * 40},
@@ -70,6 +106,11 @@ class GenerationCaptureTest(unittest.TestCase):
             artifact_hash = "sha256:" + hashlib.sha256(artifact_path.read_bytes()).hexdigest()
 
             self.assertEqual(entry["modelId"], "rfdiffusion-mpnn-binder")
+            self.assertEqual(index["replicate"]["id"], "grep_generation")
+            self.assertEqual(index["replicate"]["requestedSeeds"], [7])
+            self.assertEqual(index["replicate"]["stochasticity"], "unknown")
+            self.assertEqual(index["generatorDiagnostics"], [])
+            self.assertTrue(index["replicate"]["realizedCandidateSetHash"].startswith("sha256:"))
             self.assertEqual(entry["artifactHash"], artifact_hash)
             self.assertEqual(captured["candidates"][0]["generation"]["artifactHash"], artifact_hash)
             self.assertEqual(artifact["generator"]["components"][0]["toolsCalled"], ["proteinmpnn-sample", "rfdiffusion3-design"])
@@ -151,6 +192,60 @@ class GenerationCaptureTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaisesRegex(ValueError, "exceeded its frozen candidate allocation"):
                 capture(bundle, candidates, program, Path(temporary))
+
+    def test_uses_composite_lane_identity_instead_of_flattened_generator_metadata(self) -> None:
+        def lane(key: str, sequence: str) -> ProtoPortfolioLane:
+            generator = SimpleNamespace(
+                _spec=SimpleNamespace(key=key, tools_called=[]),
+                _autofold_generator_id=key,
+                config={},
+            )
+            observed = SimpleNamespace(
+                sequence=sequence,
+                # Reproduce the ambiguous merged metadata that previously
+                # made heterogeneous GPU portfolios terminally fail.
+                _generator_metadata={"generator-one": {}, "generator-two": {}},
+                structure=None,
+            )
+            program = SimpleNamespace(
+                optimizers=[SimpleNamespace(generators=[generator])],
+                constructs=[SimpleNamespace(segments=[SimpleNamespace(result_sequences=[observed])])],
+                run=lambda: None,
+            )
+            return ProtoPortfolioLane(program, maximum_candidates=1, maximum_gpu_seconds=10)
+
+        program = ProtoPortfolioProgram([lane("generator-one", "AAAA"), lane("generator-two", "CCCC")])
+        bundle = {
+            "runId": "run_direct_portfolio",
+            "programHash": "sha256:" + "a" * 64,
+            "targetArtifactHash": "sha256:" + "b" * 64,
+            "proto": {"languageCommit": "c" * 40, "toolsCommit": "d" * 40},
+            "pipeline": {
+                "generation": {
+                    "budget": {"maximumCandidates": 2, "maximumGpuSeconds": 20},
+                    "generators": [
+                        {
+                            "id": "generator-one", "version": "c" * 40, "toolsCalled": [],
+                            "allocation": {"maximumCandidates": 1, "maximumGpuSeconds": 10},
+                        },
+                        {
+                            "id": "generator-two", "version": "c" * 40, "toolsCalled": [],
+                            "allocation": {"maximumCandidates": 1, "maximumGpuSeconds": 10},
+                        },
+                    ],
+                }
+            },
+        }
+        candidates = {"candidates": [
+            {"id": "one", "sequence": "AAAA", "seed": 1},
+            {"id": "two", "sequence": "CCCC", "seed": 2},
+        ]}
+        with tempfile.TemporaryDirectory() as temporary:
+            captured = capture(bundle, candidates, program, Path(temporary))
+        self.assertEqual(
+            [candidate["generation"]["model"] for candidate in captured["candidates"]],
+            ["generator-one", "generator-two"],
+        )
 
 
 if __name__ == "__main__":

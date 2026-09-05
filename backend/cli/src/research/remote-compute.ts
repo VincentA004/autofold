@@ -1,4 +1,5 @@
 import fs from "node:fs/promises"
+import { constants } from "node:fs"
 import path from "node:path"
 import { ComputeJobs } from "@/compute/jobs"
 
@@ -20,6 +21,23 @@ export namespace ResearchRemoteCompute {
         pxdesignExecutable?: string
       }
 
+  export interface GeneratorReadiness {
+    generator: string
+    configured: boolean
+    ready: boolean
+    reason?: string
+  }
+
+  export interface Readiness {
+    checkedAt: string
+    compute: "local" | "ssh"
+    host?: string
+    ready: boolean
+    generators: GeneratorReadiness[]
+    validatorArtifacts: "checked_at_launch"
+    error?: string
+  }
+
   function absoluteRemote(value: string | undefined, label: string): string {
     const clean = value?.replace(/\/$/, "")
     if (
@@ -32,6 +50,12 @@ export namespace ResearchRemoteCompute {
       throw new Error(`${label} must be a safe absolute POSIX path`)
     }
     return clean
+  }
+
+  export function sshAddressOptions(alias: string, configuredAddress?: string): string[] {
+    return configuredAddress && configuredAddress !== alias
+      ? ["-o", `HostName=${configuredAddress}`]
+      : []
   }
 
   export function profile(
@@ -99,15 +123,194 @@ export namespace ResearchRemoteCompute {
     }
   }
 
-  async function subprocess(argv: string[]): Promise<void> {
+  async function subprocess(
+    argv: string[],
+    options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<void> {
     const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+    let timedOut = false
+    const abort = () => child.kill("SIGTERM")
+    options.signal?.addEventListener("abort", abort, { once: true })
+    const timer = options.timeoutMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          timedOut = true
+          child.kill("SIGTERM")
+        }, options.timeoutMs)
     const [code, stdout, stderr] = await Promise.all([
       child.exited,
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
-    ])
+    ]).finally(() => {
+      if (timer) clearTimeout(timer)
+      options.signal?.removeEventListener("abort", abort)
+    })
+    if (timedOut) throw new Error(`${argv[0]} exceeded the ${options.timeoutMs}ms readiness timeout`)
+    options.signal?.throwIfAborted()
     if (code !== 0) {
       throw new Error(stderr.trim() || stdout.trim() || `${argv[0]} exited with code ${code}`)
+    }
+  }
+
+  export function configuredGenerators<T extends { key: string }>(
+    profile: Profile,
+    generators: T[],
+  ): T[] {
+    if (profile.kind !== "ssh") return generators
+    return generators.filter((generator) => {
+      if (generator.key === "boltzgen-binder") return Boolean(profile.boltzgenExecutable && profile.boltzgenCache)
+      if (generator.key === "pxdesign-binder") return Boolean(profile.pxdesignExecutable)
+      return true
+    })
+  }
+
+  export async function assertReady(
+    profile: Profile,
+    pipeline?: { generation?: { generators: Array<{ id: string }> } },
+    options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<void> {
+    if (profile.kind !== "ssh") return
+    const generators = new Set(pipeline?.generation?.generators.map((generator) => generator.id) ?? [])
+    const checks = [
+      `test -x ${ComputeJobs.quote(profile.python)}`,
+      ...(profile.protoRoot ? [`test -d ${ComputeJobs.quote(profile.protoRoot)}`] : []),
+      ...(profile.protoHome ? [`test -d ${ComputeJobs.quote(profile.protoHome)}`] : []),
+    ]
+    const missingConfiguration: string[] = []
+    if (generators.has("boltzgen-binder")) {
+      if (!profile.boltzgenExecutable || !profile.boltzgenCache) {
+        missingConfiguration.push("boltzgen-binder")
+      } else {
+        checks.push(`test -x ${ComputeJobs.quote(profile.boltzgenExecutable)}`)
+        checks.push(`test -d ${ComputeJobs.quote(profile.boltzgenCache)}`)
+      }
+    }
+    if (generators.has("pxdesign-binder")) {
+      if (!profile.pxdesignExecutable) missingConfiguration.push("pxdesign-binder")
+      else checks.push(`test -x ${ComputeJobs.quote(profile.pxdesignExecutable)}`)
+    }
+    if (missingConfiguration.length) {
+      throw new Error(
+        `Remote execution profile does not configure selected generators: ${missingConfiguration.join(", ")}`,
+      )
+    }
+    const address = profile.host.address ? ["-o", `HostName=${profile.host.address}`] : []
+    try {
+      await subprocess([
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=8",
+        ...address,
+        "--",
+        profile.host.host,
+        checks.join(" && "),
+      ], { timeoutMs: options.timeoutMs ?? 20_000, signal: options.signal })
+    } catch {
+      throw new Error(
+        `Remote execution readiness failed for selected generator portfolio: ${[...generators].join(", ") || "validator-only"}. Check the configured Python, Proto roots, generator executables, and caches before launching GPU work.`,
+      )
+    }
+  }
+
+  /**
+   * Produce compact, agent-readable execution evidence before a workflow is
+   * authored. The launch path still repeats the authoritative checks against
+   * the exact compiled pipeline, including gated validator artifacts.
+   */
+  export async function probe(
+    profile: Profile,
+    generatorKeys: string[],
+    options: {
+      timeoutMs?: number
+      signal?: AbortSignal
+      env?: NodeJS.ProcessEnv
+      assertReady?: typeof assertReady
+    } = {},
+  ): Promise<Readiness> {
+    const keys = [...new Set(generatorKeys)]
+    if (profile.kind === "local") {
+      const env = options.env ?? process.env
+      const executable = async (configured: string | undefined, fallback: string) => {
+        const candidate = configured?.trim() || fallback
+        const resolved = path.isAbsolute(candidate) ? candidate : Bun.which(candidate)
+        if (!resolved) return undefined
+        return fs.access(resolved, constants.X_OK).then(() => resolved).catch(() => undefined)
+      }
+      const generators = await Promise.all(keys.map(async (generator): Promise<GeneratorReadiness> => {
+        if (generator === "boltzgen-binder") {
+          const binary = await executable(env.AUTOFOLD_BOLTZGEN_EXECUTABLE, "boltzgen")
+          const cache = env.AUTOFOLD_BOLTZGEN_CACHE?.trim()
+          const cacheReady = cache ? await fs.stat(cache).then((stat) => stat.isDirectory()).catch(() => false) : false
+          const ready = Boolean(binary && cacheReady)
+          return {
+            generator,
+            configured: Boolean(binary && cache),
+            ready,
+            ...(ready ? {} : { reason: "Local BoltzGen requires an executable and AUTOFOLD_BOLTZGEN_CACHE directory" }),
+          }
+        }
+        if (generator === "pxdesign-binder") {
+          const binary = await executable(env.AUTOFOLD_PXDESIGN_EXECUTABLE, "pxdesign")
+          return {
+            generator,
+            configured: Boolean(binary),
+            ready: Boolean(binary),
+            ...(binary ? {} : { reason: "Local PXDesign executable was not found" }),
+          }
+        }
+        return { generator, configured: true, ready: true }
+      }))
+      return {
+        checkedAt: new Date().toISOString(),
+        compute: "local",
+        ready: generators.every((item) => item.ready),
+        generators,
+        validatorArtifacts: "checked_at_launch",
+      }
+    }
+
+    const generators = keys.map((generator): GeneratorReadiness => {
+      const configured = generator === "boltzgen-binder"
+        ? Boolean(profile.boltzgenExecutable && profile.boltzgenCache)
+        : generator === "pxdesign-binder"
+          ? Boolean(profile.pxdesignExecutable)
+          : true
+      return {
+        generator,
+        configured,
+        ready: false,
+        ...(configured ? {} : { reason: `Remote execution profile does not configure ${generator}` }),
+      }
+    })
+    const configured = generators.filter((item) => item.configured)
+    const check = options.assertReady ?? assertReady
+    // Readiness is a lane property. A missing optional generator executable or
+    // cache must not hide unrelated working generators from the scientist.
+    // Launch repeats the same authoritative check for the exact final pipeline.
+    await Promise.all(configured.map(async (item) => {
+      try {
+        await check(profile, {
+          generation: { generators: [{ id: item.generator }] },
+        }, options)
+        item.ready = true
+      } catch (cause) {
+        item.reason = cause instanceof Error ? cause.message : String(cause)
+      }
+    }))
+    const failures = generators.filter((item) => !item.ready && item.reason)
+    const error = failures.length
+      ? failures.map((item) => `${item.generator}: ${item.reason}`).join("; ")
+      : undefined
+    return {
+      checkedAt: new Date().toISOString(),
+      compute: "ssh",
+      host: profile.host.id,
+      ready: generators.every((item) => item.ready),
+      generators,
+      validatorArtifacts: "checked_at_launch",
+      ...(error ? { error } : {}),
     }
   }
 
@@ -207,17 +410,23 @@ export namespace ResearchRemoteCompute {
     if (configuredAddress && (!safeHost.test(configuredAddress) || configuredAddress.startsWith("-"))) {
       throw new Error("AUTOFOLD_RESEARCH_REMOTE_HOST contains unsupported characters")
     }
-    const address = configuredAddress ? ["-o", `HostName=${configuredAddress}`] : []
-    const temporary = path.join(path.dirname(output), `.remote-download-${crypto.randomUUID()}`)
+    const address = sshAddressOptions(alias, configuredAddress)
     await fs.mkdir(path.dirname(output), { recursive: true })
-    try {
-      await subprocess(["scp", "-q", ...address, "-r", `${alias}:${path.posix.join(job.cwd, "output")}`, temporary])
-      await validateDownloadedTree(temporary)
-      await fs.rename(temporary, output)
-    } catch (error) {
-      await fs.rm(temporary, { recursive: true, force: true }).catch(() => undefined)
-      throw error
+    let failure: unknown
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const temporary = path.join(path.dirname(output), `.remote-download-${crypto.randomUUID()}`)
+      try {
+        await subprocess(["scp", "-q", ...address, "-r", `${alias}:${path.posix.join(job.cwd, "output")}`, temporary])
+        await validateDownloadedTree(temporary)
+        await fs.rename(temporary, output)
+        return
+      } catch (error) {
+        failure = error
+        await fs.rm(temporary, { recursive: true, force: true }).catch(() => undefined)
+        if (attempt < 3) await Bun.sleep(attempt * 1_000)
+      }
     }
+    throw failure
   }
 
   export function command(

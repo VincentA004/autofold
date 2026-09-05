@@ -9,7 +9,9 @@ Campaign
 ├── Experiment contract (frozen objective, target, budget, evaluator)
 │   └── Trial configuration (hypothesis, program path and content hash)
 │       └── Run + locked evaluation
-│           └── Research outcome or failure
+│           ├── Research outcome or failure
+│           ├── Typed hypothesis outcome (supported/refuted/unresolved)
+│           └── Search observation + generator/predictor diagnostics
 ├── Literature source
 │   └── Literature claim
 │       └── Evidence alignment ──> exact research outcome
@@ -32,19 +34,30 @@ A citation never verifies an experimental result, and a model score never verifi
 
 A refresh becomes due when the campaign has no prior knowledge cycle, a new run outcome has not been consumed by a cycle, or the latest cycle's `nextReviewAt` watermark has passed. The bounded literature child receives the new outcomes and current graph, searches and fetches within explicit budgets, then submits one artifact. The backend validates exact excerpts and graph references before atomically recording the entire cycle.
 
-The product-facing loop is deliberately smaller than the storage model:
+The recursive execution loop commits deterministic trajectory knowledge before
+the persistent scientist authors its next mutable `trial.py` delta:
 
 ```text
 run one trial
-  -> refresh only when new evidence is due
-  -> return one compact campaign summary
-  -> return one advisory next-experiment proposal
-  -> user or parent agent decides whether to execute it
+  -> deterministically close the trajectory
+  -> publish its score, generator diagnostics, and hypothesis outcome
+  -> reload the campaign knowledge and unchanged contract hash
+  -> let the scientist author and evaluate the next Proto delta
 ```
 
 The proposal contains an action, hypothesis, rationale, and success criterion.
 It cannot create an experiment, change a contract, or change an evaluator. A
 `continue_experiment` proposal must name an exact experiment in the campaign.
+
+Deterministic closeout—outcome, hypothesis state, diagnostics, search observation,
+and an empirical knowledge cycle—is the experiment-loop synchronization barrier.
+External literature retrieval is a separately scheduled campaign-plane action;
+it is required when due at a campaign boundary but does not block every empirical
+edit/evaluate step. Skill refinement likewise stays separate and replay-gated:
+one trajectory may emit a persistent skill-feedback signal, but it cannot
+activate its own methodological lesson. The next campaign observation includes
+those signals alongside completed trajectories and failed authoring attempts;
+promotion still requires an explicit refinement plus held-out shadow replay.
 
 ```text
 bun run research:cli -- knowledge status CMP_ID
@@ -67,6 +80,8 @@ The bundle follows OKF v0.2's Markdown plus YAML model, lifecycle metadata, sour
 | `experiments/` | Frozen experiment contracts and evaluator configuration |
 | `trials/` | Trial hypotheses and content-addressed programs |
 | `concepts/` | Locked evaluation outcomes and terminal failures |
+| `hypotheses/` | Competing hypotheses with falsification criteria and evidence-linked supported/refuted state |
+| `search/` | Explored Proto fingerprints, portfolios, score deltas, and structured generator diagnostics |
 | `sources/` | Immutable literature records and frozen excerpts |
 | `claims/` | Evidence-linked literature claims |
 | `alignments/` | Typed claim-to-outcome interpretations |

@@ -292,6 +292,25 @@ export namespace Agent {
         mode: "subagent",
         native: true,
       },
+      "autofold-discovery-acquisition": {
+        name: "autofold-discovery-acquisition",
+        temperature: 0,
+        description: "Bounded Autofold acquisition scientist that authors one program-strategy tournament.",
+        permission: PermissionNext.merge(
+          defaults,
+          PermissionNext.fromConfig({
+            "*": "deny",
+            read: "allow",
+            write: "allow",
+            apply_patch: "allow",
+            edit: "allow",
+          }),
+          user,
+        ),
+        options: {},
+        mode: "subagent",
+        native: true,
+      },
       "autofold-specialist": {
         name: "autofold-specialist",
         temperature: 0,
@@ -313,16 +332,23 @@ export namespace Agent {
       },
       "autofold-proto-author": {
         name: "autofold-proto-author",
-        temperature: 0,
-        description: "Bounded Autofold Proto author that edits one incumbent-derived trial program.",
+        temperature: 0.2,
+        description: "Persistent Autofold scientist that interprets evidence and evolves one mutable Proto trial program.",
         permission: PermissionNext.merge(
           defaults,
           PermissionNext.fromConfig({
             "*": "deny",
             read: "allow",
+            glob: "allow",
+            grep: "allow",
             apply_patch: "allow",
             edit: "allow",
             write: "allow",
+            // Keep the empirical kernel single-scientist. Advisory students can
+            // be reintroduced independently without changing the trial API.
+            task: "deny",
+            autofold_validate_trial: "allow",
+            autofold_evaluate_trial: "allow",
           }),
           user,
         ),

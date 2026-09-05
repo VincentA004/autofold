@@ -27,6 +27,9 @@ export namespace ResearchService {
         "claim",
         "alignment",
         "knowledge_cycle",
+        "campaign_charter",
+        "hypothesis",
+        "search_observation",
         "skill_version",
       ]),
       id: z.string(),
@@ -53,6 +56,8 @@ export namespace ResearchService {
     designAdapter: z.enum(["mock", "proto"]),
     programPath: z.string().trim().min(1).max(4_000),
     programHash: digest,
+    generators: ResearchDomain.Trial.shape.generators.default([]),
+    generatorAllocations: ResearchDomain.Trial.shape.generatorAllocations.default([]),
     parentTrialId: z.string().startsWith("trl_").optional(),
     origin: ResearchDomain.Trial.shape.origin.optional(),
     skills: z.array(ResearchSkills.Reference).max(30).default([]),
@@ -153,6 +158,27 @@ export namespace ResearchService {
       question: z.string().trim().min(1).max(2_000).optional(),
       trigger: ResearchDomain.KnowledgeCycle.shape.trigger.default("literature_review"),
       inputKnowledgeIds: z.array(z.string().startsWith("knw_")).max(1_000).default([]),
+      hypothesisUpdates: z.array(z.object({
+        hypothesisId: z.string().startsWith("hyp_").optional(),
+        category: ResearchDomain.ResearchHypothesis.shape.category,
+        statement: ResearchDomain.ResearchHypothesis.shape.statement,
+        status: ResearchDomain.ResearchHypothesis.shape.status,
+        confidence: ResearchDomain.ResearchHypothesis.shape.confidence,
+        evidenceLevel: ResearchDomain.EpistemicLevel,
+        supportingEvidenceRefs: z.array(ResearchDomain.EvidenceRef).max(100).default([]),
+        opposingEvidenceRefs: z.array(ResearchDomain.EvidenceRef).max(100).default([]),
+        prediction: ResearchDomain.ResearchHypothesis.shape.prediction,
+        falsificationCriterion: ResearchDomain.ResearchHypothesis.shape.falsificationCriterion,
+        recommendedExperiment: ResearchDomain.ResearchHypothesis.shape.recommendedExperiment,
+        limitations: ResearchDomain.ResearchHypothesis.shape.limitations.default([]),
+      })).max(20).default([]),
+      searchObservations: z.array(ResearchDomain.SearchObservation.omit({
+        id: true,
+        campaignId: true,
+        knowledgeCycleId: true,
+        epistemicLevel: true,
+        createdAt: true,
+      })).max(100).default([]),
     })
     .superRefine((review, context) => {
       const keys = new Set(review.sources.map((source) => source.key))
@@ -190,7 +216,7 @@ export namespace ResearchService {
 
   export interface Options {
     now?: () => string
-    id?: (prefix: "cmp" | "exp" | "trl" | "evl" | "run" | "knw" | "lit" | "clm" | "aln" | "kcy") => string
+    id?: (prefix: "cmp" | "exp" | "trl" | "evl" | "run" | "knw" | "lit" | "clm" | "aln" | "kcy" | "chr" | "hyp" | "sobs") => string
   }
 
   export interface EvaluationResult {
@@ -204,7 +230,7 @@ export namespace ResearchService {
   export class Service {
     private readonly now: () => string
     private readonly id: (
-      prefix: "cmp" | "exp" | "trl" | "evl" | "run" | "knw" | "lit" | "clm" | "aln" | "kcy",
+      prefix: "cmp" | "exp" | "trl" | "evl" | "run" | "knw" | "lit" | "clm" | "aln" | "kcy" | "chr" | "hyp" | "sobs",
     ) => string
 
     constructor(
@@ -218,6 +244,38 @@ export namespace ResearchService {
     async listCampaigns(projectId: string): Promise<ResearchDomain.Campaign[]> {
       const state = await this.store.read(projectId)
       return Object.values(state.campaigns).toSorted((a, b) => b.createdAt.localeCompare(a.createdAt))
+    }
+
+    async campaignResearchState(projectId: string, campaignId: string): Promise<{
+      charter: ResearchDomain.CampaignCharter
+      hypotheses: ResearchDomain.ResearchHypothesis[]
+      searchObservations: ResearchDomain.SearchObservation[]
+      trialCount: number
+    }> {
+      return this.store.mutate(projectId, (state) => {
+        const campaign = this.campaign(state, campaignId)
+        const charter = this.ensureCampaignCharter(state, campaign)
+        return {
+          charter,
+          hypotheses: Object.values(state.hypotheses)
+            .filter((hypothesis) => hypothesis.campaignId === campaignId)
+            .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id)),
+          searchObservations: Object.values(state.searchObservations)
+            .filter((observation) => observation.campaignId === campaignId)
+            .toSorted((left, right) => right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id)),
+          trialCount: Object.values(state.trials).filter((trial) =>
+            state.experiments[trial.experimentId]?.campaignId === campaignId
+          ).length,
+        }
+      })
+    }
+
+    async listHypotheses(projectId: string, campaignId: string): Promise<ResearchDomain.ResearchHypothesis[]> {
+      return (await this.campaignResearchState(projectId, campaignId)).hypotheses
+    }
+
+    async listSearchObservations(projectId: string, campaignId: string): Promise<ResearchDomain.SearchObservation[]> {
+      return (await this.campaignResearchState(projectId, campaignId)).searchObservations
     }
 
     async listKnowledge(projectId: string, campaignId: string): Promise<ResearchDomain.KnowledgeConcept[]> {
@@ -436,6 +494,7 @@ export namespace ResearchService {
       const input = LiteratureReviewInput.parse(raw)
       return this.store.mutate(projectId, (state) => {
         const campaign = this.campaign(state, campaignId)
+        this.ensureCampaignCharter(state, campaign)
         const prior = Object.values(state.knowledgeCycles).find(
           (cycle) => cycle.campaignId === campaignId && cycle.generated.by === input.generatedBy,
         )
@@ -554,10 +613,26 @@ export namespace ResearchService {
           return claim
         })
         const createdAt = this.now()
+        const cycleId = this.id("kcy")
+        const searchObservations = this.recordSearchObservations(
+          state,
+          campaignId,
+          cycleId,
+          input.searchObservations,
+          createdAt,
+        )
+        const hypotheses = this.applyHypothesisUpdates(
+          state,
+          campaignId,
+          input.generatedBy,
+          input.hypothesisUpdates,
+          searchObservations,
+          createdAt,
+        )
         const nextReview = new Date(createdAt)
         nextReview.setUTCDate(nextReview.getUTCDate() + 7)
         const cycle = ResearchDomain.KnowledgeCycle.parse({
-          id: this.id("kcy"),
+          id: cycleId,
           campaignId,
           trigger: input.trigger,
           question: input.question ?? campaign.objective,
@@ -570,6 +645,8 @@ export namespace ResearchService {
             literatureIds: [...new Set(records.map((record) => record.id))].toSorted(),
             claimIds: claims.map((claim) => claim.id).toSorted(),
             alignmentIds: alignments.map((alignment) => alignment.id).toSorted(),
+            hypothesisIds: hypotheses.map((hypothesis) => hypothesis.id).toSorted(),
+            searchObservationIds: searchObservations.map((observation) => observation.id).toSorted(),
             unresolvedQuestions: input.unresolvedQuestions,
           },
           generated: { by: input.generatedBy, at: createdAt },
@@ -601,6 +678,7 @@ export namespace ResearchService {
           updatedAt: timestamp,
         })
         state.campaigns[campaign.id] = campaign
+        this.ensureCampaignCharter(state, campaign)
         return campaign
       })
     }
@@ -705,6 +783,8 @@ export namespace ResearchService {
               existing.programHash !== input.programHash ||
               existing.designAdapter !== input.designAdapter ||
               existing.intent !== input.intent ||
+              JSON.stringify(existing.generators) !== JSON.stringify(input.generators) ||
+              JSON.stringify(existing.generatorAllocations) !== JSON.stringify(input.generatorAllocations) ||
               JSON.stringify(existing.skills) !== JSON.stringify(input.skills)
             ) {
               throw new ConflictError({
@@ -732,6 +812,8 @@ export namespace ResearchService {
           parentTrialId,
           origin: input.origin,
           skills: input.skills,
+          generators: input.generators,
+          generatorAllocations: input.generatorAllocations,
           hypothesis: input.hypothesis,
           intent: input.intent,
           designAdapter: input.designAdapter,
@@ -836,6 +918,64 @@ export namespace ResearchService {
 
     async getRun(projectId: string, runId: string): Promise<ResearchDomain.Run> {
       return this.run(await this.store.read(projectId), runId)
+    }
+
+    async reopenRunFinalization(projectId: string, runId: string): Promise<ResearchDomain.Run> {
+      return this.store.mutate(projectId, (state) => {
+        const run = this.run(state, runId)
+        const trial = this.trial(state, run.trialId)
+        if (run.status !== "failed" || trial.status !== "failed" || !run.jobId) {
+          throw new ConflictError({
+            code: "run_not_recoverable",
+            message: `Run ${runId} is not a failed compute-backed run`,
+          })
+        }
+        if (Object.values(state.evaluations).some((evaluation) => evaluation.trialId === trial.id)) {
+          throw new ConflictError({
+            code: "run_already_evaluated",
+            message: `Run ${runId} already has a locked evaluation`,
+          })
+        }
+        const timestamp = this.now()
+        const reopened = ResearchDomain.Run.parse({
+          ...run,
+          status: "running",
+          error: undefined,
+          completedAt: undefined,
+        })
+        state.runs[runId] = reopened
+        state.trials[trial.id] = ResearchDomain.Trial.parse({
+          ...trial,
+          status: "running",
+          updatedAt: timestamp,
+        })
+        return reopened
+      })
+    }
+
+    async supersedeRecoveredFailures(projectId: string, runId: string, workspace?: string): Promise<number> {
+      const result = await this.store.mutate(projectId, (state) => {
+        const run = this.run(state, runId)
+        const trial = this.trial(state, run.trialId)
+        const experiment = this.experiment(state, trial.experimentId)
+        if (run.status !== "succeeded") return { updated: 0, campaignId: experiment.campaignId }
+        const evaluation = Object.values(state.evaluations).find((item) => item.trialId === run.trialId)
+        if (!evaluation) return { updated: 0, campaignId: experiment.campaignId }
+        let updated = 0
+        for (const concept of Object.values(state.knowledge)) {
+          if (concept.runId !== run.id || concept.type !== "Research Failure" || concept.status === "deprecated") continue
+          state.knowledge[concept.id] = ResearchDomain.KnowledgeConcept.parse({
+            ...concept,
+            description: `${concept.description} Superseded after the original compute artifacts were retrieved and verified as evaluation ${evaluation.id}.`,
+            tags: [...new Set([...concept.tags, "recovered", "superseded-by-evaluation"])],
+            status: "deprecated",
+          })
+          updated += 1
+        }
+        return { updated, campaignId: experiment.campaignId }
+      })
+      if (workspace && result.updated > 0) await this.publishKnowledge(projectId, result.campaignId, workspace)
+      return result.updated
     }
 
     async failRun(projectId: string, runId: string, message: string, workspace?: string): Promise<ResearchDomain.Run> {
@@ -982,7 +1122,10 @@ export namespace ResearchService {
       const runs = Object.values(state.runs)
         .filter((run) => trialIds.has(run.trialId))
         .toSorted((a, b) => a.createdAt.localeCompare(b.createdAt))
-      return { experiment, trials, evaluations, runs }
+      const knowledge = Object.values(state.knowledge)
+        .filter((concept) => concept.experimentId === experimentId)
+        .toSorted((a, b) => a.createdAt.localeCompare(b.createdAt))
+      return { experiment, trials, evaluations, runs, knowledge }
     }
 
     private evaluate(
@@ -1094,6 +1237,17 @@ export namespace ResearchService {
         },
         createdAt: evaluatedAt,
       })
+      if (run) {
+        for (const concept of Object.values(state.knowledge)) {
+          if (concept.runId !== run.id || concept.type !== "Research Failure" || concept.status === "deprecated") continue
+          state.knowledge[concept.id] = ResearchDomain.KnowledgeConcept.parse({
+            ...concept,
+            description: `${concept.description} Superseded after the original compute artifacts were retrieved and verified as evaluation ${evaluation.id}.`,
+            tags: [...new Set([...concept.tags, "recovered", "superseded-by-evaluation"])],
+            status: "deprecated",
+          })
+        }
+      }
       state.evaluations[evaluation.id] = evaluation
       state.trials[trial.id] = completedTrial
       state.experiments[experiment.id] = updatedExperiment
@@ -1108,6 +1262,7 @@ export namespace ResearchService {
     }
 
     private async publishKnowledge(projectId: string, campaignId: string, workspace: string): Promise<void> {
+      await this.campaignResearchState(projectId, campaignId)
       using _ = await Lock.write(`research-okf:${projectId}:${campaignId}`)
       const state = await this.store.read(projectId)
       const campaign = this.campaign(state, campaignId)
@@ -1119,6 +1274,9 @@ export namespace ResearchService {
       const experiments = Object.values(state.experiments).filter((experiment) => experiment.campaignId === campaignId)
       const experimentIds = new Set(experiments.map((experiment) => experiment.id))
       const trials = Object.values(state.trials).filter((trial) => experimentIds.has(trial.experimentId))
+      const charter = state.campaignCharters[campaignId]!
+      const hypotheses = Object.values(state.hypotheses).filter((hypothesis) => hypothesis.campaignId === campaignId)
+      const searchObservations = Object.values(state.searchObservations).filter((observation) => observation.campaignId === campaignId)
       await ResearchKnowledge.writeBundle({
         workspace,
         campaign,
@@ -1129,7 +1287,238 @@ export namespace ResearchService {
         cycles,
         experiments,
         trials,
+        charter,
+        hypotheses,
+        searchObservations,
       })
+    }
+
+    private recordSearchObservations(
+      state: ResearchState,
+      campaignId: string,
+      cycleId: string,
+      proposals: z.infer<typeof LiteratureReviewInput>["searchObservations"],
+      createdAt: string,
+    ): ResearchDomain.SearchObservation[] {
+      return proposals.map((proposal) => {
+        const existing = Object.values(state.searchObservations).find(
+          (observation) => observation.campaignId === campaignId && observation.knowledgeId === proposal.knowledgeId,
+        )
+        if (existing) return existing
+        const experiment = state.experiments[proposal.experimentId]
+        const trial = state.trials[proposal.trialId]
+        const run = state.runs[proposal.runId]
+        const evaluation = proposal.evaluationId ? state.evaluations[proposal.evaluationId] : undefined
+        const knowledge = state.knowledge[proposal.knowledgeId]
+        if (!experiment || experiment.campaignId !== campaignId) {
+          throw new NotFoundError({ entity: "experiment", id: proposal.experimentId })
+        }
+        if (!trial || trial.experimentId !== experiment.id) {
+          throw new NotFoundError({ entity: "trial", id: proposal.trialId })
+        }
+        if (!run || run.trialId !== trial.id) throw new NotFoundError({ entity: "run", id: proposal.runId })
+        if (proposal.evaluationId && (!evaluation || evaluation.trialId !== trial.id)) {
+          throw new NotFoundError({ entity: "evaluation", id: proposal.evaluationId })
+        }
+        if (!knowledge || knowledge.campaignId !== campaignId || knowledge.trialId !== trial.id) {
+          throw new NotFoundError({ entity: "knowledge", id: proposal.knowledgeId })
+        }
+        const distinctModels = new Set(proposal.modelIds)
+        const distinctSeeds = new Set(proposal.seeds)
+        const epistemicLevel: ResearchDomain.EpistemicLevel = proposal.decision === "failed"
+          ? "model_observation"
+          : distinctSeeds.size > 1
+            ? "multi_seed_support"
+            : distinctModels.size > 1
+              ? "cross_model_support"
+              : proposal.evaluationId
+                ? "computational_support"
+                : "model_observation"
+        const observation = ResearchDomain.SearchObservation.parse({
+          id: this.id("sobs"),
+          campaignId,
+          knowledgeCycleId: cycleId,
+          ...proposal,
+          generatorPortfolio: [...new Set(proposal.generatorPortfolio)].toSorted(),
+          candidateSequences: [...new Set(proposal.candidateSequences)],
+          modelIds: [...distinctModels].toSorted(),
+          seeds: [...distinctSeeds].toSorted((left, right) => left - right),
+          epistemicLevel,
+          createdAt,
+        })
+        state.searchObservations[observation.id] = observation
+        return observation
+      })
+    }
+
+    private applyHypothesisUpdates(
+      state: ResearchState,
+      campaignId: string,
+      generatedBy: string,
+      updates: z.infer<typeof LiteratureReviewInput>["hypothesisUpdates"],
+      newObservations: ResearchDomain.SearchObservation[],
+      updatedAt: string,
+    ): ResearchDomain.ResearchHypothesis[] {
+      const levels = ResearchDomain.EpistemicLevel.options
+      const observations = [
+        ...Object.values(state.searchObservations).filter((observation) => observation.campaignId === campaignId),
+        ...newObservations,
+      ]
+      return updates.map((update) => {
+        const references = [...new Set([...update.supportingEvidenceRefs, ...update.opposingEvidenceRefs])]
+        for (const reference of references) this.assertCampaignEvidenceRef(state, campaignId, reference)
+        if (["supported", "weakened", "refuted"].includes(update.status) && references.length === 0) {
+          throw new ConflictError({
+            code: "hypothesis_evidence_required",
+            message: `Hypothesis status ${update.status} requires exact persisted evidence references`,
+          })
+        }
+        const relevant = observations.filter((observation) => {
+          const linked = new Set([
+            observation.id,
+            observation.experimentId,
+            observation.trialId,
+            observation.runId,
+            observation.evaluationId,
+            observation.knowledgeId,
+            observation.knowledgeCycleId,
+          ].filter((value): value is string => Boolean(value)))
+          return references.some((reference) => linked.has(reference))
+        })
+        let trusted: ResearchDomain.EpistemicLevel = references.length
+          ? "computational_support"
+          : "model_observation"
+        if (new Set(relevant.flatMap((observation) => observation.modelIds)).size > 1) trusted = "cross_model_support"
+        if (new Set(relevant.flatMap((observation) => observation.seeds)).size > 1) trusted = "multi_seed_support"
+        const requestedRank = levels.indexOf(update.evidenceLevel)
+        const trustedRank = levels.indexOf(trusted)
+        const evidenceLevel = levels[Math.min(requestedRank, trustedRank)]!
+        const overclaimsPhysicalValidation = trustedRank < levels.indexOf("experimental_support")
+          && /\b(?:physically\s+)?(?:confirmed|validated|proven)\b/i.test(update.statement)
+          && /\b(?:bind(?:er|ing|s)?|specific(?:ity)?|engage(?:ment|s|d)?|affinity)\b/i.test(update.statement)
+        const statement = overclaimsPhysicalValidation
+          ? update.statement
+            .replace(/\bphysically\s+confirmed\b/gi, "computationally supported")
+            .replace(/\b(?:confirmed|validated|proven)\b/gi, "computationally supported")
+          : update.statement
+        const epistemicLimitation = requestedRank > trustedRank
+          ? [`Requested ${update.evidenceLevel}, but trusted campaign evidence supports at most ${trusted}; computational evidence cannot establish physical binding.`]
+          : []
+        if (overclaimsPhysicalValidation) {
+          epistemicLimitation.push("The submitted hypothesis wording claimed physical validation; the trusted service bounded it to computational support.")
+        }
+        const existing = update.hypothesisId
+          ? state.hypotheses[update.hypothesisId]
+          : Object.values(state.hypotheses).find(
+              (hypothesis) => hypothesis.campaignId === campaignId && hypothesis.statement.trim().toLowerCase() === update.statement.trim().toLowerCase(),
+            )
+        if (update.hypothesisId && (!existing || existing.campaignId !== campaignId)) {
+          throw new NotFoundError({ entity: "hypothesis", id: update.hypothesisId })
+        }
+        const hypothesis = ResearchDomain.ResearchHypothesis.parse({
+          id: existing?.id ?? this.id("hyp"),
+          campaignId,
+          category: update.category,
+          statement,
+          status: update.status,
+          confidence: update.confidence,
+          evidenceLevel,
+          supportingEvidenceRefs: [...new Set([
+            ...(existing?.supportingEvidenceRefs ?? []),
+            ...update.supportingEvidenceRefs,
+          ])],
+          opposingEvidenceRefs: [...new Set([
+            ...(existing?.opposingEvidenceRefs ?? []),
+            ...update.opposingEvidenceRefs,
+          ])],
+          prediction: update.prediction,
+          falsificationCriterion: update.falsificationCriterion,
+          recommendedExperiment: update.recommendedExperiment,
+          limitations: [...new Set([
+            ...(existing?.limitations ?? []),
+            ...update.limitations,
+            ...epistemicLimitation,
+          ])],
+          generated: { by: generatedBy, at: updatedAt },
+          createdAt: existing?.createdAt ?? updatedAt,
+          updatedAt,
+        })
+        state.hypotheses[hypothesis.id] = hypothesis
+        return hypothesis
+      })
+    }
+
+    private assertCampaignEvidenceRef(state: ResearchState, campaignId: string, reference: string): void {
+      const experimentIds = new Set(Object.values(state.experiments)
+        .filter((experiment) => experiment.campaignId === campaignId)
+        .map((experiment) => experiment.id))
+      const trialIds = new Set(Object.values(state.trials)
+        .filter((trial) => experimentIds.has(trial.experimentId))
+        .map((trial) => trial.id))
+      const valid = new Set<string>([
+        campaignId,
+        ...experimentIds,
+        ...trialIds,
+        ...Object.values(state.evaluations).filter((evaluation) => trialIds.has(evaluation.trialId)).map((item) => item.id),
+        ...Object.values(state.runs).filter((run) => trialIds.has(run.trialId)).map((item) => item.id),
+        ...Object.values(state.knowledge).filter((item) => item.campaignId === campaignId).map((item) => item.id),
+        ...Object.values(state.literature).filter((item) => item.campaignId === campaignId).map((item) => item.id),
+        ...Object.values(state.claims).filter((item) => item.campaignId === campaignId).map((item) => item.id),
+        ...Object.values(state.alignments).filter((item) => item.campaignId === campaignId).map((item) => item.id),
+        ...Object.values(state.knowledgeCycles).filter((item) => item.campaignId === campaignId).map((item) => item.id),
+        ...Object.values(state.skillVersions).filter((item) => item.campaignId === campaignId).map((item) => item.id),
+        ...Object.values(state.hypotheses).filter((item) => item.campaignId === campaignId).map((item) => item.id),
+        ...Object.values(state.searchObservations).filter((item) => item.campaignId === campaignId).map((item) => item.id),
+        ...Object.values(state.campaignCharters).filter((item) => item.campaignId === campaignId).map((item) => item.id),
+      ])
+      if (!valid.has(reference)) {
+        throw new ConflictError({
+          code: "hypothesis_evidence_outside_campaign",
+          message: `Hypothesis evidence ${reference} is not persisted in campaign ${campaignId}`,
+        })
+      }
+    }
+
+    private ensureCampaignCharter(
+      state: ResearchState,
+      campaign: ResearchDomain.Campaign,
+    ): ResearchDomain.CampaignCharter {
+      const existing = state.campaignCharters[campaign.id]
+      if (existing) return existing
+      const timestamp = this.now()
+      const charter = ResearchDomain.CampaignCharter.parse({
+        id: this.id("chr"),
+        campaignId: campaign.id,
+        version: 1,
+        objective: campaign.objective,
+        successCriteria: [{
+          id: "biological_objective",
+          statement: `Produce a candidate that satisfies the campaign objective with robust, independently supported evidence: ${campaign.objective}`,
+          requiredEvidenceLevel: "multi_seed_support",
+          status: "open",
+        }],
+        requiredControls: [
+          "Specificity interpretations require controls with matched candidate-panel cardinality under a frozen evaluator contract.",
+          "Breakthrough claims require confirmation across more than one frozen seed or an explicitly approved experimental evidence source.",
+        ],
+        stopConditions: [
+          { kind: "budget_exhausted", criterion: "The approved campaign or experiment compute budget is exhausted." },
+          { kind: "improvement_plateau", criterion: "Comparable locked scores plateau without a justified information-gain experiment." },
+          { kind: "repeated_equivalent_proposals", criterion: "The author repeatedly proposes equivalent programs without replication justification." },
+          { kind: "insufficient_evidence", criterion: "No authorized experiment can resolve the leading uncertainty." },
+          { kind: "breakthrough", criterion: "Every open success criterion reaches its required trusted evidence level." },
+          { kind: "approval_required", criterion: "Progress requires changing a frozen contract or crossing an external approval boundary." },
+        ],
+        constraints: {
+          requireMatchedControlCardinality: true,
+          requireMultiSeedConfirmation: true,
+        },
+        status: "active",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      })
+      state.campaignCharters[campaign.id] = charter
+      return charter
     }
 
     private campaign(state: ResearchState, id: string): ResearchDomain.Campaign {

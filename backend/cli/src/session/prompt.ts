@@ -63,6 +63,7 @@ import { Inference } from "@/provider/inference"
 import { Memory } from "@/settings/memory"
 import { OpenScience } from "@/openscience"
 import { assertExternalDirectory } from "@/tool/external-directory"
+import { ResearchModel } from "@/research/model"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -454,15 +455,18 @@ export namespace SessionPrompt {
       }
 
       step++
+      const loopSelection = lastUser.agent.startsWith("autofold-")
+        ? ResearchModel.DEFAULT
+        : lastUser.model
       if (step === 1)
         ensureTitle({
           session,
-          modelID: lastUser.model.modelID,
-          providerID: lastUser.model.providerID,
+          modelID: loopSelection.modelID,
+          providerID: loopSelection.providerID,
           history: msgs,
         }).catch((error) => log.error("failed to generate session title", { error }))
 
-      const model = await Provider.getModel(lastUser.model.providerID, lastUser.model.modelID).catch((e) => {
+      const model = await Provider.getModel(loopSelection.providerID, loopSelection.modelID).catch((e) => {
         if (Provider.ModelNotFoundError.isInstance(e)) return undefined
         throw e
       })
@@ -470,7 +474,7 @@ export namespace SessionPrompt {
       // removed) — surface a session error instead of crashing the loop.
       if (!model) {
         const error = new NamedError.Unknown({
-          message: `Model ${lastUser.model.providerID}/${lastUser.model.modelID} is not available. Add your own API key (\`openscience keys add\`) or connect a managed account (\`openscience login\`), then choose a model.`,
+          message: `Model ${loopSelection.providerID}/${loopSelection.modelID} is not available. Add your own API key (\`openscience keys add\`) or connect a managed account (\`openscience login\`), then choose a model.`,
         }).toObject()
         Bus.publish(Session.Event.Error, { sessionID, error })
         await Session.updateMessage({
@@ -491,8 +495,8 @@ export namespace SessionPrompt {
             reasoning: 0,
             cache: { read: 0, write: 0 },
           },
-          modelID: lastUser.model.modelID,
-          providerID: lastUser.model.providerID,
+          modelID: loopSelection.modelID,
+          providerID: loopSelection.providerID,
           error,
           time: {
             created: Date.now(),
@@ -507,7 +511,12 @@ export namespace SessionPrompt {
       // TODO: centralize "invoke tool" logic
       if (task?.type === "subtask") {
         const taskTool = await TaskTool.init()
-        const taskModel = task.model ? await Provider.getModel(task.model.providerID, task.model.modelID) : model
+        const taskSelection = lastUser.agent.startsWith("autofold-") || ResearchModel.isResearchModel(lastUser.model)
+          ? ResearchModel.DEFAULT
+          : task.model
+        const taskModel = taskSelection
+          ? await Provider.getModel(taskSelection.providerID, taskSelection.modelID)
+          : model
         const assistantMessage = (await Session.updateMessage({
           id: await MessageV2.nextMessageID(sessionID),
           role: "assistant",

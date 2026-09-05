@@ -1,18 +1,17 @@
 # Recursive orchestration v1
 
-The orchestration plane is Autofold's central product, not a collection of
-fixed biology agents. One campaign supervisor repeatedly observes the durable
-research state, composes the smallest useful specialist context, proposes one
-typed move, and submits that move to trusted policy and execution layers.
+The orchestration plane separates active experiment recursion from campaign
+boundaries. A sole active frozen experiment resumes its persistent
+[scientist loop v1](scientist-loop-v1.md) directly. Planner, specialist, and
+supervisor synthesis is reserved for selecting between experiments, requesting
+contract changes, reviews, skill lifecycle operations, approvals, and stop.
 
 ```text
-campaign objective + budget
-        |
-        v
-state observation ──> team planner ──> parallel specialists ──> synthesis ──> typed move
-        ^                                         |
-        |                                         v
-OKF graph <── verified outcome <── durable job <── policy compiler
+active experiment observation ──> persistent scientist ──> trial.py ──> trusted execution
+             ^                                                        |
+             └──────── locked result + deterministic OKF event ───────┘
+
+campaign boundary ──> optional team/supervisor analysis ──> typed boundary move
 ```
 
 ## Separation of authority
@@ -31,10 +30,11 @@ or stable claim.
 
 ## Initial move language
 
-The first supervisor should emit exactly one of:
+At a campaign boundary the supervisor may emit exactly one of:
 
-- `iterate_experiment`: run bounded autoresearch on an active experiment, with
-  an optional typed search policy and generator portfolio;
+- `iterate_experiment`: run autonomous discovery on an active experiment. Each
+  fresh cycle owns its intent and program strategy; explicit `single_intent`
+  mode remains available for an operator-requested replay/control;
 - `refresh_knowledge`: align new outcomes with current literature;
 - `request_experiment`: propose a new frozen contract for approval;
 - `request_review`: escalate contested or high-impact claims;
@@ -70,26 +70,22 @@ belong to Proto and the execution plane. See
 
 External literature retrieval remains an explicit `refresh_knowledge` move. It
 uses the evidence-verifying literature child and commits sources and claims to
-OKF. The next supervisor step then plans specialists over the updated knowledge
-graph. This preserves the boundary between retrieved evidence and analytical
-opinion.
+OKF. Active experiment recursion does not wait for this review. This preserves
+the boundary between retrieved evidence and analytical opinion.
 
 ## Research-agent model policy
 
 Autofold research agents do not inherit the interactive OpenScience session's
-model. The default route is the dated, reproducible OpenRouter model
-`deepseek/deepseek-v4-flash-0731`. An operator may deliberately replace it with
-`AUTOFOLD_RESEARCH_MODEL=provider:model`, but changing the donor UI model has no
-effect on campaign planners, specialists, literature review, Proto authors, or
-the campaign supervisor.
+model. Every Autofold-originated inference is pinned to the dated, reproducible
+OpenRouter model `z-ai/glm-5.3-flash`, including delegated agents,
+titles, summaries, and compaction. Stale environment overrides, configured
+agent models, and cross-model provider fallbacks cannot replace it.
 
 Autofold agents may take as many productive tool steps as the task requires;
 reasoning depth is not constrained by a fixed step count. Durable research jobs
 default to one attempt, so a failed job requires an explicit retry instead of
-silently replaying billable child calls. Each Autofold model response also has
-an 8,000-token output ceiling independent of the donor runtime's interactive
-output setting. A cumulative job-cost budget, rather than a step ceiling, is the
-intended spend control.
+silently replaying billable child calls. A cumulative job-cost budget, rather
+than a step or per-response token ceiling, is the intended spend control.
 
 ## Recursive levels
 
@@ -119,15 +115,29 @@ unless it wins this gate across held-out campaign replays.
 2. **Implemented:** deterministic policy compiler, dry-run explanations, and
    one-move durable execution.
 3. **Implemented:** dynamic supervisor child that writes one move artifact.
-4. **Implemented:** durable campaign-loop job that executes one move, observes
-   its result, and repeats within an explicit step budget. Compute is still
-   bounded by each frozen experiment contract and move iteration count; a
-   campaign-wide compute ledger is next.
-5. **Implemented:** fresh per-iteration evidence reload, typed search moves,
-   explicit generator allocations, semantic program/workflow fingerprints, and
-   plateau/equivalence stopping under the durable contract lock.
-6. Trajectory dataset plus fixed-baseline replay evaluator.
-7. Skill/routing refinement proposals gated by held-out replay.
+4. **Implemented:** durable campaign-loop job that grants a sole active
+   experiment its remaining campaign trial budget (up to 100 trajectories) in
+   one persistent-scientist loop instead of bouncing through one move per
+   trial. It re-observes at plane boundaries and automatically prioritizes due
+   literature, repeated-evidence skill refinement, pending shadow replay,
+   contract approval, and stop. A campaign-wide GPU-time ledger is still next.
+5. **Implemented:** fresh per-iteration evidence reload, scientist-authored
+   trial intent and generator allocation, semantic program/workflow provenance,
+   and durable contract locking.
+6. **Implemented:** durable same-step author repair, campaign-visible attempt
+   deltas, acquisition-landscape snapshots, validator-completeness summaries,
+   and automatic replay-gated skill-feedback signals.
+7. Trajectory dataset plus fixed-baseline replay evaluator.
+8. **Implemented with a conservative evidence gate:** an autonomous discovery
+   job schedules at most one refinement per affected skill after the same
+   feedback recurs in at least two independent runs. Pending candidates/jobs
+   suppress duplicates, and every candidate automatically enters three-repeat
+   parent-versus-candidate shadow replay before promotion. A campaign-wide
+   compute ledger is still required to express one global spend ceiling across
+   discovery and these replay jobs.
+9. **Implemented:** persistent-scientist inner loop with one mutable `trial.py`,
+   dynamic per-cycle intent, fresh skill/evidence reload, and no required
+   tournament or harness acquisition policy.
 
 The current control boundary is usable from the terminal:
 
@@ -142,7 +152,7 @@ The move executor can enqueue bounded experiment iteration or knowledge refresh.
 New experiment contracts remain approval-gated; review and stop moves are
 authorized records but do not yet have dedicated execution adapters.
 
-Every campaign step gets a fresh child session with only one writable
+Every boundary-level campaign step gets a fresh child session with only one writable
 `move.json`. It uses Autofold's research-agent model policy, receives the
 canonical campaign observation, selects the experiment specialist (`biology`,
 `ml`, or `task`) for executable iteration, and cannot directly call research

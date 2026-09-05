@@ -42,6 +42,21 @@ const trajectory = CapabilityRefinement.Trajectory.parse({
   parentMarkdown: "---\nid: skill_bionemo.predictor-interpretation\nversion: 1\n---\n## Guidance\nX\n## Failure modes\nY\n## Falsifying questions\nZ",
   observation: {
     version: 1, observedAt: timestamp, campaign, experiments: [],
+    recentTrajectories: [],
+    recentAuthoringAttempts: [],
+    recentSkillFeedback: [],
+    skills: { active: [], recentRefinements: [] },
+    researchState: {
+      charter: {
+        id: "chr_test", campaignId: campaign.id, version: 1, objective: campaign.objective,
+        successCriteria: [{ id: "biological_objective", statement: "Find a robust candidate", requiredEvidenceLevel: "multi_seed_support", status: "open" }],
+        requiredControls: [], stopConditions: [{ kind: "budget_exhausted", criterion: "Budget is exhausted" }],
+        constraints: { requireMatchedControlCardinality: true, requireMultiSeedConfirmation: true },
+        status: "active", createdAt: timestamp, updatedAt: timestamp,
+      },
+      hypotheses: [], searchLandscape: [],
+      progress: { openSuccessCriteria: 1, metSuccessCriteria: 0, highestTrustedEvidenceLevel: "model_observation", exploredPrograms: 0, exploredGenerators: [] },
+    },
     knowledge: {
       due: false, reasons: [], unprocessedKnowledgeIds: [], unresolvedQuestions: [], proposedClaimIds: [],
       contestedClaimIds: [], recentOutcomes: [], recentClaims: [],

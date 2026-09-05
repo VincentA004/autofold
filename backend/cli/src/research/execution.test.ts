@@ -57,6 +57,98 @@ async function runWorker(
 }
 
 describe("research execution worker", () => {
+  test("distinguishes planned model routing from optional evidence failures", () => {
+    const pipeline = ExecutionProtocol.PipelinePolicy.parse({
+      id: "completeness-fixture-v1",
+      stages: [
+        { id: "screen", models: [{ id: "boltz2", version: "2" }], required: true, allowSkip: false },
+        {
+          id: "resolve",
+          models: [{ id: "protenix", version: "2" }],
+          dependsOn: ["screen"],
+          required: false,
+          allowSkip: true,
+          allowedSkips: ["candidate_filtered", "optional_tool_failure"],
+        },
+      ],
+    })
+    const base = {
+      format: "autofold.model-run-index.v2" as const,
+      runId: "run_completeness",
+      pipelineHash: `sha256:${"a".repeat(64)}`,
+      entries: [
+        {
+          status: "skipped" as const,
+          kind: "candidate_filtered" as const,
+          candidateId: "candidate-a",
+          stage: "resolve",
+          modelId: "protenix",
+          seed: 7,
+          parentArtifactHashes: [],
+          reason: "Outside frozen top-one route",
+        },
+      ],
+    }
+    expect(ResearchExecution.evidenceCompleteness(pipeline, ExecutionProtocol.ModelRunIndexV2.parse(base))).toEqual({
+      status: "complete",
+      totalDecisions: 1,
+      completedDecisions: 1,
+      skippedOptionalDecisions: 0,
+      requiredDecisions: 0,
+      completedRequiredDecisions: 0,
+      skippedStages: [],
+    })
+
+    const failed = {
+      ...base,
+      entries: [{ ...base.entries[0]!, kind: "optional_tool_failure" as const }],
+    }
+    expect(ResearchExecution.evidenceCompleteness(pipeline, ExecutionProtocol.ModelRunIndexV2.parse(failed))).toMatchObject({
+      status: "partial_optional",
+      completedDecisions: 0,
+      skippedOptionalDecisions: 1,
+      skippedStages: ["resolve"],
+    })
+  })
+
+  test("compacts terminal progress noise while retaining actionable failure context", () => {
+    const progress = Array.from(
+      { length: 2_000 },
+      (_, index) => `\u001b[36m⠋ Running run_freebindcraft_design        :  [00:${String(index % 60).padStart(2, "0")}]\u001b[0m`,
+    ).join("\r")
+    const error = ResearchExecution.compactError(
+      `Invalid characters _\n${progress}\nTraceback (most recent call last):\nRuntimeError: no accepted designs`,
+    )
+
+    expect(error.length).toBeLessThanOrEqual(4096)
+    expect(error).toContain("Invalid characters _")
+    expect(error).toContain("RuntimeError: no accepted designs")
+    expect(error).not.toContain("\u001b")
+    expect(error).not.toContain("Running run_freebindcraft_design")
+  })
+
+  test("returns the latest isolated-stage watchdog stack to the scientist", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "autofold-stage-diagnostic-"))
+    try {
+      await fs.mkdir(path.join(root, ".stages"), { recursive: true })
+      await fs.writeFile(
+        path.join(root, ".stages", "evidence-stack.log"),
+        "earlier snapshot\nTimeout (0:02:00)!\nThread 0x1:\n  File mmseqs2.py, line 88 in create_connection\n",
+      )
+      const detail = await ResearchExecution.stageFailureDetail(root, {
+        stage: "evidence",
+        status: "timed_out",
+        error: "evidence stage exceeded its lifecycle ceiling",
+      })
+
+      expect(detail).toContain("Remote worker ended during evidence (timed_out)")
+      expect(detail).toContain("mmseqs2.py")
+      expect(detail).toContain("create_connection")
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
   test("continues to parse legacy v1 bundles without target paths", () => {
     const legacy = ExecutionProtocol.TrialBundle.parse({
       format: "autofold.trial-bundle.v1",
@@ -555,6 +647,7 @@ describe("research execution worker", () => {
           { id: "independent_validation", models: [{ id: "chai1", version: "0.6.1" }], dependsOn: ["primary_screen"], required: true, allowSkip: false },
           {
             id: "disagreement_resolution",
+            role: "diagnostic",
             models: [{ id: "protenix", version: "0.5.0" }],
             dependsOn: ["independent_validation"],
             candidateRouting: { source: "independent_validation", metric: "confidence_score", direction: "maximize", maximumCandidates: 2 },
@@ -620,7 +713,8 @@ describe("research execution worker", () => {
       expect(index.entries).toHaveLength(9)
       expect(index.entries.every((entry) => entry.status === "completed")).toBe(true)
       expect(new Set(index.entries.map((entry) => entry.modelId))).toEqual(new Set(["boltz2", "chai1", "protenix"]))
-      expect(candidates.candidates[0]?.evidence.predictors).toHaveLength(3)
+      expect(candidates.candidates[0]?.evidence.predictors).toHaveLength(2)
+      expect(candidates.candidates[0]?.evidence.predictors.map((predictor) => predictor.model)).not.toContain("protenix")
       const chained = index.entries.find((entry) => entry.stage === "independent_validation")
       expect(chained?.parentArtifactHashes).toHaveLength(1)
 

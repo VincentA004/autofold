@@ -27,10 +27,11 @@ AUTOFOLD_RESEARCH_COMPUTE=ssh:workstation_4090
 AUTOFOLD_RESEARCH_REMOTE_HOST=100.88.23.66 # optional stable endpoint when alias DNS is unavailable to jobs
 AUTOFOLD_RESEARCH_REMOTE_ROOT=/home/vincent/.autofold-runtime
 AUTOFOLD_RESEARCH_REMOTE_PYTHON=/home/vincent/autofold-env/bin/python
-AUTOFOLD_RESEARCH_REMOTE_PROTO_ROOT=/home/vincent/proto-language
+AUTOFOLD_RESEARCH_REMOTE_PROTO_ROOT=/home/vincent/Developer/autofold-proto-d3b7822
 AUTOFOLD_RESEARCH_REMOTE_PROTO_HOME=/home/vincent/.proto
-AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_EXECUTABLE=/home/vincent/boltzgen/bin/boltzgen
-AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_CACHE=/home/vincent/boltzgen-cache
+AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_EXECUTABLE=/home/vincent/Developer/model_envs/boltzgen-a3149cf/bin/boltzgen
+AUTOFOLD_RESEARCH_REMOTE_BOLTZGEN_CACHE=/home/vincent/Developer/model_cache/boltzgen-a3149cf
+AUTOFOLD_RESEARCH_REMOTE_PXDESIGN_EXECUTABLE=/home/vincent/Developer/model_envs/pxdesign-mamba/envs/pxdesign-f788441/bin/pxdesign
 ```
 
 The Python environment and Proto repositories must already be installed on the

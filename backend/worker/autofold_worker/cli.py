@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
+import signal
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -9,6 +12,9 @@ from typing import Any, Callable
 from .adapters import MockDesignAdapter, ProtoDesignAdapter
 from .manifest import create, sha256, timestamp
 from .protocol import ProtocolError, read_json, validate_bundle, validate_workflow_source, write_json
+
+
+STAGE_STATE_FORMAT = "autofold.execution-stage.v1"
 
 
 def parser() -> argparse.ArgumentParser:
@@ -44,6 +50,121 @@ def load_evidence_adapter(
     if not callable(enrich):
         raise ProtocolError("Trusted evidence adapter must export enrich(bundle, candidate_set, output)")
     return enrich
+
+
+def _stage_timeout(bundle: dict[str, Any], stage: str) -> int | None:
+    """Return a conservative hard ceiling for an isolated scientific stage.
+
+    Proto tools keep their frozen per-call GPU limits. This outer ceiling is a
+    lifecycle backstop for deadlocked runtimes, not a reinterpretation of GPU
+    time. Evidence may execute every model for every candidate and seed, so its
+    ceiling includes that full declared upper bound plus cold-start allowance.
+    """
+    pipeline = bundle.get("pipeline")
+    if not isinstance(pipeline, dict):
+        return None
+    if stage == "generation":
+        budget = pipeline.get("generation", {}).get("budget", {})
+        maximum = budget.get("maximumGpuSeconds") if isinstance(budget, dict) else None
+        return max(300, int(maximum) + 300) if isinstance(maximum, (int, float)) else None
+    stages = pipeline.get("stages")
+    if not isinstance(stages, list):
+        return None
+    per_candidate_seed = 0.0
+    for item in stages:
+        if not isinstance(item, dict):
+            continue
+        maximum = item.get("budget", {}).get("maximumGpuSeconds")
+        models = item.get("models")
+        if isinstance(maximum, (int, float)) and isinstance(models, list):
+            per_candidate_seed += maximum * max(1, len(models))
+    if per_candidate_seed <= 0:
+        return None
+    calls = max(1, int(bundle.get("candidateBudget", 1))) * max(1, len(bundle.get("seeds", [])))
+    return max(600, int(per_candidate_seed * calls) + 600)
+
+
+def _stage_state(output: Path, stage: str, status: str, **detail: Any) -> None:
+    write_json(
+        output / "execution-stage.json",
+        {
+            "format": STAGE_STATE_FORMAT,
+            "stage": stage,
+            "status": status,
+            "updatedAt": timestamp(),
+            **detail,
+        },
+    )
+
+
+def _terminate_stage(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        process.wait()
+
+
+def _isolated_stage(
+    stage: str,
+    bundle: dict[str, Any],
+    output: Path,
+    runtime_bundle_path: Path,
+    result_path: Path,
+    *,
+    candidate_set_path: Path | None = None,
+    evidence_adapter_source: Path | None = None,
+) -> dict[str, Any]:
+    stage_root = output / ".stages"
+    stage_root.mkdir(parents=True, exist_ok=True)
+    _stage_state(output, stage, "running", startedAt=timestamp())
+    package_root = str(Path(__file__).resolve().parent.parent)
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [package_root, environment["PYTHONPATH"]] if environment.get("PYTHONPATH") else [package_root]
+    )
+    command = [
+        sys.executable,
+        "-m",
+        "autofold_worker.stage_runner",
+        "--stage",
+        stage,
+        "--runtime-bundle",
+        str(runtime_bundle_path),
+        "--output",
+        str(output),
+        "--result",
+        str(result_path),
+    ]
+    if candidate_set_path is not None:
+        command.extend(["--candidate-set", str(candidate_set_path)])
+    if evidence_adapter_source is not None:
+        command.extend(["--evidence-adapter-source", str(evidence_adapter_source)])
+    timeout = _stage_timeout(bundle, stage)
+    process = subprocess.Popen(command, env=environment, start_new_session=True)
+    try:
+        code = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        _terminate_stage(process)
+        message = f"{stage} stage exceeded its {timeout}-second lifecycle ceiling"
+        _stage_state(output, stage, "timed_out", error=message)
+        raise ProtocolError(message) from error
+    if code != 0:
+        failure_path = result_path.with_suffix(".error.json")
+        failure = read_json(failure_path) if failure_path.is_file() else {}
+        message = failure.get("error") or f"{stage} stage exited with code {code}"
+        _stage_state(output, stage, "failed", error=message, errorType=failure.get("errorType"))
+        raise ProtocolError(f"{stage} stage failed: {message}")
+    result = read_json(result_path)
+    _stage_state(output, stage, "completed", startedAt=read_json(output / "execution-stage.json").get("startedAt"))
+    return result
 
 
 def run(
@@ -98,7 +219,6 @@ def run(
             )
 
     evidence_adapter_hash = None
-    enrich = None
     if bundle["format"] in {"autofold.trial-bundle.v3", "autofold.trial-bundle.v4"}:
         if evidence_adapter_source is None:
             raise ProtocolError("Trial bundle v3 requires a trusted evidence adapter source")
@@ -108,17 +228,39 @@ def run(
             raise ProtocolError(
                 f"Evidence adapter hash mismatch: expected {expected_adapter_hash}, received {evidence_adapter_hash}"
             )
-        enrich = load_evidence_adapter(evidence_adapter_source)
 
     output.mkdir(parents=True, exist_ok=True)
     candidates_path = output / "candidates.json"
     result_path = output / "result.json"
     manifest_path = output / "manifest.json"
 
-    adapter = MockDesignAdapter() if bundle["designAdapter"] == "mock" else ProtoDesignAdapter()
-    candidate_set = adapter.generate(runtime_bundle, output)
-    if enrich is not None:
-        candidate_set = enrich(runtime_bundle, candidate_set, output)
+    stage_root = output / ".stages"
+    stage_root.mkdir(parents=True, exist_ok=True)
+    runtime_bundle_path = stage_root / "runtime-bundle.json"
+    write_json(runtime_bundle_path, runtime_bundle)
+    if bundle["designAdapter"] == "mock":
+        candidate_set = MockDesignAdapter().generate(runtime_bundle, output)
+    else:
+        candidate_set = _isolated_stage(
+            "generation",
+            bundle,
+            output,
+            runtime_bundle_path,
+            stage_root / "generation-result.json",
+        )
+    # Persist the generated portfolio before validation. A validator failure
+    # must not erase the successful empirical generation trajectory.
+    write_json(candidates_path, candidate_set)
+    if evidence_adapter_hash is not None and evidence_adapter_source is not None:
+        candidate_set = _isolated_stage(
+            "evidence",
+            bundle,
+            output,
+            runtime_bundle_path,
+            stage_root / "evidence-result.json",
+            candidate_set_path=candidates_path,
+            evidence_adapter_source=evidence_adapter_source,
+        )
     write_json(candidates_path, candidate_set)
     result = evaluate(runtime_bundle, candidate_set)
     if evidence_adapter_hash is not None:
@@ -135,7 +277,7 @@ def run(
             raise ProtocolError("Proto design adapter did not produce generation-runs/index.json")
         files["generation_runs"] = generation_runs_path
     model_runs_path = output / "model-runs" / "index.json"
-    if enrich is not None:
+    if evidence_adapter_hash is not None:
         if not model_runs_path.is_file():
             raise ProtocolError("Trusted evidence adapter did not produce model-runs/index.json")
         files["model_runs"] = model_runs_path

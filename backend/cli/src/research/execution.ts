@@ -19,8 +19,60 @@ const mockEvaluatorSource = path.join(workerRoot, "autofold_worker", "evaluate.p
 const peptideEvaluatorSource = path.join(workerRoot, "autofold_worker", "peptide_panel_v1.py")
 // This bridge retains the legacy filename because v3 bundles still consume its
 // Boltz-only artifact contract; v4 dispatches the compiled Proto registry graph.
-const structureEvidenceSource = path.join(workerRoot, "autofold_worker", "evidence_boltz2_v1.py")
+const structureEvidenceSource = path.join(workerRoot, "autofold_worker", "evidence_pipeline_v3.py")
 const finalizers = new Map<string, Promise<void>>()
+
+const ansiEscape = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g
+const progressFrame = /^[\u2800-\u28ff]?\s*Running\s+\S+.*\[\d{2}:\d{2}(?::\d{2})?\]\s*$/
+
+function compactRunError(value: unknown, maximum = 4096): string {
+  const raw = (value instanceof Error ? value.message : String(value)).replace(ansiEscape, "")
+  const lines: string[] = []
+  for (const fragment of raw.split(/[\r\n]+/)) {
+    const line = fragment.trimEnd()
+    if (!line.trim() || progressFrame.test(line.trim())) continue
+    if (lines.at(-1) !== line) lines.push(line)
+  }
+  const compact = lines.join("\n").trim() || "Research execution failed without diagnostic output"
+  if (compact.length <= maximum) return compact
+  const marker = "\n… execution log compacted …\n"
+  const head = Math.min(1024, Math.floor((maximum - marker.length) / 3))
+  return compact.slice(0, head) + marker + compact.slice(-(maximum - marker.length - head))
+}
+
+async function remoteStageFailureDetail(
+  output: string,
+  stage: { stage?: string; status?: string; error?: string } | undefined,
+  fallback?: string,
+): Promise<string> {
+  const headline = stage?.stage
+    ? `Remote worker ended during ${stage.stage} (${stage.status ?? "unknown"})${stage.error ? `: ${stage.error}` : ""}`
+    : undefined
+  const stageName = stage?.stage?.match(/^(generation|evidence)$/)?.[1]
+  if (!stageName) return compactRunError(headline || fallback || "Remote worker failed without stage diagnostics")
+
+  const stageRoot = path.join(output, ".stages")
+  const [structured, stack] = await Promise.all([
+    Bun.file(path.join(stageRoot, `${stageName}-result.error.json`))
+      .json()
+      .catch(() => undefined) as Promise<{ errorType?: string; error?: string } | undefined>,
+    Bun.file(path.join(stageRoot, `${stageName}-stack.log`))
+      .text()
+      .catch(() => ""),
+  ])
+  const structuredDetail = structured?.error
+    ? `${structured.errorType ? `${structured.errorType}: ` : ""}${structured.error}`
+    : undefined
+  // The periodic faulthandler file can contain several snapshots. Its tail is
+  // the most recent blocked call and therefore the useful part for the next
+  // scientist iteration; compactRunError applies the final persisted bound.
+  const stackTail = stack.trim() ? stack.slice(-16_384) : undefined
+  return compactRunError(
+    [headline, structuredDetail, stackTail, !headline && !structuredDetail && !stackTail ? fallback : undefined]
+      .filter(Boolean)
+      .join("\n"),
+  )
+}
 
 async function fileHash(file: string): Promise<string> {
   const hash = new Bun.CryptoHasher("sha256")
@@ -60,13 +112,58 @@ async function verifyGenerationRuns(
   if (index.runId !== bundle.runId || index.programHash !== bundle.programHash) {
     throw new Error(`Run ${bundle.runId} generation index has another execution identity`)
   }
+  if (bundle.format === "autofold.trial-bundle.v4" && bundle.generationReplicateId) {
+    if (!index.replicate || index.replicate.id !== bundle.generationReplicateId) {
+      throw new Error(`Run ${bundle.runId} generation index has another replicate identity`)
+    }
+    const realized = realizedCandidateSetHash(index, candidates)
+    if (index.replicate.realizedCandidateSetHash !== realized) {
+      throw new Error(`Run ${bundle.runId} generation replicate has another realized candidate set`)
+    }
+    if (JSON.stringify(index.replicate.requestedSeeds) !== JSON.stringify(bundle.seeds)) {
+      throw new Error(`Run ${bundle.runId} generation replicate has another requested seed set`)
+    }
+  }
   // Proto enforces the frozen GPU timeout at the model-request boundary. This wall-clock
   // measurement also contains first-use environment/checkpoint hydration and is retained as
   // provenance; comparing it to GPU seconds would reject valid cold-start artifacts.
   const candidateById = new Map(candidates.candidates.map((candidate) => [candidate.id, candidate]))
-  const declaredGenerators = bundle.format === "autofold.trial-bundle.v4" && bundle.pipeline.generation
-    ? new Map(bundle.pipeline.generation.generators.map((generator) => [generator.id, generator]))
+  const generationPolicy = bundle.format === "autofold.trial-bundle.v4" ? bundle.pipeline.generation : undefined
+  const declaredGenerators = generationPolicy
+    ? new Map(generationPolicy.generators.map((generator) => [generator.id, generator]))
     : undefined
+  const diagnosticGenerators = new Set<string>()
+  for (const diagnostic of index.generatorDiagnostics) {
+    if (diagnosticGenerators.has(diagnostic.generator)) {
+      throw new Error(`Run ${bundle.runId} repeats generator diagnostics for ${diagnostic.generator}`)
+    }
+    diagnosticGenerators.add(diagnostic.generator)
+    if (!declaredGenerators?.has(diagnostic.generator)) {
+      throw new Error(`Run ${bundle.runId} has diagnostics for an undeclared generator ${diagnostic.generator}`)
+    }
+    if (new Set(diagnostic.sourceFiles).size !== diagnostic.sourceFiles.length) {
+      throw new Error(`Run ${bundle.runId} repeats diagnostic source files for ${diagnostic.generator}`)
+    }
+  }
+  if (declaredGenerators && index.sampling.length) {
+    const sampling = new Map(index.sampling.map((lane) => [lane.generator, lane]))
+    if (sampling.size !== index.sampling.length || sampling.size !== declaredGenerators.size) {
+      throw new Error(`Run ${bundle.runId} generation sampling does not cover its frozen generator policy`)
+    }
+    for (const [id, declared] of declaredGenerators) {
+      const observed = sampling.get(id)
+      const allocation = declared.allocation ?? generationPolicy!.budget
+      if (
+        !observed ||
+        observed.allocatedCandidates !== allocation.maximumCandidates ||
+        observed.maximumGpuSeconds !== allocation.maximumGpuSeconds ||
+        (observed.effectiveSamples !== undefined && observed.effectiveSamples > observed.allocatedCandidates) ||
+        (observed.effectiveResults !== undefined && observed.effectiveSamples !== undefined && observed.effectiveResults > observed.effectiveSamples)
+      ) {
+        throw new Error(`Run ${bundle.runId} generation sampling violates the frozen allocation for ${id}`)
+      }
+    }
+  }
   const observedGenerators = new Set<string>()
   const identities = new Set<string>()
   for (const entry of index.entries) {
@@ -130,13 +227,47 @@ async function verifyGenerationRuns(
   if (index.entries.length !== candidates.candidates.length || identities.size !== candidates.candidates.length) {
     throw new Error(`Run ${bundle.runId} has incomplete generation evidence`)
   }
-  if (declaredGenerators && (
-    observedGenerators.size !== declaredGenerators.size ||
-    [...declaredGenerators.keys()].some((id) => !observedGenerators.has(id))
-  )) {
-    throw new Error(`Run ${bundle.runId} generation evidence omits a frozen generator`)
+  if (declaredGenerators) {
+    const missing = [...declaredGenerators.keys()].filter((id) => !observedGenerators.has(id))
+    const failureLanes = new Set<number>()
+    const attributedFailures = new Set<string>()
+    for (const failure of index.portfolioFailures) {
+      if (failureLanes.has(failure.lane)) {
+        throw new Error(`Run ${bundle.runId} repeats a failed portfolio lane`)
+      }
+      failureLanes.add(failure.lane)
+      if (failure.generator) {
+        if (!declaredGenerators.has(failure.generator) || observedGenerators.has(failure.generator)) {
+          throw new Error(`Run ${bundle.runId} attributes a portfolio failure to an invalid generator`)
+        }
+        attributedFailures.add(failure.generator)
+      }
+    }
+    const unattributed = index.portfolioFailures.filter((failure) => !failure.generator)
+    const unresolved = missing.filter((id) => !attributedFailures.has(id))
+    // Older trusted workers recorded only the failing portfolio lane number. Accept
+    // that representation only when it gives a one-to-one explanation of every
+    // otherwise missing declaration; new workers persist the generator identity.
+    if (unresolved.length !== unattributed.length || attributedFailures.size + unattributed.length !== missing.length) {
+      throw new Error(`Run ${bundle.runId} generation evidence omits a frozen generator without a lane failure`)
+    }
   }
   return index
+}
+
+function realizedCandidateSetHash(
+  index: ExecutionProtocol.GenerationRunIndexV1,
+  candidates: ExecutionProtocol.CandidateSet,
+): string {
+  const sequenceById = new Map(candidates.candidates.map((candidate) => [candidate.id, candidate.sequence]))
+  const identity = index.entries.map((entry) => ({
+    generator: entry.modelId,
+    seed: entry.seed,
+    sequence: sequenceById.get(entry.candidateId) ?? "",
+  })).toSorted((left, right) =>
+    left.generator.localeCompare(right.generator) || left.seed - right.seed || left.sequence.localeCompare(right.sequence)
+  )
+  return `sha256:${new Bun.CryptoHasher("sha256").update(JSON.stringify(identity)).digest("hex")}`
 }
 
 async function verifyModelRuns(
@@ -238,11 +369,18 @@ async function verifyModelRunsV2(
 ): Promise<void> {
   if (index.pipelineHash !== bundle.pipelineHash) throw new Error(`Run ${bundle.runId} model index uses another pipeline policy`)
   const candidateById = new Map(candidates.candidates.map((candidate) => [candidate.id, candidate]))
-  const policies = new Map<string, { version: string; allowSkip: boolean; allowedSkips: Set<string>; dependsOn: Set<string> }>()
+  const policies = new Map<string, {
+    version: string
+    role: "scoring" | "diagnostic"
+    allowSkip: boolean
+    allowedSkips: Set<string>
+    dependsOn: Set<string>
+  }>()
   for (const stage of bundle.pipeline.stages) {
     for (const model of stage.models) {
       policies.set(`${stage.id}:${model.id}`, {
         version: model.version,
+        role: stage.role,
         allowSkip: stage.allowSkip,
         allowedSkips: new Set(stage.allowedSkips),
         dependsOn: new Set(stage.dependsOn),
@@ -313,9 +451,17 @@ async function verifyModelRunsV2(
     }
     if (completed.has(entry.artifactHash)) throw new Error(`Run ${bundle.runId} reuses model artifact ${entry.artifactHash}`)
     completed.set(entry.artifactHash, { candidateId: entry.candidateId, seed: entry.seed, stage: entry.stage })
-    const hashes = artifactHashes.get(entry.candidateId) ?? new Map<string, { model: string; version: string }>()
-    hashes.set(entry.artifactHash, { model: artifact.model.id, version: artifact.model.version })
-    artifactHashes.set(entry.candidateId, hashes)
+    // Every scoring and diagnostic artifact is independently verified above
+    // and remains available through the model-run index. Only experiment-frozen
+    // scoring artifacts may be referenced by candidate.evidence, because that
+    // object is the locked evaluator's comparable input. Requiring diagnostic
+    // artifacts here would either let an agent-authored diagnostic change the
+    // objective or make scoring/diagnostic isolation impossible to verify.
+    if (policy.role === "scoring") {
+      const hashes = artifactHashes.get(entry.candidateId) ?? new Map<string, { model: string; version: string }>()
+      hashes.set(entry.artifactHash, { model: artifact.model.id, version: artifact.model.version })
+      artifactHashes.set(entry.candidateId, hashes)
+    }
   }
 
   const expected = candidates.candidates.length * bundle.seeds.length * [...policies].length
@@ -354,14 +500,44 @@ async function verifyModelRunsV2(
         return !model || model.model !== predictor.model || model.version !== predictor.version
       })
     ) {
-      throw new Error(`Run ${bundle.runId} candidate ${candidate.id} does not reference its complete staged model evidence`)
+      throw new Error(`Run ${bundle.runId} candidate ${candidate.id} does not reference its complete frozen scoring evidence`)
     }
   }
 }
 
 export namespace ResearchExecution {
+  export function evidenceCompleteness(
+    pipeline: ExecutionProtocol.PipelinePolicy,
+    modelRuns: Extract<ExecutionProtocol.ModelRunIndex, { format: "autofold.model-run-index.v2" }>,
+  ) {
+    const requiredStages = new Set(pipeline.stages.filter((stage) => stage.required).map((stage) => stage.id))
+    const completed = modelRuns.entries.filter((entry) => entry.status === "completed")
+    // A frozen condition or candidate-routing decision is resolved evidence about
+    // the workflow, not a missing model result. Only tool failures (or legacy
+    // unclassified skips) leave an evidence gap for the recursive agent.
+    const plannedSkips = modelRuns.entries.filter(
+      (entry) => entry.status === "skipped" && (entry.kind === "condition_false" || entry.kind === "candidate_filtered"),
+    )
+    const evidenceGaps = modelRuns.entries.filter(
+      (entry) => entry.status === "skipped" && !plannedSkips.includes(entry),
+    )
+    const resolved = [...completed, ...plannedSkips]
+    const requiredDecisions = modelRuns.entries.filter((entry) => requiredStages.has(entry.stage))
+    return {
+      status: evidenceGaps.length ? "partial_optional" as const : "complete" as const,
+      totalDecisions: modelRuns.entries.length,
+      completedDecisions: resolved.length,
+      skippedOptionalDecisions: evidenceGaps.length,
+      requiredDecisions: requiredDecisions.length,
+      completedRequiredDecisions: requiredDecisions.filter((entry) => resolved.includes(entry)).length,
+      skippedStages: [...new Set(evidenceGaps.map((entry) => entry.stage))],
+    }
+  }
+
   export const verifyModelEvidence = verifyModelRuns
   export const verifyGenerationEvidence = verifyGenerationRuns
+  export const compactError = compactRunError
+  export const stageFailureDetail = remoteStageFailureDetail
 
   export interface EvaluatorInfo {
     id: string
@@ -399,7 +575,7 @@ export namespace ResearchExecution {
         requiresTargetArtifact: true,
         evidenceAdapter: {
           id: "proto-structure-pipeline",
-          version: "2",
+          version: "3",
           sourceHash: await fileHash(structureEvidenceSource),
           sourcePath: structureEvidenceSource,
         },
@@ -489,9 +665,51 @@ export namespace ResearchExecution {
       })
     }
     const proto = adapter.proto
-    const workflowPlan = proto && installed.evidenceAdapter
+    const authoredWorkflowPlan = proto && installed.evidenceAdapter
       ? await ResearchWorkflow.extract(sourceProgram, adapter.python)
       : undefined
+    const authoredTrial = proto && installed.evidenceAdapter && !authoredWorkflowPlan
+      ? await ResearchWorkflow.describeTrial(sourceProgram, adapter.python, {
+          experimentId: context.experiment.id,
+          contractHash: context.experiment.contractHash,
+          targetArtifactHash: context.experiment.contract.targetArtifactHash,
+          targetArtifactPath: storedTarget
+            ? inside(Instance.directory, storedTarget.targetArtifactPath)
+            : undefined,
+          targetStructurePath: storedTarget?.structureArtifactPath
+            ? inside(Instance.directory, storedTarget.structureArtifactPath)
+            : undefined,
+          modality: context.experiment.contract.modality,
+          evaluator: context.experiment.contract.evaluator,
+          seeds: context.experiment.contract.evaluator.fixedSeeds,
+          candidateBudget: context.experiment.contract.budget.maximumCandidates,
+          submissionSize: context.experiment.contract.evaluator.submissionSize,
+          intent: context.trial.intent,
+        })
+      : undefined
+    const directGeneration = authoredTrial?.generation ?? (
+      !authoredWorkflowPlan && context.trial.generators.length && context.trial.generatorAllocations.length
+        ? ResearchWorkflow.ProgramGeneration.parse({
+          generators: context.trial.generators,
+          allocations: context.trial.generatorAllocations,
+          maximumCandidates: context.trial.generatorAllocations.reduce(
+            (total, allocation) => total + allocation.maximumCandidates,
+            0,
+          ),
+          maximumGpuSeconds: context.trial.generatorAllocations.reduce(
+            (total, allocation) => total + allocation.maximumGpuSeconds,
+            0,
+          ),
+          })
+        : undefined
+    )
+    const workflowPlan = authoredWorkflowPlan ?? (directGeneration
+      ? ResearchWorkflow.fromComposite({
+          generation: directGeneration,
+          diagnostics: authoredTrial?.diagnostics,
+          contract: context.experiment.contract,
+        })
+      : undefined)
     const pipeline = workflowPlan && proto
       ? await (async () => {
           await ResearchWorkflow.validateConfigs(workflowPlan, adapter.python, proto.root)
@@ -506,6 +724,7 @@ export namespace ResearchExecution {
             contract: context.experiment.contract,
             protoToolsCommit: proto.toolsCommit,
             protoLanguageCommit: proto.languageCommit,
+            bindSource: !!authoredWorkflowPlan,
           })
         })()
       : undefined
@@ -520,6 +739,7 @@ export namespace ResearchExecution {
       sessionID: input.sessionId,
       capability: compute.kind === "local" ? "local_job" : "remote_job",
     })
+    await ResearchRemoteCompute.assertReady(compute, pipeline)
 
     const root = path.posix.join(".autofold", "runs", runId)
     const bundlePath = path.posix.join(root, "bundle.json")
@@ -537,6 +757,7 @@ export namespace ResearchExecution {
           ? "autofold.trial-bundle.v3"
           : "autofold.trial-bundle.v2",
       runId,
+      generationReplicateId: pipeline ? `grep_${runId.slice("run_".length)}` : undefined,
       trialId: context.trial.id,
       intent: context.trial.intent,
       contractHash: context.experiment.contractHash,
@@ -548,6 +769,7 @@ export namespace ResearchExecution {
             id: installed.evidenceAdapter.id,
             version: installed.evidenceAdapter.version,
             sourceHash: installed.evidenceAdapter.sourceHash,
+            scoringPipelineHash: frozenEvidenceAdapter?.scoringPipelineHash,
           }
         : undefined,
       designAdapter: context.trial.designAdapter,
@@ -617,7 +839,7 @@ export namespace ResearchExecution {
       await Research.failRun(
         projectId,
         run.id,
-        error instanceof Error ? error.message : String(error),
+        compactRunError(error),
         Instance.directory,
       )
       throw error
@@ -635,6 +857,36 @@ export namespace ResearchExecution {
       }
     }
     return run
+  }
+
+  export async function reconcile(runId: string) {
+    const projectId = Instance.project.id
+    const run = await Research.getRun(projectId, runId)
+    if (run.status === "succeeded") {
+      await Research.supersedeRecoveredFailures(projectId, runId, Instance.directory)
+      return run
+    }
+    if (run.status !== "failed" || !run.jobId || !/^(?:scp|ssh):|connection (?:closed|reset)|broken pipe/i.test(run.error ?? "")) {
+      throw new ResearchService.ConflictError({
+        code: "run_not_recoverable",
+        message: `Run ${runId} did not fail during remote artifact transport`,
+      })
+    }
+    const job = await ComputeJobs.get(run.jobId)
+    if (!job || job.status !== "succeeded") {
+      throw new ResearchService.ConflictError({
+        code: "compute_not_succeeded",
+        message: `Run ${runId} has no succeeded compute job to reconcile`,
+      })
+    }
+    await Research.reopenRunFinalization(projectId, runId)
+    scheduleFinalization(projectId, Instance.directory, runId, job.id, 1)
+    await finalizers.get(runId)
+    const reconciled = await Research.getRun(projectId, runId)
+    if (reconciled.status === "succeeded") {
+      await Research.supersedeRecoveredFailures(projectId, runId, Instance.directory)
+    }
+    return reconciled
   }
 
   export async function artifacts(runId: string) {
@@ -704,6 +956,12 @@ export namespace ResearchExecution {
       if (bundle.evidenceAdapter.sourceHash !== context.experiment.contract.evaluator.evidenceAdapter?.sourceHash) {
         throw new Error(`Run ${run.id} evidence adapter does not match its frozen experiment`)
       }
+      if (
+        ("scoringPipelineHash" in bundle.evidenceAdapter ? bundle.evidenceAdapter.scoringPipelineHash : undefined) !==
+        context.experiment.contract.evaluator.evidenceAdapter?.scoringPipelineHash
+      ) {
+        throw new Error(`Run ${run.id} scoring pipeline does not match its frozen experiment`)
+      }
     }
     if (
       (bundle.format !== "autofold.trial-bundle.v1" &&
@@ -749,6 +1007,9 @@ export namespace ResearchExecution {
           }),
         )
       : []
+    const evidenceCompleteness = bundle.format === "autofold.trial-bundle.v4" && modelRuns?.format === "autofold.model-run-index.v2"
+      ? ResearchExecution.evidenceCompleteness(bundle.pipeline, modelRuns)
+      : undefined
     return {
       run,
       trial: context.trial,
@@ -757,6 +1018,7 @@ export namespace ResearchExecution {
       manifest,
       modelRuns,
       modelEvidence,
+      evidenceCompleteness,
       generationRuns,
       pipeline: bundle.format === "autofold.trial-bundle.v4" ? bundle.pipeline : undefined,
       incumbent: context.experiment.incumbentTrialId === run.trialId,
@@ -776,7 +1038,7 @@ export namespace ResearchExecution {
         await Research.failRun(
           projectId,
           runId,
-          error instanceof Error ? error.message : String(error),
+          compactRunError(error),
           workspace,
         )
       })
@@ -795,15 +1057,38 @@ export namespace ResearchExecution {
       workspace,
       timeout: Math.max(60_000, minutes * 60_000 + 30_000),
     })
-    if (job.status !== "succeeded") {
+    if (job.status !== "succeeded" && job.target.kind !== "ssh") {
       const detail = await ComputeJobs.log(jobId, { workspace }).catch(() => "")
       throw new Error(detail.trim() || `Compute job ${jobId} ended with ${job.status}`)
     }
+    // An SSH transport can outlive (or lose the exit status of) a remote
+    // worker that already completed successfully. For remote jobs, retrieval
+    // plus the full frozen-contract/hash verification below is the authority:
+    // incomplete or failed workers cannot pass because candidates, result,
+    // manifest, generation runs, and model runs must all be present and valid.
     const run = await Research.getRun(projectId, runId)
     const context = await Research.getTrialContext(projectId, run.trialId)
     const bundlePath = inside(workspace, run.bundlePath)
     const output = inside(workspace, run.outputPath)
     await ResearchRemoteCompute.retrieve(job, output)
+    const manifestAvailable = await fs.stat(path.join(output, "manifest.json"))
+      .then((stat) => stat.isFile())
+      .catch(() => false)
+    if (job.status !== "succeeded" && !manifestAvailable) {
+      const [detail, stage] = await Promise.all([
+        ComputeJobs.log(jobId, { workspace }).catch(() => ""),
+        Bun.file(path.join(output, "execution-stage.json")).json().catch(() => undefined) as Promise<
+          { stage?: string; status?: string; error?: string } | undefined
+        >,
+      ])
+      throw new Error(
+        await remoteStageFailureDetail(
+          output,
+          stage,
+          detail.trim() || `Compute job ${jobId} ended with ${job.status}`,
+        ),
+      )
+    }
     const bundle = ExecutionProtocol.TrialBundle.parse(await Bun.file(bundlePath).json())
     const programPath = bundleResource(workspace, bundlePath, bundle.programPath)
     const candidatesPath = path.join(output, "candidates.json")
@@ -868,6 +1153,12 @@ export namespace ResearchExecution {
       }
       if (bundle.evidenceAdapter.sourceHash !== context.experiment.contract.evaluator.evidenceAdapter?.sourceHash) {
         throw new Error(`Run ${run.id} evidence adapter does not match its frozen experiment`)
+      }
+      if (
+        ("scoringPipelineHash" in bundle.evidenceAdapter ? bundle.evidenceAdapter.scoringPipelineHash : undefined) !==
+        context.experiment.contract.evaluator.evidenceAdapter?.scoringPipelineHash
+      ) {
+        throw new Error(`Run ${run.id} scoring pipeline does not match its frozen experiment`)
       }
       if (bundle.targetStructurePath) {
         expectedFiles.target_structure = await fileHash(bundleResource(workspace, bundlePath, bundle.targetStructurePath))

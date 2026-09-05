@@ -2,6 +2,11 @@
 
 Autofold is an agentic peptide-discovery system that improves both candidate molecules and the methods used to discover them. It combines reproducible computational experiments, fixed evaluation, campaign-scoped scientific memory, and bounded recursive improvement.
 
+The canonical implementation and acceptance handoff is
+[docs/current-state-2026-09-05.md](docs/current-state-2026-09-05.md). Dated
+acceptance pages are historical snapshots; new experiment-level development
+should follow the scientist-kernel documents linked there.
+
 ## Product model
 
 ```text
@@ -135,17 +140,13 @@ Expensive phases are checkpointed: completed proposals, originating trials,
 scientific runs, iteration outcomes, and committed knowledge cycles are reused
 after restart rather than regenerated.
 
-The campaign-level recursive supervisor is specified in
-[docs/recursive-orchestration-v1.md](docs/recursive-orchestration-v1.md): a
-dynamic context-injected specialist proposes one typed move, a deterministic
-policy compiler authorizes it, durable jobs execute it, and verified outcomes
-flow back into the next observation.
-The first bounded supervisor is executable with `campaign loop`: every step
-creates a dynamic research-team plan, runs one to four focused biology/ML/task
-specialists in parallel, synthesizes their checkpointed reports into one typed
-move, executes only an authorized move, then rebuilds campaign state before
-deciding again. Approval, rejection, stop, or the step cap terminates the
-durable trajectory.
+The campaign-level recursive controller is specified in
+[docs/recursive-orchestration-v1.md](docs/recursive-orchestration-v1.md). A sole
+active experiment resumes its persistent scientist directly; team planning and
+typed supervisor moves are reserved for campaign boundaries. Each empirical
+iteration records a deterministic trusted search event before context reload,
+so literature review is no longer a mandatory execution barrier. Approval,
+rejection, stop, or the explicit step cap still terminates a durable trajectory.
 
 Injectable skills are domain knowledge, not miniature runtimes. They teach
 specialists how biology and models behave so the agent can revise Proto
@@ -167,6 +168,10 @@ the skill using self-authored evidence.
 Trusted shadow replay now closes that loop. Parent and candidate skills author
 three paired sets of Proto trials from one frozen context by default; every trial uses the explicit
 non-promotable `shadow_replay` intent and the same locked evaluator and budget.
+Within each pair, the two arms have independent mutable `trial.py` files, lab
+notebooks, and scientist sessions. The immutable benchmark identity is versioned
+(`shadow-v2`) so older shared-workspace runs cannot be treated as valid paired
+evidence.
 Utility, valid-diverse yield, failure, and cost are derived from persisted
 evaluation records. The candidate is activated only through the deterministic
 non-regression rule. Candidate authoring can enqueue this replay automatically,
@@ -181,12 +186,73 @@ model lineage for every candidate. [Dynamic Proto workflow v1](docs/dynamic-prot
 lets the autoresearch agent compose the graph from the pinned Proto registry;
 each run freezes the resolved topology before trusted execution.
 
-## Bounded autoresearch v1
+Comparable experiments can additionally freeze an evidence-adapter
+`scoringPipelineHash`. Proto stages are explicitly `scoring` or `diagnostic`:
+the former must evaluate every candidate with the exact frozen model/config
+lane and alone feeds the locked evaluator; the latter remains agent-composable
+for routing, ablations, predictor disagreement, and information gain. Thus the
+scientist can search model-composition space without moving the score ruler.
 
-The first experiment-RSI controller is implemented through the existing child-session harness. Each iteration reloads the latest experiment history, active campaign skills, and campaign knowledge, asserts the durable frozen contract hash, then creates a biology, ML, or general child agent. The child receives the target, best locked incumbent, latest attempted `trial.py` search head, verified candidates, recent promoted/rejected/failed trial artifacts, locked diagnostics, predictor-level evidence, specialist findings, campaign OKF concepts, and a compact pinned Proto catalog; it can write exactly one mutable draft `trial.py`. The agent authors both the native Proto `Program` and a literal `AUTOFOLD_WORKFLOW` validation manifest in that file. The draft is preserved under `.autofold/autoresearch`, statically preflighted without importing it, compiled against the live pinned registry, frozen by content hash, executed, and promoted or rejected by the locked evaluator. The mutable code lineage advances through the latest attempt while the incumbent remains the independent promotion baseline, so a rejected or scientifically failed program can be repaired, branched, or reverted on the next iteration.
+## Persistent scientist autoresearch
+
+Normal recursive discovery uses the minimal loop described in
+[docs/scientist-kernel-v2.md](docs/scientist-kernel-v2.md). One persistent GLM
+scientist owns one mutable `trial.py` across repairs and empirical iterations.
+It chooses the hypothesis, trial intent, generator/model composition,
+configuration, workflow DAG, routing, and compute allocation from the live
+registered capabilities. The tournament/acquisition layer is bypassed on this
+active-experiment path and no longer ranks or narrows those decisions.
+
+Each iteration refreshes experiment evidence, OKF knowledge, notebook cycles,
+and active campaign skills, then reasserts the frozen contract hash. The
+scientist reads this compact state from disk and edits `trial.py` directly with
+normal file tools. New trials expose one `build_trial(ctx) -> ProtoTrial`
+function: the returned object owns the executable Proto generation program,
+hypothesis, intent, and any diagnostic stages. Trusted code constructs and
+validates that object, injects the frozen scoring stages, snapshots the exact
+source immutably, executes it, and applies the locked evaluator. The old
+`build_program`, `AUTOFOLD_TRIAL`, and `AUTOFOLD_WORKFLOW` surfaces remain only
+as migration compatibility for existing lineage.
+Within one persistent model turn the scientist may evaluate several successive
+programs. Every tool result is returned only after its run, knowledge closeout,
+typed event append, and state checkpoint are durable, so the next edit is based
+on the immediately preceding empirical result.
+
+Generator portfolios are executable Proto composites rather than duplicated
+manifests. `ProtoPortfolioProgram` runs independent `ProtoPortfolioLane`
+programs, derives their allocations during construction preflight, and attaches
+trusted lane provenance before candidates are merged. The frozen scoring lane
+is always injected by the compiler. `DiagnosticStage` objects in `ProtoTrial`
+let the scientist add routing, ablations, or disagreement probes without
+changing the score ruler.
+
+The canonical experiment feed is now the append-only typed
+`events.jsonl`. `scientist.json` is one total durable state register for the
+long-lived lane. `EVENTS.md`, OKF pages, notebook prose, search landscapes, and
+compact prompt packets are derived views and cannot override the immutable run,
+evaluation, contract, or event records.
 
 ```text
-bun run research:cli -- autoresearch EXP_ID --session SES_ID --iterations 3
+bun run research:cli -- autoresearch EXP_ID --session SES_ID --mode autonomous_discovery
 ```
 
-The command is deliberately bounded to ten sequential iterations. A typed search policy selects exploitation, generator exploration, workflow ablation, predictor-disagreement investigation, or compute reallocation. Generator portfolios carry frozen per-lane candidate and GPU allocations that are enforced again by the worker. Exact program hashes plus semantic Python/workflow fingerprints prevent equivalent reruns, and plateau or insufficient-evidence conditions stop without being mislabeled as failures. The result returns the child session, draft, trial, run, score, promotion decision, search delta, fingerprints, and stop reason for every attempt. Existing scientific experiments created before evidence-adapter pinning must be recreated before using this loop.
+Autonomous mode now authorizes up to 100 trajectories by default and keeps the
+same scientist running until it makes an evidence-linked stop or reaches the
+authorized/campaign trial budget. `--iterations N` remains an explicit smaller
+authorization, and `single_intent` remains a one-purpose compatibility mode.
+The campaign loop no longer returns after every trial: it grants the remaining
+campaign trial budget in one scientist loop, but interrupts at real plane
+boundaries for due literature alignment, repeated-evidence skill refinement,
+shadow replay, contract approval, or stop. Generator allocations are enforced
+by the compiler and worker.
+Fingerprints are provenance rather than a harness search policy; only an exact
+unchanged no-op is rejected by default. Existing scientific experiments created
+before evidence-adapter pinning must be recreated before using this loop.
+
+New runs distinguish source/workflow equivalence from empirical replication.
+The worker records a preassigned generation-replicate ID, realized candidate-set
+hash, requested and observed seeds, stochasticity classification, and generation
+wall time in the campaign search landscape. The scientist also receives a
+matched positive/negative evaluator audit and can author non-promotable
+calibration trials directly in `trial.py`. Ordinary deterministic knowledge
+closeout and skill replay do not interrupt the active search horizon.

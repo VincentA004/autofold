@@ -257,6 +257,25 @@ describe("research terminal", () => {
     expect(output[0]).toContain('"completedIterations": 3')
   })
 
+  test("lets the backend select the autonomous discovery horizon when iterations are omitted", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const code = await ResearchTerminal.run(
+      ["autoresearch", "exp_one", "--session", "ses_one", "--mode", "autonomous_discovery"],
+      {
+        output: () => undefined,
+        fetchFn: (async (input, init) => {
+          calls.push({ url: String(input), init })
+          return new Response(JSON.stringify({ id: "job_auto", status: "queued" }), { status: 202 })
+        }) as typeof fetch,
+      },
+    )
+    expect(code).toBe(0)
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      sessionId: "ses_one",
+      recursionMode: "autonomous_discovery",
+    })
+  })
+
   test("starts a durable bounded campaign supervisor", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = []
     const code = await ResearchTerminal.run(

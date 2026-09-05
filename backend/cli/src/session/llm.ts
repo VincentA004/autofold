@@ -22,6 +22,7 @@ import { SystemPrompt } from "./system"
 import { Flag } from "@/flag/flag"
 import { PermissionNext } from "@/permission/next"
 import { Auth } from "@/auth"
+import { ResearchModel } from "@/research/model"
 
 export namespace LLM {
   const log = Log.create({ service: "llm" })
@@ -40,7 +41,6 @@ export namespace LLM {
     if (!agentName.startsWith("autofold-") || providerID !== "openrouter") return {}
     return {
       provider: {
-        order: ["deepinfra", "deepseek", "fireworks", "together"],
         allow_fallbacks: true,
         require_parameters: true,
         ignore: ["phala"],
@@ -64,7 +64,24 @@ export namespace LLM {
   export type StreamOutput = StreamTextResult<ToolSet, unknown>
 
   export async function stream(input: StreamInput) {
-    const tier = input.small
+    const forced = forceAutofoldSelection({
+      agent: input.agent.name,
+      originatingAgent: input.user.agent,
+      providerID: input.model.providerID,
+      modelID: input.model.id,
+      originatingProviderID: input.user.model.providerID,
+      originatingModelID: input.user.model.modelID,
+    })
+    const autofold = isAutofoldInference({
+      agent: input.agent.name,
+      originatingAgent: input.user.agent,
+      originatingProviderID: input.user.model.providerID,
+      originatingModelID: input.user.model.modelID,
+    })
+    if (forced.providerID !== input.model.providerID || forced.modelID !== input.model.id) {
+      input.model = await Provider.getModel(forced.providerID, forced.modelID)
+    }
+    const tier = input.small || autofold
       ? { model: undefined, options: {}, headers: {} }
       : ProviderTransform.tier(input.model, input.user.tier)
     const routed = tier.model ? await Provider.getModel(input.model.providerID, tier.model) : input.model
@@ -138,7 +155,7 @@ export namespace LLM {
       mergeDeep(input.model.options),
       mergeDeep(tier.options),
       mergeDeep(input.agent.options),
-      mergeDeep(providerRoutingOptions(input.agent.name, input.model.providerID)),
+      mergeDeep(providerRoutingOptions(autofold ? "autofold-originated" : input.agent.name, input.model.providerID)),
       mergeDeep(variant),
     )
     if (isCodex) {
@@ -163,6 +180,7 @@ export namespace LLM {
         options,
       },
     )
+    const providerOptions = autofold ? forceAutofoldProviderOptions(params.options) : params.options
 
     const { headers } = await Plugin.trigger(
       "chat.headers",
@@ -182,7 +200,7 @@ export namespace LLM {
       ? undefined
       : ProviderTransform.maxOutputTokens(
           input.model.api.npm,
-          params.options,
+          providerOptions,
           input.model.limit.output,
           outputTokenLimit(input.agent.name),
         )
@@ -239,7 +257,7 @@ export namespace LLM {
       temperature: params.temperature,
       topP: params.topP,
       topK: params.topK,
-      providerOptions: ProviderTransform.providerOptions(input.model, params.options),
+      providerOptions: ProviderTransform.providerOptions(input.model, providerOptions),
       activeTools: Object.keys(tools).filter((x) => x !== "invalid"),
       tools,
       maxOutputTokens,
@@ -306,6 +324,53 @@ export namespace LLM {
         },
       },
     })
+  }
+
+  export function forceAutofoldSelection(input: {
+    agent: string
+    originatingAgent: string
+    providerID: string
+    modelID: string
+    originatingProviderID?: string
+    originatingModelID?: string
+  }): ResearchModel.Selection {
+    if (!isAutofoldInference(input)) {
+      return { providerID: input.providerID, modelID: input.modelID }
+    }
+    return ResearchModel.forceResearchModel({ providerID: input.providerID, modelID: input.modelID })
+  }
+
+  /** Prevent model/agent configuration or chat hooks from adding OpenRouter
+   * cross-model fallbacks while retaining same-model provider-host fallbacks. */
+  export function forceAutofoldProviderOptions(options: Record<string, any>): Record<string, any> {
+    const { model: _model, models: _models, fallbacks: _fallbacks, reasoning: _reasoning, ...safe } = options
+    return {
+      ...safe,
+      // GLM 5.3 Flash rejects requests which explicitly disable reasoning,
+      // including the donor runtime's small title/summary calls. Keep the
+      // campaign pinned to GLM and use its cheapest supported reasoning mode.
+      reasoning: { effort: "low" },
+      model: ResearchModel.DEFAULT.modelID,
+      models: [ResearchModel.DEFAULT.modelID],
+    }
+  }
+
+  function isAutofoldInference(input: {
+    agent: string
+    originatingAgent: string
+    originatingProviderID?: string
+    originatingModelID?: string
+  }): boolean {
+    return (
+      input.agent.startsWith("autofold-") ||
+      input.originatingAgent.startsWith("autofold-") ||
+      (input.originatingProviderID !== undefined &&
+        input.originatingModelID !== undefined &&
+        ResearchModel.isResearchModel({
+          providerID: input.originatingProviderID,
+          modelID: input.originatingModelID,
+        }))
+    )
   }
 
   export async function modelTools(input: Pick<StreamInput, "tools" | "agent" | "model" | "user">) {

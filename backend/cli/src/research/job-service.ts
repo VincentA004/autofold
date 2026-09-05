@@ -237,8 +237,8 @@ export namespace ResearchJobService {
     async retry(projectId: string, jobId: string): Promise<ResearchDomain.Job> {
       return this.store.mutate(projectId, (state) => {
         const job = this.job(state, jobId)
-        if (job.status !== "failed") {
-          throw new ConflictError({ code: "job_not_failed", message: `Job ${jobId} is ${job.status}, not failed` })
+        if (job.status !== "failed" && job.status !== "cancelled") {
+          throw new ConflictError({ code: "job_not_retryable", message: `Job ${jobId} is ${job.status}, not failed or cancelled` })
         }
         const now = this.now()
         const updated = ResearchDomain.Job.parse({
@@ -246,6 +246,7 @@ export namespace ResearchJobService {
           status: "queued",
           attempts: 0,
           error: undefined,
+          cancelRequestedAt: undefined,
           completedAt: undefined,
           nextAttemptAt: undefined,
           updatedAt: now,
@@ -262,10 +263,17 @@ export namespace ResearchJobService {
     private recoverExpired(state: ResearchState, now: string): void {
       for (const job of Object.values(state.jobs)) {
         if (job.status !== "running" || !job.leaseExpiresAt || job.leaseExpiresAt > now) continue
-        const retry = job.attempts < job.maxAttempts
+        // A persisted phase checkpoint is a proof that this job implements a
+        // resumable protocol. Reclaiming it after a worker/server restart must
+        // not consume a scientific retry (or repeat completed billable work),
+        // even when maxAttempts=1. Ordinary execution failures still flow
+        // through fail() and retain the conservative no-automatic-retry policy.
+        const resumable = Object.keys(job.checkpoints).length > 0
+        const retry = resumable || job.attempts < job.maxAttempts
         state.jobs[job.id] = ResearchDomain.Job.parse({
           ...job,
           status: retry ? "retry_wait" : "failed",
+          attempts: resumable ? Math.max(0, job.attempts - 1) : job.attempts,
           error: "Worker lease expired before the job completed",
           nextAttemptAt: retry ? now : undefined,
           completedAt: retry ? undefined : now,

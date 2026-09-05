@@ -27,7 +27,16 @@ const context = ResearchAutoresearch.Context.parse({
   },
   incumbentProgram: "def build_program(bundle):\n    return bundle\n",
   history: { trials: [], evaluations: [] }, knowledge: [], literatureClaims: [], literatureRecords: [],
-  evidenceAlignments: [], incumbentCandidates: [], incumbentModelEvidence: [], protoToolCatalog: [],
+  evidenceAlignments: [],
+  campaignCharter: {
+    id: "chr_shadow", campaignId, version: 1, objective: "Improve locked peptide score",
+    successCriteria: [{ id: "biological_objective", statement: "Find a robust candidate", requiredEvidenceLevel: "multi_seed_support", status: "open" }],
+    requiredControls: [], stopConditions: [{ kind: "budget_exhausted", criterion: "Budget is exhausted" }],
+    constraints: { requireMatchedControlCardinality: true, requireMultiSeedConfirmation: true },
+    status: "active", createdAt: timestamp, updatedAt: timestamp,
+  },
+  hypothesisLedger: [], searchLandscape: [],
+  incumbentCandidates: [], incumbentModelEvidence: [], protoToolCatalog: [],
 })
 
 function markdown(version: number, extra: string) {
@@ -64,6 +73,13 @@ const candidateIteration = ResearchAutoresearch.Iteration.parse({
 })
 
 describe("trusted skill shadow replay", () => {
+  test("isolates every replay arm's mutable scientist workspace", () => {
+    expect(SkillShadowReplay.armWorkspaceKey("job_shadow", 1, "parent")).toBe("job_shadow-r1-parent")
+    expect(SkillShadowReplay.armWorkspaceKey("job_shadow", 1, "candidate")).toBe("job_shadow-r1-candidate")
+    expect(SkillShadowReplay.armWorkspaceKey("job_shadow", 2, "parent"))
+      .not.toBe(SkillShadowReplay.armWorkspaceKey("job_shadow", 1, "parent"))
+  })
+
   test("runs parent and candidate arms from one snapshot and activates only from derived replay", async () => {
     const arms: string[] = []
     const result = await SkillShadowReplay.run(
@@ -104,6 +120,7 @@ describe("trusted skill shadow replay", () => {
     expect(result.pairs).toHaveLength(3)
     expect(result.finalStatus).toBe("active")
     expect(result.replay.sameBudget).toBe(true)
+    expect(result.replay.benchmarkId).toStartWith("shadow-v2:")
     expect(result.replay.baseline.lockedObjectiveUtility).toBeCloseTo(-0.4)
     expect(result.replay.candidate.lockedObjectiveUtility).toBeCloseTo(-0.3)
     expect(result.replay.candidate.validDiverseYield).toBeCloseTo(3.6)

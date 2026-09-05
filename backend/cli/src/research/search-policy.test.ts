@@ -2,6 +2,26 @@ import { describe, expect, test } from "bun:test"
 import { ResearchSearchPolicy } from "./search-policy"
 
 describe("typed autoresearch search policy", () => {
+  test("records an auditable acquisition landscape across explored and failed arms", () => {
+    const landscape = ResearchSearchPolicy.landscape({
+      availableGenerators: ["boltzgen-binder", "pxdesign-binder", "rfdiffusion-mpnn-binder"],
+      direction: "minimize",
+      outcomes: [
+        { generator: "boltzgen-binder", status: "succeeded", valid: true, score: 0.22 },
+        { generator: "pxdesign-binder", status: "failed" },
+      ],
+    })
+    expect(landscape.totalAttempts).toBe(2)
+    expect(landscape.arms.find((arm) => arm.generator === "boltzgen-binder")).toMatchObject({
+      attempts: 1, validResults: 1, bestScore: 0.22,
+    })
+    expect(landscape.arms.find((arm) => arm.generator === "pxdesign-binder")).toMatchObject({
+      failures: 1, failureRisk: 1,
+    })
+    expect(landscape.arms.find((arm) => arm.generator === "rfdiffusion-mpnn-binder")?.explorationBonus).toBe(1)
+    expect(landscape.arms.at(-1)?.generator).toBe("pxdesign-binder")
+  })
+
   test("allocates every candidate and generation second across selected generators", () => {
     expect(ResearchSearchPolicy.allocate(["boltzgen-binder", "pxdesign-binder"], 5, 1_000)).toEqual([
       { generator: "boltzgen-binder", maximumCandidates: 3, maximumGpuSeconds: 500 },
@@ -9,7 +29,7 @@ describe("typed autoresearch search policy", () => {
     ])
   })
 
-  test("prioritizes predictor disagreement before generator exploration", () => {
+  test("explores untested generators before spending more compute on disagreement", () => {
     expect(ResearchSearchPolicy.derive({
       iteration: 1,
       availableGenerators: ["boltzgen-binder", "pxdesign-binder"],
@@ -18,9 +38,8 @@ describe("typed autoresearch search policy", () => {
       generationGpuSeconds: 800,
       predictorDisagreement: true,
     })).toMatchObject({
-      move: "investigate_predictor_disagreement",
-      preferredGenerators: ["boltzgen-binder"],
-      targetStage: "independent",
+      move: "explore_generator",
+      preferredGenerators: ["pxdesign-binder"],
     })
   })
 

@@ -277,6 +277,8 @@ function cycleBody(cycle: ResearchDomain.KnowledgeCycle): string {
       `- Literature records: ${cycle.outputs.literatureIds.length}`,
       `- Claims: ${cycle.outputs.claimIds.length}`,
       `- Evidence alignments: ${cycle.outputs.alignmentIds.length}`,
+      `- Hypotheses updated: ${cycle.outputs.hypothesisIds.length}`,
+      `- Search observations: ${cycle.outputs.searchObservationIds.length}`,
       "",
       "## Unresolved questions",
       "",
@@ -314,6 +316,146 @@ function cycleBody(cycle: ResearchDomain.KnowledgeCycle): string {
   )
 }
 
+function charterBody(charter: ResearchDomain.CampaignCharter): string {
+  return matter.stringify(
+    [
+      `# Campaign research charter`,
+      "",
+      charter.objective,
+      "",
+      "## Success criteria",
+      "",
+      ...charter.successCriteria.map((criterion) =>
+        `- **${criterion.status}** \`${criterion.id}\`: ${criterion.statement} (requires \`${criterion.requiredEvidenceLevel}\`)`
+      ),
+      "",
+      "## Required controls",
+      "",
+      ...charter.requiredControls.map((control) => `- ${control}`),
+      "",
+      "## Stop conditions",
+      "",
+      ...charter.stopConditions.map((condition) => `- **${condition.kind}**: ${condition.criterion}`),
+      "",
+    ].join("\n"),
+    {
+      type: "Campaign Research Charter",
+      title: `Research charter for ${charter.campaignId}`,
+      description: "The machine-readable campaign objective, evidence bar, controls, and terminal conditions.",
+      tags: ["campaign-charter", "research-goal"],
+      status: charter.status === "superseded" ? "deprecated" : "stable",
+      campaign_id: charter.campaignId,
+      charter_id: charter.id,
+      charter_version: charter.version,
+      constraints: charter.constraints,
+      created_at: charter.createdAt,
+      updated_at: charter.updatedAt,
+    },
+  )
+}
+
+function hypothesisBody(hypothesis: ResearchDomain.ResearchHypothesis): string {
+  return matter.stringify(
+    [
+      `# ${hypothesis.statement}`,
+      "",
+      `- Status: **${hypothesis.status}**`,
+      `- Trusted evidence level: \`${hypothesis.evidenceLevel}\``,
+      `- Confidence: ${hypothesis.confidence}`,
+      "",
+      "## Prediction",
+      "",
+      hypothesis.prediction,
+      "",
+      "## Falsification criterion",
+      "",
+      hypothesis.falsificationCriterion,
+      "",
+      "## Recommended experiment",
+      "",
+      hypothesis.recommendedExperiment,
+      "",
+      "## Evidence",
+      "",
+      ...hypothesis.supportingEvidenceRefs.map((reference) => `- Supports: \`${reference}\``),
+      ...hypothesis.opposingEvidenceRefs.map((reference) => `- Opposes: \`${reference}\``),
+      ...(hypothesis.limitations.length ? ["", "## Limitations", "", ...hypothesis.limitations.map((item) => `- ${item}`)] : []),
+      "",
+    ].join("\n"),
+    {
+      type: "Research Hypothesis",
+      title: hypothesis.statement,
+      description: `${hypothesis.category} hypothesis with ${hypothesis.evidenceLevel} evidence.`,
+      tags: ["hypothesis", hypothesis.category, hypothesis.status, hypothesis.evidenceLevel],
+      status: hypothesis.status === "refuted" ? "deprecated" : hypothesis.status === "proposed" ? "draft" : "stable",
+      generated: hypothesis.generated,
+      campaign_id: hypothesis.campaignId,
+      hypothesis_id: hypothesis.id,
+      hypothesis_status: hypothesis.status,
+      evidence_level: hypothesis.evidenceLevel,
+      supporting_evidence_refs: hypothesis.supportingEvidenceRefs,
+      opposing_evidence_refs: hypothesis.opposingEvidenceRefs,
+      created_at: hypothesis.createdAt,
+      updated_at: hypothesis.updatedAt,
+    },
+  )
+}
+
+function searchObservationBody(observation: ResearchDomain.SearchObservation): string {
+  return matter.stringify(
+    [
+      `# Search observation ${observation.id}`,
+      "",
+      observation.hypothesis,
+      "",
+      `- Decision: **${observation.decision}**`,
+      `- Score: ${observation.score ?? "invalid"}`,
+      `- Prior best: ${observation.priorBestScore ?? "none"}`,
+      `- Improvement from prior best: ${observation.scoreDeltaFromPriorBest ?? "not comparable"}`,
+      `- Evidence level: \`${observation.epistemicLevel}\``,
+      `- Generators: ${observation.generatorPortfolio.join(", ") || "static/control"}`,
+      ...observation.generatorDiagnostics.flatMap((diagnostic) => [
+        `- ${diagnostic.generator} accepted/rejected: ${diagnostic.acceptedCandidates}/${diagnostic.rejectedCandidates}`,
+        `- ${diagnostic.generator} rejection filters: ${Object.entries(diagnostic.rejectionFilters).map(([name, count]) => `${name}=${count}`).join(", ") || "none observed"}`,
+        `- ${diagnostic.generator} trajectory filters: ${Object.entries(diagnostic.trajectoryFailureFilters).map(([name, count]) => `${name}=${count}`).join(", ") || "none observed"}`,
+      ]),
+      `- Calibration class: ${observation.calibrationClass ?? "not declared"}`,
+      `- Generation replicate: ${observation.generationReplicateId ?? "legacy/unavailable"}`,
+      `- Realized candidate set: ${observation.realizedCandidateSetHash ?? "legacy/unavailable"}`,
+      `- Generation stochasticity: ${observation.generationStochasticity ?? "legacy/unavailable"}`,
+      `- Models: ${observation.modelIds.join(", ") || "none recorded"}`,
+      `- Seeds: ${observation.seeds.join(", ") || "none recorded"}`,
+      `- Candidates: ${observation.candidateSequences.join(", ") || "none recorded"}`,
+      "",
+    ].join("\n"),
+    {
+      type: "Search Landscape Observation",
+      title: `Trial ${observation.trialId} search delta`,
+      description: "A trusted compact observation of one explored program, generator portfolio, and evaluation outcome.",
+      tags: ["search-landscape", observation.intent, observation.decision],
+      status: "stable",
+      campaign_id: observation.campaignId,
+      experiment_id: observation.experimentId,
+      trial_id: observation.trialId,
+      run_id: observation.runId,
+      knowledge_id: observation.knowledgeId,
+      knowledge_cycle_id: observation.knowledgeCycleId,
+      program_hash: observation.programHash,
+      ...(observation.pipelineHash ? { pipeline_hash: observation.pipelineHash } : {}),
+      ...(observation.semanticProgramFingerprint ? { semantic_program_fingerprint: observation.semanticProgramFingerprint } : {}),
+      ...(observation.workflowFingerprint ? { workflow_fingerprint: observation.workflowFingerprint } : {}),
+      ...(observation.calibrationClass ? { calibration_class: observation.calibrationClass } : {}),
+      ...(observation.calibrationReplicateOfTrialId ? { calibration_replicate_of_trial_id: observation.calibrationReplicateOfTrialId } : {}),
+      ...(observation.generationReplicateId ? { generation_replicate_id: observation.generationReplicateId } : {}),
+      ...(observation.realizedCandidateSetHash ? { realized_candidate_set_hash: observation.realizedCandidateSetHash } : {}),
+      ...(observation.generationStochasticity ? { generation_stochasticity: observation.generationStochasticity } : {}),
+      ...(observation.parentTrialId ? { parent_trial_id: observation.parentTrialId } : {}),
+      generator_diagnostics: observation.generatorDiagnostics,
+      created_at: observation.createdAt,
+    },
+  )
+}
+
 export namespace ResearchKnowledge {
   export function relativeRunResource(campaignId: string, resource: string): string {
     const concepts = path.posix.join(".autofold", "campaigns", campaignId, "knowledge", "concepts")
@@ -333,6 +475,9 @@ export namespace ResearchKnowledge {
     cycles: ResearchDomain.KnowledgeCycle[] = [],
     experiments: ResearchDomain.Experiment[] = [],
     trials: ResearchDomain.Trial[] = [],
+    charter?: ResearchDomain.CampaignCharter,
+    hypotheses: ResearchDomain.ResearchHypothesis[] = [],
+    searchObservations: ResearchDomain.SearchObservation[] = [],
   ): string {
     const entries = concepts
       .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id))
@@ -351,10 +496,17 @@ export namespace ResearchKnowledge {
     const trialEntries = trials.map(
       (trial) => `* [${trial.hypothesis}](trials/${trial.id}.md) - ${trial.status}`,
     )
+    const hypothesisEntries = hypotheses.map(
+      (hypothesis) => `* [${hypothesis.statement}](hypotheses/${hypothesis.id}.md) - ${hypothesis.status}; ${hypothesis.evidenceLevel}`,
+    )
+    const searchEntries = searchObservations.map(
+      (observation) => `* [${observation.trialId}](search/${observation.id}.md) - ${observation.decision}; score ${observation.score ?? "invalid"}`,
+    )
     const body = [
       `# ${campaign.objective}`,
       "",
       `Campaign knowledge catalog: \`${campaign.knowledgeCatalogId}\``,
+      ...(charter ? ["", `Research charter: [${charter.id}](charter.md)`] : []),
       "",
       "## Research knowledge",
       "",
@@ -367,6 +519,14 @@ export namespace ResearchKnowledge {
       "## Trial configurations",
       "",
       ...(trialEntries.length ? trialEntries : ["No trials yet."]),
+      "",
+      "## Competing hypotheses",
+      "",
+      ...(hypothesisEntries.length ? hypothesisEntries : ["No typed hypotheses yet."]),
+      "",
+      "## Search landscape",
+      "",
+      ...(searchEntries.length ? searchEntries : ["No trusted search observations yet."]),
       "",
       "## Literature claims",
       "",
@@ -398,6 +558,9 @@ export namespace ResearchKnowledge {
     cycles?: ResearchDomain.KnowledgeCycle[]
     experiments?: ResearchDomain.Experiment[]
     trials?: ResearchDomain.Trial[]
+    charter?: ResearchDomain.CampaignCharter
+    hypotheses?: ResearchDomain.ResearchHypothesis[]
+    searchObservations?: ResearchDomain.SearchObservation[]
   }): Promise<string> {
     const root = bundleRoot(input.workspace, input.campaign.id)
     for (const concept of input.concepts) {
@@ -413,6 +576,8 @@ export namespace ResearchKnowledge {
     const experiments = input.experiments ?? []
     const experimentIds = new Set(experiments.map((experiment) => experiment.id))
     const trials = input.trials ?? []
+    const hypotheses = input.hypotheses ?? []
+    const searchObservations = input.searchObservations ?? []
     const records = new Map(literature.map((record) => [record.id, record]))
     for (const record of literature) {
       if (record.campaignId !== input.campaign.id) throw new Error(`Literature ${record.id} belongs to another campaign`)
@@ -438,9 +603,21 @@ export namespace ResearchKnowledge {
       if (!experimentIds.has(trial.experimentId)) throw new Error(`Trial ${trial.id} belongs to another campaign`)
       await writeAtomic(path.join(root, "trials", `${trial.id}.md`), trialBody(trial))
     }
+    if (input.charter) {
+      if (input.charter.campaignId !== input.campaign.id) throw new Error(`Charter ${input.charter.id} belongs to another campaign`)
+      await writeAtomic(path.join(root, "charter.md"), charterBody(input.charter))
+    }
+    for (const hypothesis of hypotheses) {
+      if (hypothesis.campaignId !== input.campaign.id) throw new Error(`Hypothesis ${hypothesis.id} belongs to another campaign`)
+      await writeAtomic(path.join(root, "hypotheses", `${hypothesis.id}.md`), hypothesisBody(hypothesis))
+    }
+    for (const observation of searchObservations) {
+      if (observation.campaignId !== input.campaign.id) throw new Error(`Search observation ${observation.id} belongs to another campaign`)
+      await writeAtomic(path.join(root, "search", `${observation.id}.md`), searchObservationBody(observation))
+    }
     await writeAtomic(
       path.join(root, "index.md"),
-      renderIndex(input.campaign, input.concepts, literature, claims, alignments, cycles, experiments, trials),
+      renderIndex(input.campaign, input.concepts, literature, claims, alignments, cycles, experiments, trials, input.charter, hypotheses, searchObservations),
     )
     await writeAtomic(
       path.join(root, "log.md"),

@@ -31,20 +31,21 @@ Scientific candidate sets use `autofold.candidate-set.v2`. Every candidate has:
 - aggregation and synthesis risk;
 - one or more versioned predictor artifact hashes.
 
-All evidence values are finite and bounded to `[0, 1]`. Trial Bundle v3 makes
-the trust boundary explicit: agent-editable Proto returns only unscored
-sequences, while a source-hashed, worker-owned evidence adapter executes the
-models and maps native outputs to these locked semantics. A v3 trial that tries
+All evidence values are finite and bounded to `[0, 1]`. Trial Bundle v4 is the
+current scientific path. Agent-editable Proto returns only unscored candidates,
+while a source-hashed, worker-owned evidence adapter executes the frozen scoring
+pipeline and maps native outputs to these locked semantics. A trial that tries
 to provide its own generation provenance or evaluator evidence is rejected.
 The adapter identity, version, and source hash are frozen in the experiment
 contract, so changing normalization or model integration starts a new experiment.
 
-Each native model invocation produces `autofold.model-run.v1` with the frozen
-target hash, peptide sequence hash, model and adapter versions, proto-tools
-commit, parameters hash, seed, metrics, and output hashes. A model-run index
-links every record to its structure and metrics files. Finalization verifies
-all of these hashes, requires every candidate × fixed-seed run, and checks that
-candidate predictor references exactly match the indexed artifacts.
+Each current native model invocation produces `autofold.model-run.v2` with the
+frozen target hash, peptide sequence hash, stage, model and adapter versions,
+proto-tools commit, parameters hash, seed, metrics, runtime cost, parent links,
+and output hashes. Model Run Index v2 links every required completed or legal
+skipped decision to its artifacts. Finalization verifies all hashes, coverage,
+dependencies, skip reasons, and candidate predictor references. Model Run v1
+remains readable for older Trial Bundle v3 lineage.
 
 ## Locked peptide panel v1
 
@@ -76,12 +77,13 @@ version and therefore a new experiment contract.
 
 ## Current implementation boundary
 
-The production evidence adapter is pinned to Boltz 2.2.1 through proto-tools. It
-cofolds each target/candidate complex at every frozen seed and normalizes native
-`protein_iptm`/`iptm` and `complex_plddt`/`ptm` outputs into the candidate
-contract. The deterministic fixture adapter exercises the identical trust and
-artifact path in CPU-only tests; its values and structures are explicitly
-synthetic.
+The active experiment freezes its scoring pipeline and evidence-adapter source
+hash. The accepted production path dispatches registered Boltz2 and Chai1 tools
+through proto-tools for every candidate and frozen seed; other contracts may pin
+a different complete scoring lane. Protenix v2 can be composed as a diagnostic
+or frozen into a new scoring contract. The deterministic fixture adapter
+exercises the identical trust and artifact path in CPU-only tests; its values
+and structures are explicitly synthetic.
 
 Actual model inference requires isolated GPU environments, pinned weights, and
 CUDA compute. The local acceptance suite does not pretend a CPU fixture is

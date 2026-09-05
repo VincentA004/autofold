@@ -329,8 +329,9 @@ export namespace ResearchTerminal {
           output,
           await client.post(`/experiments/${experimentId}/autoresearch`, {
             sessionId: requiredFlag(parsed, "session"),
-            iterations: integerFlag(parsed, "iterations", 1),
+            ...(stringFlag(parsed, "iterations") ? { iterations: integerFlag(parsed, "iterations", 1) } : {}),
             ...(stringFlag(parsed, "agent") ? { agent: stringFlag(parsed, "agent") } : {}),
+            ...(stringFlag(parsed, "mode") ? { recursionMode: stringFlag(parsed, "mode") } : {}),
             ...(stringFlag(parsed, "idempotency-key") ? { idempotencyKey: stringFlag(parsed, "idempotency-key") } : {}),
           }),
         )
@@ -375,6 +376,10 @@ export namespace ResearchTerminal {
       }
       if (command === "run" && noun === "get") {
         outputJSON(output, await client.get(`/runs/${requiredPosition(parsed, 2, "run id")}`))
+        return 0
+      }
+      if (command === "run" && noun === "reconcile") {
+        outputJSON(output, await client.post(`/runs/${requiredPosition(parsed, 2, "run id")}/reconcile`))
         return 0
       }
       if (command === "run" && noun === "watch") {
@@ -626,12 +631,14 @@ Commands:
   experiments CMP_ID
   experiment create CMP_ID --objective TEXT (--target sha256:... | --target-file TARGET.json) [--target-structure TARGET.cif] [--evaluator ID] [--modality short_peptide]
   experiment activate EXP_ID
-  autoresearch EXP_ID --session SES_ID [--iterations N] [--agent biology|ml|task] [--idempotency-key KEY]
+  autoresearch EXP_ID --session SES_ID [--iterations N] [--agent biology|ml|task] [--mode autonomous_discovery|single_intent] [--idempotency-key KEY]
+    Autonomous mode defaults to a 100-trajectory authorization and may stop earlier from evidence; single_intent defaults to one.
   history EXP_ID
   template mock|proto
   trial create EXP_ID --hypothesis TEXT --adapter mock|proto --program trial.py [--intent optimize|calibrate|negative_control]
   run start TRL_ID --session SES_ID
   run get RUN_ID
+  run reconcile RUN_ID
   run watch RUN_ID
   artifacts RUN_ID
   jobs
