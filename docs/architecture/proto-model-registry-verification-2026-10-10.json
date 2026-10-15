@@ -1,0 +1,73 @@
+{
+  "format": "autofold.proto-model-registry-implementation-audit.v1",
+  "verifiedAt": "2026-10-11T03:48:54.269386+00:00",
+  "scope": "main checkout; metadata registry, bounded scientist/API access, explicit input preservation gates; skills source research only",
+  "nativeRuntime": {
+    "languageCommit": "d3b7822f74ea64747cc751a3b2ab1aa6b799ac47",
+    "toolsCommit": "47e34afa5ea240a3b406e323dc38aa5dc85f223e",
+    "registeredTools": 133,
+    "registeredGenerators": 18,
+    "scientificCards": 92,
+    "assetReadiness": "unknown",
+    "checkpointRights": "unverified",
+    "measuredResourceProfiles": "unknown"
+  },
+  "checks": {
+    "backendTypechecks": "passed after final TypeScript edits",
+    "backendSuites": [
+      {
+        "pass": 187,
+        "skip": 1,
+        "fail": 0
+      },
+      {
+        "pass": 360,
+        "skip": 0,
+        "fail": 0
+      }
+    ],
+    "workerSuite": {
+      "total": 80,
+      "status": "passed",
+      "skip": 1
+    },
+    "finalRegistryAndCompiler": "20 passed",
+    "finalNativeScientistAndHttp": "2 passed",
+    "historicalPreservation": {
+      "unchanged": true,
+      "workspaces": 6,
+      "databases": 10,
+      "files": 6401
+    }
+  },
+  "testBoundary": "Offline CPU fixtures and read-only native metadata. No real protein-model inference, GPU work, remote scientific dispatch, provider inference, checkpoint download or new skill activation. Sandbox-blocked supervision tests were rerun with local permissions. Broad backend suite plus final focused native metadata/worker checks cover the last metadata refinements.",
+  "limitations": [
+    "Explicit input requirements gate compatibility; undeclared legacy plans remain unchanged.",
+    "Current scoring bridge still lacks chemistry/MSA/template passthrough.",
+    "Registration and schema declarations do not establish scientific accuracy, asset readiness, hardware fit or checkpoint license rights.",
+    "Skills candidates require licensed adaptation and controlled evaluation; none were installed or activated."
+  ],
+  "sourceHashes": {
+    "backend/science-core/src/research/model-registry.ts": "sha256:787750a13b94275db92ebf6f554f2afa338e76957c8943251e5aea290f4eb39f",
+    "backend/science-core/src/research/model-registry.test.ts": "sha256:e9eee6e3fe53fd13f194ebe0b465f1f5cd940221bec2a7a32a6887914aaa31bd",
+    "backend/science-core/src/research/workflow.ts": "sha256:3048d3c0ccdf0de0b24f6d60ee89e9275857ddf33f9bb4afb8c87b77441bc290",
+    "backend/engine/src/execution/index.ts": "sha256:89bea28ceaf024aa3ace6b268b596d47736f42e60bd8e74bf5b4e2da19188f72",
+    "backend/engine/src/scientist/index.ts": "sha256:686eb23089fbb2f5da8e3b586dad73ebecc330cbb0befed12796920e2b881f41",
+    "backend/engine/src/scientist/scientist.test.ts": "sha256:cb21b9b93f96b71b1f4b809c89563da597e3e5972badb7578274a29102e71c2f",
+    "backend/engine/src/server.ts": "sha256:44b39541e33ca06907faa8ebb27ec0b8cb88a0162763bf799233c9e9efe1d12b",
+    "backend/engine/src/application.test.ts": "sha256:73bb069b185c88ae237e53da4970954767734b5a72514f6b3642bb1fd241d715",
+    "backend/worker/autofold_worker/proto_model_registry.py": "sha256:b9b380ebda2233cbf149843091c531fcac43b3beee2c357ce11a9ca86afe4c8c",
+    "backend/worker/autofold_worker/proto_trial.py": "sha256:037016647f843fa48a3aa689a46c7b5695ca057ecf348c2e91170f96fe99ff9e",
+    "backend/worker/autofold_worker/evidence_pipeline_v3.py": "sha256:04e34b3eca5df400dcba2e3e03ea45855b5485543d7251ce5fb7223954f4e38d",
+    "backend/worker/tests/test_proto_model_registry.py": "sha256:883672b2d206984c28581b0193a9914db8f37c68dd2178b759f0a72d30c212fe",
+    "docs/architecture/proto-model-registry-2026-10-10.md": "sha256:d59bdd1bd62befe58f447a363792ac4f69d4bc8a0d83b82010cf562542897557",
+    "docs/backend-discovery-api-v1.md": "sha256:6979823d956308fa480a7a78fdbc2937624fff32df10f6ebc5fc676ee83f8555",
+    "docs/research/biology-skill-sources-2026-10-10.md": "sha256:854ac3168d916df4c16c46b51c3b230a1b067cfab129b99ad132f251baaeef3f",
+    "docs/research/biology-skill-source-inventory-2026-10-10.json": "sha256:6052841309dfe91aa4e3eea0a64e53ec6bfa88541c02b8a44d9fa1b4d2b56650"
+  },
+  "logHashes": {
+    "/private/tmp/autofold-model-registry-backend-tests-verified.log": "sha256:0962f4bff9ac1e2b4f393ce20133f15d103c598ed6ae9075f6d44b0a22c44bd3",
+    "/private/tmp/autofold-model-registry-worker-tests-final.log": "sha256:947fb86c724f8aa1f2e7f3d7fe28b753f4a8ff5e4396075a19422f3a8c296e26",
+    "/private/tmp/autofold-model-registry-integration-final.log": "sha256:5633b937e4016f2d810e63ef57646ba416e316978943af48649f0089d334a0f4"
+  }
+}

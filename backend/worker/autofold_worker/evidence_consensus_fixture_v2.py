@@ -79,7 +79,8 @@ def enrich(bundle: dict[str, Any], candidate_set: dict[str, Any], output: Path) 
                     model_id = model["id"]
                     version = model["version"]
                     interface, fold = _confidence(sequence, model_id, seed)
-                    confidence.append((interface, fold))
+                    if stage.get("role", "scoring") == "scoring":
+                        confidence.append((interface, fold))
                     parameters = {"fixture": "consensus-v2", "stage": stage["id"], "model": model_id, "seed": seed}
                     parameters_hash = _hash(_canonical(parameters))
                     directory = output / "model-runs" / candidate_key / stage["id"] / model_id / str(seed)
@@ -135,7 +136,8 @@ def enrich(bundle: dict[str, Any], candidate_set: dict[str, Any], output: Path) 
                         }
                     )
                     stage_hashes.append(artifact_hash)
-                    predictors.append({"model": model_id, "version": version, "artifactHash": artifact_hash})
+                    if stage.get("role", "scoring") == "scoring":
+                        predictors.append({"model": model_id, "version": version, "artifactHash": artifact_hash})
                 stage_artifacts[stage["id"]] = stage_hashes
 
         solubility, aggregation, synthesis = _sequence_metrics(sequence)

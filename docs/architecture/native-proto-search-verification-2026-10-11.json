@@ -1,0 +1,112 @@
+{
+  "format": "autofold.native-proto-integration-verification.v1",
+  "recordedAt": "2026-10-11T12:46:39.107922+00:00",
+  "implementationCheckout": "/Users/vincentallam/Developer/autofold",
+  "source": {
+    "productionHash": "sha256:44b20519d6d271cc57ec74a853c60a7fa6d2753d40887cf46932679f2bd82081",
+    "workerHash": "sha256:85db20b6f3fdc3ee9f492874c5da47ffad022a4c530ad2bbffb0c7423653adcf",
+    "productionFileCount": 102
+  },
+  "dependencyPins": {
+    "protoLanguageCommit": "d3b7822f74ea64747cc751a3b2ab1aa6b799ac47",
+    "protoToolsCommit": "47e34afa5ea240a3b406e323dc38aa5dc85f223e",
+    "upgraded": false
+  },
+  "validation": {
+    "scienceCore": {
+      "passed": 192,
+      "skipped": 1,
+      "failed": 0
+    },
+    "engine": {
+      "passed": 363,
+      "failed": 0
+    },
+    "worker": {
+      "passed": 95,
+      "skipped": 1,
+      "failed": 0
+    },
+    "totalPassed": 650,
+    "totalOptionalSkips": 2,
+    "backendTypechecks": "passed",
+    "completeBackendRerun": "passed",
+    "gpuExecutions": 0,
+    "providerInferenceRequests": 0
+  },
+  "cpuEvidence": {
+    "nativeWorkerIntegration": "Pinned ProtoDesignAdapter constructs, verifies and executes two MCMC stages with distinct instances of one generator type, then hash-binds one final output and both native histories; changed admitted settings reject before execution.",
+    "analyticGradient": {
+      "result": "AAAAAAAAA",
+      "proposals": 4,
+      "samplingCalls": 4,
+      "registeredToolRequests": 0,
+      "historyRows": 3,
+      "backwardSourceRecorded": true
+    },
+    "receiptTests": "Original run reopen verifies admission, bounds, events and submitted sequence identity without execution; missing, tampered and undeclared evidence rejects."
+  },
+  "earlierFailedValidation": {
+    "log": "/private/tmp/proto-overhaul-release-backend-tests.log",
+    "enginePassed": 360,
+    "engineFailed": 3,
+    "errorsAfterTimeout": 3,
+    "failures": [
+      "persistent scientist CPU evaluation timeout",
+      "native API snapshot timeout",
+      "renewed discovery slot CPU fixture timeout"
+    ],
+    "resolution": "All three pass in a full unchanged-source rerun using caffeinate to prevent system sleep. The earlier run is retained; system suspension is suspected, not proven."
+  },
+  "historicalPreservation": {
+    "workspaces": [
+      "backend-discovery-completion-20261009",
+      "coordinator-gpu-trial-20261010",
+      "gpu-recovery-validation-20261009",
+      "long-run-recovery-assessment-20261009",
+      "native-pi-project-graph-20261008",
+      "operation-coordinator-implementation-20261010"
+    ],
+    "exactDurableRecordsAndFileHashesEqual": true,
+    "baseline": "/Users/vincentallam/Developer/autofold/.autofold/proto-execution-parity-20261011/operator/historical-after.json",
+    "baselineHash": "sha256:d7ffa06d820f29a8b7652648c0a958e193e17700b447ec78ff91c5088be5c287",
+    "afterHash": "sha256:d7ffa06d820f29a8b7652648c0a958e193e17700b447ec78ff91c5088be5c287"
+  },
+  "preservedContracts": [
+    "independently frozen final scoring",
+    "legacy trial behavior without native search",
+    "original receipt recovery and settlement",
+    "closed historical grants",
+    "existing skill activation policy"
+  ],
+  "limits": [
+    "Final independent evaluator admits canonical protein-sequence outputs; no new chemistry, ligand, glycan, MSA or multichain evaluator was implemented.",
+    "Registered tool requests include cache lookups and are not a physical inference count.",
+    "Native history fidelity follows authored tracking settings; not every proposal is captured automatically.",
+    "Trusted Python execution is not an adversarial code sandbox or a complete census of opaque internal effects.",
+    "Native search wall allowance is reserved under the existing aggregate worker budget.",
+    "Learned GPU model combinations, scientific improvements and biological outcomes remain unvalidated by this offline change."
+  ],
+  "logs": [
+    {
+      "path": "/private/tmp/proto-overhaul-awake-backend-tests.log",
+      "hash": "sha256:1b8a84000bc2f0120d247e55a1284c7550edc1745b0d97f55e6f60c16a3f56ee"
+    },
+    {
+      "path": "/private/tmp/proto-overhaul-release-worker-tests.log",
+      "hash": "sha256:30848334d05bbf0bc692721d0e2d9819c9dec24f0ed4fe667d11cb85c0abe25e"
+    },
+    {
+      "path": "/private/tmp/proto-overhaul-typecheck-release.log",
+      "hash": "sha256:35122f6ae06341e59b7c025240dac4d2a14ff9aa710680fddb49bfa0e78a695d"
+    },
+    {
+      "path": "/private/tmp/proto-native-gradient-release.log",
+      "hash": "sha256:42cdc178e67ce75d13beae2a6013bebab8ec47fdc4e0a879b86f2455db5ed9c7"
+    },
+    {
+      "path": "/private/tmp/proto-overhaul-release-backend-tests.log",
+      "hash": "sha256:e5e102d8a6625c1206b92f9f8df336a58645bd43486720dbb662b12f9680ce3f"
+    }
+  ]
+}

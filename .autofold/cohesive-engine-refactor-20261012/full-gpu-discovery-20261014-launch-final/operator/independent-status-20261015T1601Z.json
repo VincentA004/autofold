@@ -1,0 +1,112 @@
+{
+  "format": "autofold.independent-status-observation.v1",
+  "observedAt": "2026-10-15T16:01:19.704572+00:00",
+  "fullValidationPassed": false,
+  "successfulGpuTrials": 4,
+  "requestedGpuTrials": 24,
+  "currentControllerProcessPresent": false,
+  "controllerPidObserved": 33904,
+  "liveSessionLeases": [],
+  "originalGpuProcessCount": 0,
+  "originalRemoteReceiptStates": [
+    "succeeded",
+    "succeeded",
+    "succeeded",
+    "succeeded"
+  ],
+  "gpuComputeProcessQueryEmpty": true,
+  "hostCheckObservedAtUtc": "2026-10-15T16:00:44.614602+00:00",
+  "driverFinalExitArtifactPresent": false,
+  "standardShutdownVerifier": "Refused because original driver-exit artifact is absent; independent read-only host check performed without fabricating exit evidence.",
+  "lastMonitor": "2026-10-15T07:41:56.158Z",
+  "freshSettledRequests": 221,
+  "freshSdkEstimatedUsd": 2.0080886159999998,
+  "freshReportedInferenceUsd": 1.3698919804,
+  "cumulativeSdkEstimatedUsd": 4.864821084,
+  "cumulativeReportedInferenceUsd": 3.20094040836,
+  "freshRequestAllowance": 512,
+  "compactionRequests": 79,
+  "compactionEvents": 55,
+  "sessionOutcomes": [
+    {
+      "status": "limit_reached",
+      "error": "Maximum model turns reached"
+    }
+  ],
+  "jobs": [
+    {
+      "id": "job_43d77324bcdd4fc39a8f0cb326098c94",
+      "status": "succeeded",
+      "completedAt": "2026-10-15T02:57:29.279Z",
+      "result": {
+        "reason": "conversation_completed",
+        "status": null,
+        "boundary": null,
+        "remainingTrajectories": null,
+        "completedEvaluations": 0,
+        "consumedTrajectories": 0,
+        "modelCostUsd": 0.201542064
+      }
+    },
+    {
+      "id": "job_7fe122d78ce944f883e43d5dfdefc625",
+      "status": "succeeded",
+      "completedAt": "2026-10-15T03:47:12.266Z",
+      "result": {
+        "reason": null,
+        "status": "deferred",
+        "boundary": "runtime_limit_reached",
+        "remainingTrajectories": 20,
+        "completedEvaluations": null,
+        "consumedTrajectories": null,
+        "modelCostUsd": 1.8065465519999995
+      }
+    },
+    {
+      "id": "job_a0b600c482bf4c2daead7ebb165f4cc8",
+      "status": "succeeded",
+      "completedAt": "2026-10-15T03:18:31.418Z",
+      "result": {
+        "reason": "iteration_limit_reached",
+        "status": null,
+        "boundary": null,
+        "remainingTrajectories": null,
+        "completedEvaluations": 2,
+        "consumedTrajectories": 2,
+        "modelCostUsd": 0.28714757999999974
+      }
+    },
+    {
+      "id": "job_e69740901f63479f8c660383fd6c5c3c",
+      "status": "succeeded",
+      "completedAt": "2026-10-15T03:47:12.029Z",
+      "result": {
+        "reason": "runtime_limit_reached",
+        "status": null,
+        "boundary": null,
+        "remainingTrajectories": null,
+        "completedEvaluations": 0,
+        "consumedTrajectories": 0,
+        "modelCostUsd": 1.4512122479999996
+      }
+    },
+    {
+      "id": "job_f656664d52d54904bc0e3f93f1fcedb8",
+      "status": "succeeded",
+      "completedAt": "2026-10-15T03:05:26.652Z",
+      "result": {
+        "reason": "iteration_limit_reached",
+        "status": null,
+        "boundary": null,
+        "remainingTrajectories": null,
+        "completedEvaluations": 2,
+        "consumedTrajectories": 2,
+        "modelCostUsd": 0.068186724
+      }
+    }
+  ],
+  "deadlineUtc": "2026-10-15T14:42:32.748Z",
+  "newInferenceOrGpuWorkDuringReview": 0,
+  "canonicalStateEdited": false,
+  "interpretation": "Four genuine native GPU trials succeeded. Fifth-slot authoring exhausted the runtime turn allowance. Parent result is deferred/runtime_limit_reached with 20 remaining trajectories but durable job status is succeeded; no automatic continuation was created. Controller later disappeared without final closeout evidence. This observation does not relabel the run as accepted."
+}

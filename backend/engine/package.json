@@ -1,0 +1,36 @@
+{
+  "name": "@autofold/engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/server.ts",
+    "cli": "bun run src/cli.ts",
+    "test": "bun test --preload ../../tooling/script/offline-network.ts --timeout 15000",
+    "typecheck": "tsc --noEmit"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./runtime": "./src/runtime/index.ts",
+    "./discovery": "./src/discovery/index.ts",
+    "./execution": "./src/execution/index.ts",
+    "./jobs": "./src/jobs/index.ts",
+    "./scientist": "./src/scientist/index.ts",
+    "./skills": "./src/skills/index.ts",
+    "./campaign": "./src/campaign/index.ts",
+    "./literature": "./src/literature/index.ts",
+    "./execution/remote": "./src/execution/remote.ts",
+    "./acceptance": "./src/acceptance/index.ts",
+    "./knowledge": "./src/knowledge/index.ts",
+    "./knowledge-review": "./src/knowledge-review-controller/index.ts",
+    "./feedback": "./src/feedback/index.ts"
+  },
+  "dependencies": {
+    "@autofold/science-core": "*",
+    "@earendil-works/pi-agent-core": "1.0.1",
+    "@earendil-works/pi-ai": "1.0.1",
+    "@earendil-works/pi-coding-agent": "1.0.1",
+    "typebox": "1.3.27",
+    "zod": "4.1.8"
+  }
+}

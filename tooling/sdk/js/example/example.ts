@@ -1,55 +1,8 @@
-import { createOpenScienceClient, createOpenScienceServer } from "@synsci/sdk"
+import { createOpenScienceClient } from "@synsci/sdk"
 
-const server = await createOpenScienceServer()
-const client = createOpenScienceClient({ baseUrl: server.url })
+// Connect to an existing server implementing the generated legacy API contract.
+const baseUrl = process.env.OPENSCIENCE_URL
+if (!baseUrl) throw new Error("Set OPENSCIENCE_URL to an existing OpenScience API server")
 
-const input = await Array.fromAsync(new Bun.Glob("backend/cli/src/*.ts").scan())
-
-const tasks: Promise<void>[] = []
-for await (const file of input) {
-  console.log("processing", file)
-  const session = await client.session.create()
-  tasks.push(
-    client.session.prompt({
-      path: { id: session.data.id },
-      body: {
-        parts: [
-          {
-            type: "file",
-            mime: "text/plain",
-            url: `file://${file}`,
-          },
-          {
-            type: "text",
-            text: `Write tests for every public function in this file.`,
-          },
-        ],
-      },
-    }),
-  )
-  console.log("done", file)
-}
-
-await Promise.all(
-  input.map(async (file) => {
-    const session = await client.session.create()
-    console.log("processing", file)
-    await client.session.prompt({
-      path: { id: session.data.id },
-      body: {
-        parts: [
-          {
-            type: "file",
-            mime: "text/plain",
-            url: `file://${file}`,
-          },
-          {
-            type: "text",
-            text: `Write tests for every public function in this file.`,
-          },
-        ],
-      },
-    })
-    console.log("done", file)
-  }),
-)
+const client = createOpenScienceClient({ baseUrl })
+console.log(await client.session.list())

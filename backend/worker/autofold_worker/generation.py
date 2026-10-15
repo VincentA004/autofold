@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .proto_portfolio import ProtoPortfolioProgram, _lane_generator
 
 
 def _canonical(value: Any) -> str:
@@ -58,6 +57,19 @@ def _parameters(generator: Any, bundle: dict[str, Any]) -> dict[str, Any]:
 
 def _generator_inventory(program: Any, bundle: dict[str, Any]) -> dict[str, dict[str, Any]]:
     inventory: dict[str, dict[str, Any]] = {}
+    native = getattr(program, "_autofold_native_projection", None)
+    if native:
+        grouped = {}
+        for lane in native["projection"]:
+            for stage in lane["stages"]:
+                for component in stage["generators"]:
+                    grouped.setdefault(component["key"], []).append(component)
+        for key, components in grouped.items():
+            parameters = {"generator": key, "instances": components}
+            inventory[key] = {"id": key, "version": bundle["proto"]["languageCommit"],
+                "toolsCalled": sorted(set(tool for c in components for tool in c["toolsCalled"])),
+                "parameters": parameters, "parametersHash": _digest_text(_canonical(parameters))}
+        return inventory
     for optimizer in getattr(program, "optimizers", []):
         for generator in getattr(optimizer, "generators", []):
             spec = getattr(generator, "_spec", None)
@@ -82,6 +94,12 @@ def _sequence_inventory(program: Any) -> dict[str, list[tuple[Any, str | None]]]
     lane before flattening their constructs.
     """
     inventory: dict[str, list[tuple[Any, str | None]]] = {}
+    selected = getattr(program, "_autofold_selected_sequences", None)
+    if selected is not None:
+        for sequence, _origin in selected:
+            inventory.setdefault(sequence.sequence, []).append((sequence, None))
+        return inventory
+    from .compatibility.proto_portfolio_v1 import ProtoPortfolioProgram, _lane_generator
     lanes = (
         [(lane.program, _lane_generator(lane.program)) for lane in program.lanes]
         if isinstance(program, ProtoPortfolioProgram)
@@ -105,6 +123,38 @@ def _sampling_inventory(program: Any) -> list[dict[str, Any]]:
             if isinstance(observed, dict) and isinstance(observed.get("generator"), str):
                 sampling[observed["generator"]] = _json_safe(observed)
     return [sampling[key] for key in sorted(sampling)]
+
+
+def _seed_role_view(bundle: dict[str, Any], program: Any) -> dict[str, Any] | None:
+    """Return additive seed provenance only for a host-bound generation slot."""
+    if "generationSeed" not in bundle:
+        return None
+    observed = getattr(program, "_autofold_native_seed_roles", None)
+    if isinstance(observed, dict):
+        return observed
+
+    # Non-native/older trusted paths still get the host/evaluator bindings, but no
+    # observed generator or predictor values are fabricated when the receipt lacks them.
+    try:
+        from .native_search import lanes
+        native_lanes = lanes(program)
+    except (ImportError, AttributeError, TypeError):
+        native_lanes = [program]
+    program_seeds = []
+    for lane_index, lane in enumerate(native_lanes):
+        seed = getattr(lane, "seed", None)
+        if seed is None or type(seed) is int and abs(seed) <= 2**53 - 1:
+            program_seeds.append({"lane": lane_index, "value": seed,
+                "source": "runtime_program.seed"})
+    evaluator_seeds = bundle.get("seeds", [])
+    return {
+        "format": "autofold.generation-seed-roles.v1",
+        "hostGenerationSeed": {"value": bundle["generationSeed"], "source": "trial_bundle.generationSeed"},
+        "effectiveProgramSeeds": program_seeds,
+        "declaredPredictorSeeds": [],
+        "observedToolConfigSeeds": [],
+        "evaluatorSeeds": {"values": evaluator_seeds, "source": "trial_bundle.seeds"},
+    }
 
 
 def _structure_cif(sequence: Any) -> str | None:
@@ -212,6 +262,7 @@ def capture(
             "programHash": bundle["programHash"],
             "parametersHash": parameters_hash,
             "seed": candidate["seed"],
+            **({"generationSeed": bundle["generationSeed"]} if "generationSeed" in bundle else {}),
             "metadata": metadata,
             "outputs": outputs,
         }
@@ -277,6 +328,7 @@ def capture(
     else:
         stochasticity = "unknown"
 
+    seed_roles = _seed_role_view(bundle, program)
     _write_json(
         output / "generation-runs" / "index.json",
         {
@@ -301,6 +353,8 @@ def capture(
                 else {}
             ),
             "sampling": _sampling_inventory(program),
+            **({"seedRoles": seed_roles} if seed_roles is not None else {}),
+            **({"nativeSearch": program._autofold_native_receipt} if hasattr(program, "_autofold_native_receipt") else {}),
             "portfolioFailures": _json_safe(getattr(program, "lane_failures", [])),
             "generatorDiagnostics": _json_safe(getattr(program, "_autofold_generator_diagnostics", [])),
             "entries": entries,

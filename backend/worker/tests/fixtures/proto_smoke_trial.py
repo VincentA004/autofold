@@ -14,7 +14,7 @@ from proto_language.optimizer import (
 )
 
 
-def build_program(bundle):
+def _build_program(bundle):
     """Express one cheap peptide design loop as a real Proto Program."""
     result_count = min(bundle["submissionSize"], bundle["candidateBudget"])
     peptide = Segment(length=24, sequence_type="protein", label="designed-peptide")
@@ -44,3 +44,11 @@ def build_program(bundle):
         compute=nullcontext(),
     )
 
+
+
+def build_trial(ctx):
+    from autofold_worker.proto_trial import ProtoTrial, NativeSearch, NativeOutput
+    return ProtoTrial(program=_build_program(ctx), hypothesis="Bounded native CPU diversity search preserves original optimizer settings",
+        search=NativeSearch(maximum_candidates=ctx.candidate_budget, maximum_proposals=ctx.candidate_budget*4,
+            maximum_sampling_calls=ctx.candidate_budget*4, maximum_tool_calls=ctx.candidate_budget*4,
+            maximum_wall_seconds=30, outputs=(NativeOutput("candidate"),), allowed_tools=("random-protein-sample",)))

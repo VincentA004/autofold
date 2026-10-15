@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import unittest
 import time
+import subprocess
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
-from autofold_worker.adapters.proto import _apply_trusted_generation_bounds
+from autofold_worker.compatibility.proto_v1 import _apply_trusted_generation_bounds, _validate_static_construction
+from autofold_worker.adapters.proto import _commit
 
 
 class _Config:
@@ -16,6 +20,60 @@ class _Config:
 
 
 class ProtoExecutionBoundsTests(unittest.TestCase):
+    def test_executing_package_pin_rejects_dirty_and_ignored_python_shadows(self):
+        with tempfile.TemporaryDirectory(prefix="proto-byte-attestation-") as directory:
+            root = Path(directory)
+            package = root / "proto_language"
+            package.mkdir()
+            code = package / "__init__.py"
+            code.write_text("# original package\n")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            def git(*args):
+                return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, text=True)
+            git("add", "proto_language")
+            git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Offline package fixture")
+            expected = git("rev-parse", "HEAD").stdout.strip()
+            self.assertEqual(_commit(root), expected)
+            code.write_text("# changed package\n")
+            with self.assertRaisesRegex(Exception, "bytes differ"):
+                _commit(root)
+            code.write_text("# original package\n")
+            (root / ".gitignore").write_text("*.py\n")
+            (package / "ignored_shadow.py").write_text("# ignored source can still be imported\n")
+            with self.assertRaisesRegex(Exception, "Untracked executable"):
+                _commit(root)
+
+    def test_static_construction_must_match_the_compiler_receipt(self):
+        sequences = [SimpleNamespace(sequence="ACDE"), SimpleNamespace(sequence="CDEF")]
+        optimizer = SimpleNamespace(
+            generators=[],
+            config=SimpleNamespace(proposal_source="existing_results"),
+            num_samples=1,
+            num_results=1,
+            proposal_batch_size=1,
+        )
+        program = SimpleNamespace(
+            optimizers=[optimizer],
+            constructs=[SimpleNamespace(segments=[SimpleNamespace(result_sequences=sequences)])],
+            num_results=1,
+        )
+        receipt = {
+            "format": "autofold.static-construction.v1",
+            "kind": "native",
+            "optimizerCount": 1,
+            "constructCount": 1,
+            "generatorCount": 0,
+            "proposalSources": ["existing_results"],
+            "fixedSequences": ["ACDE", "CDEF"],
+            "programResultCount": 1,
+            "optimizerSamples": [{"numSamples": 1, "numResults": 1, "proposalBatchSize": 1}],
+        }
+        bundle = {"pipeline": {"staticConstruction": receipt}}
+        self.assertEqual(_validate_static_construction(program, bundle), ["ACDE", "CDEF"])
+        program.constructs[0].segments[0].result_sequences[1].sequence = "DEFG"
+        with self.assertRaisesRegex(Exception, "changed after launch admission"):
+            _validate_static_construction(program, bundle)
+
     @staticmethod
     def _generator(key, **values):
         segment = SimpleNamespace(proposal_sequences=[object(), object(), object(), object()])

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -60,6 +62,10 @@ def _stage_timeout(bundle: dict[str, Any], stage: str) -> int | None:
     time. Evidence may execute every model for every candidate and seed, so its
     ceiling includes that full declared upper bound plus cold-start allowance.
     """
+    native = bundle.get("nativeExecution")
+    if isinstance(native, dict):
+        resources = native["resources"]
+        return resources["maximumSearchWallSeconds"] if stage == "generation" else resources["reservedEvaluationWallSeconds"]
     pipeline = bundle.get("pipeline")
     if not isinstance(pipeline, dict):
         return None
@@ -97,6 +103,27 @@ def _stage_state(output: Path, stage: str, status: str, **detail: Any) -> None:
     )
 
 
+def _display_lock_stalled(stack_path: Path) -> bool:
+    """Recognize the observed renderer deadlock, not generic slow GPU work.
+
+    The stage's independent watchdog samples every 120 seconds. Require three
+    complete consecutive samples blocked in the main-thread tqdm refresh path.
+    """
+    if not stack_path.is_file():
+        return False
+    with stack_path.open("rb") as stream:
+        stream.seek(max(0, stack_path.stat().st_size - 65536))
+        samples = stream.read().decode("utf-8", errors="replace").split("Timeout (0:02:00)!")[1:]
+    if len(samples) < 3:
+        return False
+    def blocked(sample: str) -> bool:
+        main = sample.rsplit("Thread ", 1)[-1]
+        return all(text in main for text in (
+            "tqdm/std.py", " in acquire", " in refresh", " in __iter__", " in run_chai1",
+        ))
+    return all(blocked(sample) for sample in samples[-3:])
+
+
 def _terminate_stage(process: subprocess.Popen[bytes]) -> None:
     try:
         os.killpg(process.pid, signal.SIGTERM)
@@ -121,12 +148,17 @@ def _isolated_stage(
     *,
     candidate_set_path: Path | None = None,
     evidence_adapter_source: Path | None = None,
+    aggregate_deadline: float | None = None,
 ) -> dict[str, Any]:
     stage_root = output / ".stages"
     stage_root.mkdir(parents=True, exist_ok=True)
     _stage_state(output, stage, "running", startedAt=timestamp())
     package_root = str(Path(__file__).resolve().parent.parent)
     environment = dict(os.environ)
+    # Batch inference must never depend on terminal rendering or spinner locks.
+    environment["PROTO_NO_SPINNER"] = "1"
+    environment["TQDM_DISABLE"] = "1"
+    environment["PYTHONUNBUFFERED"] = "1"
     environment["PYTHONPATH"] = os.pathsep.join(
         [package_root, environment["PYTHONPATH"]] if environment.get("PYTHONPATH") else [package_root]
     )
@@ -148,9 +180,30 @@ def _isolated_stage(
     if evidence_adapter_source is not None:
         command.extend(["--evidence-adapter-source", str(evidence_adapter_source)])
     timeout = _stage_timeout(bundle, stage)
+    if aggregate_deadline is not None:
+        remaining = aggregate_deadline - time.monotonic()
+        if remaining <= 0:
+            message = "aggregate worker GPU allocation was exhausted before the next stage"
+            _stage_state(output, stage, "timed_out", error=message)
+            raise ProtocolError(message)
+        aggregate_timeout = max(0.001, remaining)
+        timeout = aggregate_timeout if timeout is None else min(timeout, aggregate_timeout)
     process = subprocess.Popen(command, env=environment, start_new_session=True)
+    deadline = time.monotonic() + timeout if timeout is not None else None
     try:
-        code = process.wait(timeout=timeout)
+        while True:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                code = process.wait(timeout=min(5.0, remaining) if remaining is not None else 5.0)
+                break
+            except subprocess.TimeoutExpired:
+                if _display_lock_stalled(stage_root / f"{stage}-stack.log"):
+                    _terminate_stage(process)
+                    message = f"{stage} runtime stalled in terminal progress rendering (three consecutive stack samples)"
+                    _stage_state(output, stage, "failed", error=message, errorType="ProgressRenderingStall")
+                    raise ProtocolError(message)
     except subprocess.TimeoutExpired as error:
         _terminate_stage(process)
         message = f"{stage} stage exceeded its {timeout}-second lifecycle ceiling"
@@ -167,6 +220,33 @@ def _isolated_stage(
     return result
 
 
+def _worker_tree_hash(root: Path) -> str:
+    files = sorted(
+        [root / "run_worker.py", *(root / "autofold_worker").rglob("*.py")],
+        key=lambda source: source.relative_to(root).as_posix(),
+    )
+    digest = hashlib.sha256()
+    for source in files:
+        relative = source.relative_to(root).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(source.read_bytes())
+        digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
+
+
+def _validate_worker_tree(bundle: dict[str, Any]) -> None:
+    identity = bundle.get("worker")
+    if not isinstance(identity, dict):
+        return
+    root = Path(__file__).resolve().parent.parent
+    observed = _worker_tree_hash(root)
+    if observed != identity.get("sourceHash"):
+        raise ProtocolError(
+            f"Worker tree hash mismatch: expected {identity.get('sourceHash')}, received {observed}"
+        )
+
+
 def run(
     bundle_path: Path,
     output: Path,
@@ -175,6 +255,7 @@ def run(
 ) -> None:
     started_at = timestamp()
     bundle = validate_bundle(read_json(bundle_path))
+    _validate_worker_tree(bundle)
     # Bundle resources are portable: relative paths resolve beside bundle.json.
     # Keep the serialized bundle unchanged so its manifest hash is identical on
     # the authoring machine and a remote compute host.
@@ -238,6 +319,8 @@ def run(
     stage_root.mkdir(parents=True, exist_ok=True)
     runtime_bundle_path = stage_root / "runtime-bundle.json"
     write_json(runtime_bundle_path, runtime_bundle)
+    aggregate = bundle.get("nativeExecution", {}).get("resources", {}).get("maximumWorkerWallSeconds") if bundle.get("nativeExecution") else bundle.get("pipeline", {}).get("executionBudget", {}).get("maximumGpuSeconds")
+    aggregate_deadline = time.monotonic() + float(aggregate) if isinstance(aggregate, (int, float)) else None
     if bundle["designAdapter"] == "mock":
         candidate_set = MockDesignAdapter().generate(runtime_bundle, output)
     else:
@@ -247,6 +330,7 @@ def run(
             output,
             runtime_bundle_path,
             stage_root / "generation-result.json",
+            aggregate_deadline=aggregate_deadline,
         )
     # Persist the generated portfolio before validation. A validator failure
     # must not erase the successful empirical generation trajectory.
@@ -260,6 +344,7 @@ def run(
             stage_root / "evidence-result.json",
             candidate_set_path=candidates_path,
             evidence_adapter_source=evidence_adapter_source,
+            aggregate_deadline=aggregate_deadline,
         )
     write_json(candidates_path, candidate_set)
     result = evaluate(runtime_bundle, candidate_set)

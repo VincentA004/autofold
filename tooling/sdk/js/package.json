@@ -11,16 +11,17 @@
   "exports": {
     ".": "./src/index.ts",
     "./client": "./src/client.ts",
-    "./server": "./src/server.ts",
     "./v2": "./src/v2/index.ts",
     "./v2/client": "./src/v2/client.ts",
-    "./v2/server": "./src/v2/server.ts"
+    "./legacy": "./src/legacy/index.ts",
+    "./legacy/server": "./src/legacy/server.ts",
+    "./legacy/v2": "./src/legacy/v2/index.ts",
+    "./legacy/v2/server": "./src/legacy/v2/server.ts"
   },
   "files": [
     "dist"
   ],
   "devDependencies": {
-    "@hey-api/openapi-ts": "0.90.10",
     "@tsconfig/node22": "22.0.2",
     "@types/node": "22.13.9",
     "typescript": "5.8.2",

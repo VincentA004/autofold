@@ -1,3 +1,5 @@
+> Historical design for the preserved OpenScience implementation. See [README.md](README.md) for the active Pi backend and current migration boundaries.
+
 # Autofold
 
 Autofold is an agentic peptide-discovery system that improves both candidate molecules and the methods used to discover them. It combines reproducible computational experiments, fixed evaluation, campaign-scoped scientific memory, and bounded recursive improvement.

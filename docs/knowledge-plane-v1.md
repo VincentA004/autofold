@@ -26,16 +26,16 @@ The layers remain distinct:
 - a locked evaluator verifies a computational result;
 - a literature claim is proposed from frozen source excerpts;
 - an alignment interprets whether a claim supports, refutes, contextualizes, or leaves an experiment outcome unresolved;
-- a reviewer may promote or contest that interpretation.
+- a separately attributed reviewer may accept, contest or deprecate that interpretation without changing its experimental authority.
 
 A citation never verifies an experimental result, and a model score never verifies a literature claim.
 
 ## Recursive refresh
 
-A refresh becomes due when the campaign has no prior knowledge cycle, a new run outcome has not been consumed by a cycle, or the latest cycle's `nextReviewAt` watermark has passed. The bounded literature child receives the new outcomes and current graph, searches and fetches within explicit budgets, then submits one artifact. The backend validates exact excerpts and graph references before atomically recording the entire cycle.
+A refresh becomes due when the campaign has no prior semantic reconciliation cycle, an open research question needs evidence, an outcome remains unconsumed, or the latest semantic review watermark has passed. Deterministic experiment closeout consumes its outcome but does not count as the first semantic review or reset that review's clock. A historical source-grounded cycle may count even when its trigger is `run_completed`. The bounded literature child receives the new outcomes and current graph, searches and fetches within explicit budgets, then submits one artifact. The backend validates exact excerpts and graph references before atomically recording the entire cycle.
 
 The recursive execution loop commits deterministic trajectory knowledge before
-the persistent scientist authors its next mutable `trial.py` delta:
+the persistent scientist authors its next mutable Proto program intervention:
 
 ```text
 run one trial
@@ -59,17 +59,21 @@ activate its own methodological lesson. The next campaign observation includes
 those signals alongside completed trajectories and failed authoring attempts;
 promotion still requires an explicit refinement plus held-out shadow replay.
 
-```text
-bun run research:cli -- knowledge status CMP_ID
-bun run research:cli -- knowledge refresh CMP_ID --session SES_ID
-bun run research:cli -- knowledge alignments CMP_ID
-bun run research:cli -- knowledge cycles CMP_ID
-bun run research:cli -- alignment review CMP_ID ALN_ID --by REVIEWER
+## Scoped retrieval and operator review
+
+The scientist and bounded literature lane can query and read the authoritative campaign graph through `query_knowledge` and `read_knowledge`. Search covers all stored history with bounded pagination. Records expose lifecycle, source hashes, review actors, support/refute/context relations, superseded failures and exact target/contract applicability. Record snapshot hashes identify the current view; they do not attest truth.
+
+```sh
+npm run research:cli -- knowledge query CMP_ID --query "predictor disagreement"
+npm run research:cli -- knowledge read CMP_ID --record CLM_ID
+npm run research:cli -- knowledge review CMP_ID --record CLM_ID --status contested --reviewed-by human:operator --expected-hash sha256:HASH
+npm run research:cli -- knowledge reconcile CMP_ID --claim CLM_ID --request-id RECONCILE_KEY --max-cost 2
+npm run research:cli -- knowledge publish CMP_ID
+npm run research:cli -- literature CMP_ID --request-id REVIEW_KEY --experiment EXP_ID
+npm run research:cli -- job get JOB_ID
 ```
 
-`knowledge refresh` is watermark-aware and exits without starting an agent when no refresh is due. `--force` permits a deliberate bounded review.
-When due, it returns a durable job immediately; `job watch JOB_ID` follows the
-review through persistence without holding an HTTP connection open.
+Operator reviews require the exact observed claim or alignment snapshot hash. The store checks the hash and campaign scope atomically, records reviewer and time, preserves the claim's original source evidence and confidence, and republishes the OKF projection. A competing review cannot silently overwrite another decision. `knowledge publish` repairs projections from authoritative state without inference or compute. Autonomous claim reconciliation runs as a separate bounded Pi `knowledge_review` job/session with its reviewer actor owned by the host. The queue freezes target/source hashes and contract identities; the reviewer reads a declared target/source contradiction graph and submits existing claim/alignment statuses, rationales and evidence IDs it read. The core checks source snapshots and all origin/ancestor leases, then atomically records the changes and an audit cycle. Reopening after commit reuses that audit and accepted proposal without another model call. The campaign's executable `request_review` move shares the knowledge-operation allowance and model budget. Unchanged contested claims do not repeatedly trigger review; new evidence can make them eligible again. Necessary graph/read limits yield explicit boundaries, and omitted optional context counts remain visible.
 
 ## OKF projection
 
@@ -87,7 +91,7 @@ The bundle follows OKF v0.2's Markdown plus YAML model, lifecycle metadata, sour
 | `alignments/` | Typed claim-to-outcome interpretations |
 | `cycles/` | Durable recursion inputs, outputs, gaps, and next review |
 
-Runtime JSON remains the transactional source of truth so OKF files cannot bypass lifecycle validation, evaluator locks, atomic writes, or review authorization.
+The transactional SQLite research store remains the source of truth so OKF files cannot bypass lifecycle validation, evaluator locks, atomic writes, or review authorization.
 
 ## Current boundary
 

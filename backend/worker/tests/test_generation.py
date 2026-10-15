@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -45,6 +47,28 @@ class GenerationCaptureTest(unittest.TestCase):
             })
             self.assertEqual(summary[0]["trajectoryFailures"], 3)
 
+    def test_long_run_path_allows_child_multiprocessing_socket(self) -> None:
+        previous_env = os.environ.get("TMPDIR")
+        previous_cache = tempfile.tempdir
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / ("run_" + "a" * 80) / "output"
+            output.mkdir(parents=True)
+            with GeneratorDiagnosticsCapture(output, enabled=True) as diagnostics:
+                result = subprocess.run(
+                    [sys.executable, "-c",
+                     "import tempfile; from multiprocessing.connection import Listener; "
+                     "directory = tempfile.TemporaryDirectory(prefix='pymp-'); "
+                     "listener = Listener(directory.name + '/listener-test', family='AF_UNIX'); "
+                     "listener.close(); directory.cleanup()"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                with tempfile.TemporaryDirectory() as child:
+                    self.assertEqual(Path(child).parent, diagnostics.root)
+            self.assertFalse(diagnostics.root.exists())
+        self.assertEqual(os.environ.get("TMPDIR"), previous_env)
+        self.assertEqual(tempfile.tempdir, previous_cache)
+
     def test_records_observed_generator_components_and_structure(self) -> None:
         class Config:
             def model_dump(self, mode: str) -> dict[str, object]:
@@ -71,6 +95,7 @@ class GenerationCaptureTest(unittest.TestCase):
         program = SimpleNamespace(
             optimizers=[SimpleNamespace(generators=[generator])],
             constructs=[SimpleNamespace(segments=[SimpleNamespace(result_sequences=[sequence])])],
+            seed=42,
         )
         bundle = {
             "runId": "run_generation",
@@ -113,12 +138,26 @@ class GenerationCaptureTest(unittest.TestCase):
             self.assertTrue(index["replicate"]["realizedCandidateSetHash"].startswith("sha256:"))
             self.assertEqual(entry["artifactHash"], artifact_hash)
             self.assertEqual(captured["candidates"][0]["generation"]["artifactHash"], artifact_hash)
+            self.assertNotIn("generationSeed", artifact)
+            self.assertNotIn("seedRoles", index)
             self.assertEqual(artifact["generator"]["components"][0]["toolsCalled"], ["proteinmpnn-sample", "rfdiffusion3-design"])
             self.assertEqual(
                 artifact["generator"]["components"][0]["parameters"]["config"]["target_structure"],
                 {"targetArtifactHash": bundle["targetArtifactHash"]},
             )
             self.assertEqual(artifact["metadata"]["rfdiffusion-mpnn-binder"]["contig"], "A1-20,/0,9")
+            seeded_output = output / "seeded"
+            seeded_output.mkdir()
+            capture({**bundle, "generationSeed": 12345}, candidates, program, seeded_output)
+            seeded_index = json.loads((seeded_output / "generation-runs" / "index.json").read_text())
+            seeded_artifact = json.loads((seeded_output / seeded_index["entries"][0]["artifactPath"]).read_text())
+            self.assertEqual(seeded_artifact["generationSeed"], 12345)
+            self.assertEqual(seeded_artifact["seed"], 7)
+            self.assertEqual(seeded_index["seedRoles"]["hostGenerationSeed"]["value"], 12345)
+            self.assertEqual(seeded_index["seedRoles"]["effectiveProgramSeeds"][0]["value"], 42)
+            self.assertEqual(seeded_index["seedRoles"]["effectiveProgramSeeds"][0]["source"], "runtime_program.seed")
+            self.assertNotEqual(seeded_index["seedRoles"]["effectiveProgramSeeds"][0]["value"], seeded_index["seedRoles"]["hostGenerationSeed"]["value"])
+            self.assertEqual(seeded_index["seedRoles"]["evaluatorSeeds"]["values"], [7])
             self.assertTrue((output / entry["structurePath"]).is_file())
 
     def test_rejects_observed_generator_outside_frozen_policy(self) -> None:

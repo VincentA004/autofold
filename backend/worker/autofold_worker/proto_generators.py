@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import os
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Literal
@@ -13,6 +11,8 @@ from proto_language.core import Generator, GeneratorInputType
 from proto_language.generator.generator_registry import generator
 from proto_language.utils.base import BaseConfig, ConfigField
 from proto_tools.entities.structures import Structure
+
+from .generator_spec import materialize_design_spec, run_generator_command, validate_materialized_spec
 
 
 def _structure(value: Structure | str) -> Structure:
@@ -82,7 +82,8 @@ class BoltzGenBinderConfig(BaseConfig):
     config=BoltzGenBinderConfig,
     description="All-atom BoltzGen peptide/protein binder generation",
     uses_gpu=True,
-    tools_called=["boltzgen-design"],
+    # This adapter invokes its own CLI, not a registered proto_tools request.
+    tools_called=[],
     supported_sequence_types=["protein"],
 )
 class BoltzGenBinderGenerator(Generator):
@@ -100,52 +101,17 @@ class BoltzGenBinderGenerator(Generator):
         if not self.config.cache_dir:
             raise ValueError("BoltzGen requires AUTOFOLD_BOLTZGEN_CACHE in the execution profile")
         segment = self.segment
-        for proposal in segment.proposal_sequences:
-            proposal.sequence = "X" * segment.sequence_length
         target = _structure(self.config.target_structure)
         seed = self._next_seed()
         with tempfile.TemporaryDirectory(prefix="autofold-boltzgen-") as temporary:
             root = Path(temporary)
-            # BoltzGen's PDB parser accepts the portable target directly. Proto's
-            # compact CIF writer omits entity tables required by BoltzGen's mmCIF
-            # parser, so converting a PDB target to that representation is lossy.
             target_path = root / "target.pdb"
             target.write_pdb(target_path)
-            chain = {"id": self.config.target_chain}
-            entity: dict[str, object] = {
-                "path": str(target_path),
-                "include": [{"chain": chain}],
-                "structure_groups": "all",
-            }
-            if self.config.hotspots:
-                entity["binding_types"] = [
-                    {"chain": {"id": self.config.target_chain, "binding": ",".join(map(str, self.config.hotspots))}}
-                ]
-            protein: dict[str, object] = {
-                "id": "G",
-                "sequence": f"{segment.sequence_length}..{segment.sequence_length}",
-            }
-            constraints: list[dict[str, object]] = []
-            if self.config.scaffold == "cyclic":
-                protein["cyclic"] = True
-            elif self.config.scaffold == "disulfide_beta_hairpin":
-                if segment.sequence_length < 8:
-                    raise ValueError("A disulfide beta-hairpin requires at least 8 residues")
-                protein["sequence"] = f"C{segment.sequence_length - 2}C"
-                left_end = segment.sequence_length // 2 - 1
-                right_start = segment.sequence_length // 2 + 2
-                protein["secondary_structure"] = {
-                    "sheet": f"2..{left_end},{right_start}..{segment.sequence_length - 1}"
-                }
-                constraints.append(
-                    {"bond": {"atom1": ["G", 1, "SG"], "atom2": ["G", segment.sequence_length, "SG"]}}
-                )
-            specification = {
-                "entities": [{"protein": protein}, {"file": entity}],
-                **({"constraints": constraints} if constraints else {}),
-            }
-            spec_path = root / "design.yaml"
-            spec_path.write_text(json.dumps(specification, indent=2) + "\n", encoding="utf-8")
+            spec_path = materialize_design_spec(
+                "boltzgen-binder", self.config, segment.sequence_length, root,
+                target_path.read_text(encoding="utf-8"),
+            )
+            validate_materialized_spec("boltzgen-binder", spec_path)
             output = root / "output"
             command = [
                 self.config.executable,
@@ -164,7 +130,7 @@ class BoltzGenBinderGenerator(Generator):
                 "--cache",
                 self.config.cache_dir,
             ]
-            subprocess.run(command, check=True, timeout=getattr(self, "_autofold_timeout", None))
+            run_generator_command(command, timeout=getattr(self, "_autofold_timeout", None))
             designs = _designs(output, {self.config.target_chain}, segment.num_proposals, segment.sequence_length)
             if not designs:
                 raise RuntimeError("BoltzGen produced no parseable binder designs")
@@ -202,7 +168,8 @@ class PXDesignBinderConfig(BaseConfig):
     config=PXDesignBinderConfig,
     description="PXDesign diffusion binder generation",
     uses_gpu=True,
-    tools_called=["pxdesign-design"],
+    # Host path/spec preflight and generator sampling/wall limits own this CLI.
+    tools_called=[],
     supported_sequence_types=["protein"],
 )
 class PXDesignBinderGenerator(Generator):
@@ -218,28 +185,17 @@ class PXDesignBinderGenerator(Generator):
 
     def _sample(self) -> None:
         segment = self.segment
-        for proposal in segment.proposal_sequences:
-            proposal.sequence = "X" * segment.sequence_length
         target = _structure(self.config.target_structure)
         seed = self._next_seed()
         with tempfile.TemporaryDirectory(prefix="autofold-pxdesign-") as temporary:
             root = Path(temporary)
-            # PXDesign's public YAML accepts PDB or CIF, but its conversion path
-            # needs author/entity metadata that Proto's compact CIF writer does
-            # not preserve. The portable PDB path is converted to PXDesign's own
-            # complete CIF/bioassembly representation before inference.
             target_path = root / "target.pdb"
             target.write_pdb(target_path)
-            chains = {
-                chain: {**({"hotspots": self.config.hotspots} if self.config.hotspots else {})}
-                for chain in self.config.target_chains
-            }
-            spec_path = root / "design.yaml"
-            spec_path.write_text(
-                json.dumps({"target": {"file": str(target_path), "chains": chains}, "binder_length": segment.sequence_length}, indent=2)
-                + "\n",
-                encoding="utf-8",
+            spec_path = materialize_design_spec(
+                "pxdesign-binder", self.config, segment.sequence_length, root,
+                target_path.read_text(encoding="utf-8"),
             )
+            validate_materialized_spec("pxdesign-binder", spec_path)
             output = root / "output"
             command = [
                 self.config.executable,
@@ -277,17 +233,7 @@ class PXDesignBinderGenerator(Generator):
                 if compiler.exists() and compiler_cxx.exists():
                     environment.setdefault("CC", str(compiler))
                     environment.setdefault("CXX", str(compiler_cxx))
-            completed = subprocess.run(
-                command,
-                check=False,
-                env=environment,
-                timeout=getattr(self, "_autofold_timeout", None),
-                capture_output=True,
-                text=True,
-            )
-            if completed.returncode:
-                diagnostic = (completed.stderr or completed.stdout or "PXDesign emitted no diagnostic output").strip()
-                raise RuntimeError(f"PXDesign exited {completed.returncode}: {diagnostic[-8000:]}")
+            run_generator_command(command, env=environment, timeout=getattr(self, "_autofold_timeout", None))
             designs = _designs(output, set(self.config.target_chains), segment.num_proposals, segment.sequence_length)
             if not designs:
                 raise RuntimeError("PXDesign produced no parseable binder designs")

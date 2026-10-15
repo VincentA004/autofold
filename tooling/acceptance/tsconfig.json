@@ -1,0 +1,5 @@
+{
+  "extends": "../../backend/engine/tsconfig.json",
+  "compilerOptions": {"lib": ["ESNext", "DOM", "DOM.Iterable", "DOM.AsyncIterable"]},
+  "include": ["./**/*.ts"]
+}

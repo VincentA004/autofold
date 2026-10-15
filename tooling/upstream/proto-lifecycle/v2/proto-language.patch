@@ -1,0 +1,1069 @@
+diff --git a/notes/error-handling.md b/notes/error-handling.md
+index aa69b27..99934dc 100644
+--- a/notes/error-handling.md
++++ b/notes/error-handling.md
+@@ -90,3 +90,43 @@ See `proto-tools/notes/error-handling.md` for the full tool-side contract.
+ | `proto_language/core/generator.py` | Generator assignment and proposal validation |
+ | `proto_language/utils/serialization.py` | `format_pydantic_error()` |
+ | `proto_language/utils/scoring.py` | `MAX_ENERGY`, `MIN_ENERGY` constants (re-exported from `proto_language.utils`) |
++
++## Scoped execution observation
++
++`proto_language.core.sampling_observation_scope(observer, control)` observes the
++complete public `Generator.sample` orchestration without replacing methods.
++Custom generators must implement `_sample`, preserving the public base method.
++`PortfolioProgram` composes independent native Program lanes serially and retains
++ordinary per-lane failures; cancellation always propagates.
++
++A shared `proto_tools.utils.execution_observer.ExecutionControl` accepts a
++monotonic deadline or explicit `cancel()`. Checks are cooperative, not preemption
++of a blocking kernel. A host still needs its process deadline. Scoped observers
++are context-local and must be propagated explicitly to other threads/processes.
++
++Managed hosts may opt into `require_scoped_calls=True` on both observation
++scopes. This rejects requests/sampling from unpropagated child threads only while
++the exclusive managed scope is active. Native ToolPool partitions already copy
++ContextVars; native paired MMseqs threads now do likewise. Log-drain, heartbeat,
++progress and standalone process threads do not execute registered public calls.
++Copied scope state is shared and expires on owner exit. Ordinary unobserved use
++and independently scoped non-managed contexts keep their original behavior.
++
++### Observation publication failure
++
++Failure callbacks cannot hide a native exception or cancellation: the exact
++original object and existing cause escape, with the callback failure retained
++as an exception note. In managed scopes, a throwing failure callback also
++latches publication uncertainty and cancels the shared ExecutionControl.
++
++A throwing completed callback in a managed scope raises
++`ObservationPublicationError`, a BaseException, with the publication failure as
++cause. PortfolioProgram checks both scoped cancellation controls before its
++first lane and each subsequent lane, so neither completed nor failed publication
++uncertainty can authorize a sibling lane to begin. Hosts must provide the same
++explicit ExecutionControl to both managed scopes. Successfully recorded ordinary
++scientific lane failures retain the normal per-lane portfolio policy.
++
++Callback failure objects are also retained on the original exception as
++`proto_observation_callback_failure`, supporting Python 3.10 (without notes) and
++malformed note storage without changing the original exception identity/cause.
+diff --git a/proto_language/core/__init__.py b/proto_language/core/__init__.py
+index 847f940..6fa7eb6 100644
+--- a/proto_language/core/__init__.py
++++ b/proto_language/core/__init__.py
+@@ -31,6 +31,8 @@ from proto_language.core.construct import Construct
+ from proto_language.core.generator import Generator, GeneratorInputType
+ from proto_language.core.optimizer import Optimizer
+ from proto_language.core.program import Program
++from proto_language.core.portfolio import PortfolioLane, PortfolioProgram
++from proto_language.core.execution_observer import SamplingObserver, SamplingObservation, sampling_observation_scope
+ 
+ __all__ = [
+     "BaseConfig",
+@@ -57,6 +59,11 @@ __all__ = [
+     "GeneratorInputType",
+     "Optimizer",
+     "Program",
++    "PortfolioLane",
++    "PortfolioProgram",
++    "SamplingObserver",
++    "SamplingObservation",
++    "sampling_observation_scope",
+     "BaseRegistry",
+     "BaseSpec",
+ ]
+diff --git a/proto_language/core/execution_observer.py b/proto_language/core/execution_observer.py
+new file mode 100644
+index 0000000..28870ae
+--- /dev/null
++++ b/proto_language/core/execution_observer.py
+@@ -0,0 +1,166 @@
++"""Scoped public Generator.sample lifecycle observation.
++
++Sampling observations encompass the full native orchestration, including tied
++segment mirroring and stale metadata cleanup. They never replace generator or
++optimizer methods. Contexts do not implicitly propagate to threads/processes.
++
++Examples:
++    >>> observer = SamplingObserver()
++    >>> with sampling_observation_scope(observer):
++    ...     pass
++"""
++
++from __future__ import annotations
++
++import uuid
++from collections.abc import Iterator
++from contextlib import contextmanager
++from contextvars import ContextVar
++from dataclasses import dataclass
++from typing import Any
++from threading import RLock
++
++from proto_tools.utils.execution_observer import ExecutionCancelled, ExecutionControl, ObservationPublicationError, retain_observation_failure
++
++
++SCOPED_SAMPLING_API_VERSION = 1
++
++
++@dataclass(frozen=True)
++class SamplingObservation:
++    """The exact generator and identity of one public sample invocation.
++
++    Examples:
++        >>> event = SamplingObservation("sample", object(), None)
++        >>> event.sample_id
++        'sample'
++    """
++
++    sample_id: str
++    generator: Any
++    parent_sample_id: str | None
++
++
++class SamplingObserver:
++    """Subclass to admit samples and capture their complete native outcome.
++
++    A before callback may reject before sampling. Only admitted calls receive
++    one completed/failed callback. Cancellation derives from BaseException and
++    therefore propagates across ordinary per-lane failure handling.
++
++    Examples:
++        >>> observer = SamplingObserver()
++        >>> with sampling_observation_scope(observer):
++        ...     pass
++    """
++
++    def before_sample(self, event: SamplingObservation) -> object:
++        """Admit a sample and return its opaque correlation token."""
++        return None
++
++    def sample_completed(self, event: SamplingObservation, token: object) -> None:
++        """Observe proposals after mirroring and metadata cleanup."""
++
++    def sample_failed(self, event: SamplingObservation, token: object, error: BaseException) -> None:
++        """Observe an escaping sampling failure or cancellation."""
++
++
++@dataclass
++class _SamplingScope:
++    observer: SamplingObserver
++    control: ExecutionControl | None
++    active: bool = True
++    managed: bool = False
++    publication_failed: bool = False
++
++
++_scope: ContextVar[_SamplingScope | None] = ContextVar("proto_sampling_observer", default=None)
++_scope_lock = RLock()
++_managed_scope: _SamplingScope | None = None
++_sample: ContextVar[SamplingObservation | None] = ContextVar("proto_observed_sample", default=None)
++
++
++@contextmanager
++def sampling_observation_scope(observer: SamplingObserver, control: ExecutionControl | None = None,
++                               *, require_scoped_calls: bool = False) -> Iterator[None]:
++    """Install one observer; optionally reject escaped hosted-process sampling.
++
++    Copy the context explicitly for native concurrent work. Copies share the
++    observer/control and expire on scope exit. Unobserved use is unchanged.
++    """
++    global _managed_scope
++    with _scope_lock:
++        if _scope.get() is not None or _managed_scope is not None:
++            raise RuntimeError("A sampling observer is already installed in this context or managed process")
++        if control is not None:
++            control.check()
++        state = _SamplingScope(observer, control, managed=require_scoped_calls)
++        if require_scoped_calls:
++            _managed_scope = state
++        handle = _scope.set(state)
++    try:
++        yield
++    finally:
++        with _scope_lock:
++            state.active = False
++            _scope.reset(handle)
++            if _managed_scope is state:
++                _managed_scope = None
++
++
++def check_sampling_cancelled() -> None:
++    """Check sampling scope authority and shared control before native work."""
++    with _scope_lock:
++        scope = _scope.get()
++        if _managed_scope is not None and scope is not _managed_scope:
++            raise ExecutionCancelled("Sampling escaped the managed observation scope")
++        if scope is not None:
++            if not scope.active:
++                raise ExecutionCancelled("Sampling observation scope has expired")
++            if scope.publication_failed:
++                raise ObservationPublicationError("Prior sample observation publication is unresolved")
++            if scope.control is not None:
++                scope.control.check()
++
++
++@contextmanager
++def observe_sample(generator: Any) -> Iterator[None]:
++    """Observe the public sample body without modifying its scientific behavior."""
++    check_sampling_cancelled()
++    scope = _scope.get()
++    if scope is None:
++        yield
++        return
++    observer, control = scope.observer, scope.control
++    if control is not None:
++        control.check()
++    parent = _sample.get()
++    event = SamplingObservation(uuid.uuid4().hex, generator, parent.sample_id if parent else None)
++    token = observer.before_sample(event)
++    handle = _sample.set(event)
++    try:
++        if control is not None:
++            control.check()
++        yield
++    except BaseException as error:
++        try:
++            observer.sample_failed(event, token, error)
++        except BaseException as publication_error:
++            if scope.managed:
++                scope.publication_failed = True
++                if scope.control is not None:
++                    scope.control.cancel()
++            retain_observation_failure(error, publication_error, "Sampling")
++        raise
++    else:
++        try:
++            observer.sample_completed(event, token)
++        except BaseException as publication_error:
++            if scope.managed:
++                scope.publication_failed = True
++                if scope.control is not None:
++                    scope.control.cancel()
++                raise ObservationPublicationError("Completed sampling observation publication is unresolved") from publication_error
++            raise
++    finally:
++        _sample.reset(handle)
+diff --git a/proto_language/core/generator.py b/proto_language/core/generator.py
+index 327714c..ebef66e 100644
+--- a/proto_language/core/generator.py
++++ b/proto_language/core/generator.py
+@@ -34,6 +34,7 @@ from enum import Enum
+ from typing import Any, ClassVar
+ 
+ from proto_language.core.segment import Segment
++from proto_language.core.execution_observer import observe_sample
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -238,39 +239,40 @@ class Generator(ABC):
+ 
+     def sample(self, *args: Any, **kwargs: Any) -> None:
+         """Run ``_sample()``, warn on short autoregressive output, then mirror primary proposals to tied segments."""
+-        self._sample(*args, **kwargs)
+-        primary = self.segments[0]
+-
+-        if self.input_type == GeneratorInputType.PROMPT:
+-            target = primary.sequence_length
+-            lengths = [len(p.sequence) for p in primary.proposal_sequences]
+-            if any(length < target for length in lengths):
+-                unit = {"protein": " aa", "dna": " bp", "rna": " nt"}.get(primary.sequence_type, "")
+-                candidates = ", ".join(f"candidate #{i}: {length}{unit}" for i, length in enumerate(lengths))
+-                logger.warning(
+-                    "%s: some candidates shorter than target_length=%d%s for segment %r. All candidates: %s. "
+-                    "The model emitted an end-of-sequence token before reaching the target length.",
+-                    self.__class__.__name__,
+-                    target,
+-                    unit,
+-                    primary.label or "unlabeled",
+-                    candidates,
+-                )
+-
+-        if len(self.segments) > 1:
+-            for segment in self.segments[1:]:
+-                segment.proposal_sequences = [copy.deepcopy(sequence) for sequence in primary.proposal_sequences]
+-
+-        preserve_logits = self._preserve_logits_after_sample()
+-        preserve_structure = self._preserve_structure_after_sample()
+-
+-        # New sequences invalidate prior per-proposal metadata unless a generator declares it still valid.
+-        for segment in self.segments:
+-            for proposal in segment.proposal_sequences:
+-                if not preserve_logits:
+-                    proposal.logits = None
+-                if not preserve_structure:
+-                    proposal.structure = None
++        with observe_sample(self):
++            self._sample(*args, **kwargs)
++            primary = self.segments[0]
++
++            if self.input_type == GeneratorInputType.PROMPT:
++                target = primary.sequence_length
++                lengths = [len(p.sequence) for p in primary.proposal_sequences]
++                if any(length < target for length in lengths):
++                    unit = {"protein": " aa", "dna": " bp", "rna": " nt"}.get(primary.sequence_type, "")
++                    candidates = ", ".join(f"candidate #{i}: {length}{unit}" for i, length in enumerate(lengths))
++                    logger.warning(
++                        "%s: some candidates shorter than target_length=%d%s for segment %r. All candidates: %s. "
++                        "The model emitted an end-of-sequence token before reaching the target length.",
++                        self.__class__.__name__,
++                        target,
++                        unit,
++                        primary.label or "unlabeled",
++                        candidates,
++                    )
++
++            if len(self.segments) > 1:
++                for segment in self.segments[1:]:
++                    segment.proposal_sequences = [copy.deepcopy(sequence) for sequence in primary.proposal_sequences]
++
++            preserve_logits = self._preserve_logits_after_sample()
++            preserve_structure = self._preserve_structure_after_sample()
++
++            # New sequences invalidate prior per-proposal metadata unless a generator declares it still valid.
++            for segment in self.segments:
++                for proposal in segment.proposal_sequences:
++                    if not preserve_logits:
++                        proposal.logits = None
++                    if not preserve_structure:
++                        proposal.structure = None
+ 
+     @abstractmethod
+     def _sample(self, *args: Any, **kwargs: Any) -> None:
+diff --git a/proto_language/core/portfolio.py b/proto_language/core/portfolio.py
+new file mode 100644
+index 0000000..f29da6d
+--- /dev/null
++++ b/proto_language/core/portfolio.py
+@@ -0,0 +1,91 @@
++"""Serial composition of independent native Program lanes.
++
++A PortfolioProgram preserves each lane's native optimizer behavior and seed.
++Unlike sequential Program stages, lanes must not share constructs, segments or
++generators. Candidate selection and resource policy belong to the caller.
++
++Examples:
++    >>> # portfolio = PortfolioProgram([first_program, second_program])
++    >>> # portfolio.run()  # run independent programs serially
++"""
++
++from __future__ import annotations
++
++from collections.abc import Iterable
++from dataclasses import dataclass
++from typing import Any
++
++from proto_language.core.program import Program
++from proto_language.core.execution_observer import check_sampling_cancelled
++from proto_tools.utils.execution_observer import check_execution_cancelled
++
++
++@dataclass(frozen=True)
++class PortfolioLane:
++    """A named independent Program lane.
++
++    Examples:
++        >>> # lane = PortfolioLane(program, name="broad-search")
++    """
++
++    program: Program
++    name: str | None = None
++
++
++class PortfolioProgram:
++    """Execute independent programs serially and retain per-lane failure evidence.
++
++    At least one lane must succeed. BaseException, including cooperative
++    cancellation, always propagates immediately. Optimizer settings are unchanged.
++
++    Examples:
++        >>> # portfolio = PortfolioProgram([first_program, second_program])
++        >>> # portfolio.constructs  # all independent constructs
++    """
++
++    def __init__(self, lanes: Iterable[Program | PortfolioLane]) -> None:
++        self.lanes = [lane if isinstance(lane, PortfolioLane) else PortfolioLane(lane) for lane in lanes]
++        if not self.lanes:
++            raise ValueError("A portfolio requires at least one native Program lane")
++        self.programs = [lane.program for lane in self.lanes]
++        self.lane_failures: list[dict[str, Any]] = []
++        owners: dict[int, int] = {}
++        for index, program in enumerate(self.programs):
++            if not isinstance(program, Program):
++                raise TypeError("Every portfolio lane must be a native Program")
++            objects = [*program.constructs, *(segment for construct in program.constructs for segment in construct.segments),
++                       *(generator for optimizer in program.optimizers for generator in optimizer.generators)]
++            for item in objects:
++                owner = owners.get(id(item))
++                if owner is not None and owner != index:
++                    raise ValueError(f"Portfolio lanes {owner} and {index} share scientific state")
++                owners[id(item)] = index
++
++    @property
++    def optimizers(self) -> list[Any]:
++        """All native optimizers, in lane and stage order."""
++        return [optimizer for program in self.programs for optimizer in program.optimizers]
++
++    @property
++    def constructs(self) -> list[Any]:
++        """All independent native constructs, in lane order."""
++        return [construct for program in self.programs for construct in program.constructs]
++
++    def run(self) -> None:
++        """Run lanes serially; retain ordinary failures and require one success."""
++        check_execution_cancelled()
++        check_sampling_cancelled()
++        self.lane_failures = []
++        completed = 0
++        for index, lane in enumerate(self.lanes):
++            check_execution_cancelled()
++            check_sampling_cancelled()
++            try:
++                lane.program.run()
++                completed += 1
++            except Exception as error:
++                self.lane_failures.append({"lane": index, "name": lane.name,
++                                           "errorType": type(error).__name__, "message": str(error)})
++        if completed == 0:
++            summary = "; ".join(f"lane {item['lane']}: {item['errorType']}: {item['message']}" for item in self.lane_failures)
++            raise RuntimeError("Every portfolio lane failed: " + summary)
+diff --git a/tests/language_tests/test_execution_lifecycle.py b/tests/language_tests/test_execution_lifecycle.py
+new file mode 100644
+index 0000000..604d310
+--- /dev/null
++++ b/tests/language_tests/test_execution_lifecycle.py
+@@ -0,0 +1,635 @@
++"""Offline CPU parity checks for the concrete scoped Proto lifecycle patch."""
++from __future__ import annotations
++
++import contextvars
++import os
++import threading
++import time
++import unittest
++from contextlib import nullcontext
++from unittest.mock import patch
++
++import numpy as np
++from pydantic import Field
++from proto_language.core import Construct, PortfolioLane, PortfolioProgram, Program, SamplingObserver, Segment, Sequence, sampling_observation_scope
++from proto_language.constraint import ConstraintRegistry
++from proto_language.generator import RandomNucleotideGenerator, RandomNucleotideGeneratorConfig
++from proto_language.optimizer import RejectionSamplingOptimizer, RejectionSamplingOptimizerConfig
++from proto_tools import ToolRegistry
++from proto_tools.utils import BaseConfig, ConfigField
++from proto_tools.utils.execution_observer import ExecutionCancelled, ExecutionControl, ObservationPublicationError, RequestObserver, request_observation_scope
++from proto_tools.utils.tool_cache import ToolCache, _program_tool_cache
++from proto_tools.utils.tool_io import BaseToolInput, BaseToolOutput
++import proto_tools.tools.tool_registry as registry_module
++
++COUNTS = {"preprocess": 0, "execute": 0}
++
++
++class Inputs(BaseToolInput):
++    text: str = Field(title="Text", description="CPU test input")
++
++
++class Config(BaseConfig):
++    tag: str = ConfigField(default="cpu", title="Tag", description="CPU test setting")
++
++    def preprocess(self, inputs):
++        COUNTS["preprocess"] += 1
++        return inputs, self
++
++
++class FixtureOutput(BaseToolOutput):
++    @classmethod
++    def output_format_options(cls):
++        return ["json"]
++
++    @classmethod
++    def output_format_default(cls):
++        return "json"
++
++    def _export_output(self, *args, **kwargs):
++        raise AssertionError("Export is outside this CPU fixture")
++
++
++class Output(FixtureOutput):
++    value: str = Field(title="Value", description="CPU test result")
++
++
++@ToolRegistry.register(key="cohesive-fixture-value", label="CPU fixture", category="fixture", description="Local CPU lifecycle regression fixture", input_class=Inputs, config_class=Config, output_class=Output, cacheable=True)
++def value_tool(inputs, config, instance=None):
++    COUNTS["execute"] += 1
++    return Output(value=inputs.text + config.tag)
++
++
++class BatchInputs(BaseToolInput):
++    values: list[str] = Field(title="Values", description="CPU test batch")
++
++
++class BatchOutput(FixtureOutput):
++    values: list[str] = Field(title="Values", description="CPU result batch")
++
++
++@ToolRegistry.register(key="cohesive-fixture-batch", label="CPU batch", category="fixture", description="Local CPU lifecycle regression fixture", input_class=BatchInputs, config_class=Config, output_class=BatchOutput, cacheable=True, iterable_input_fields=["values"], iterable_output_field="values")
++def batch_tool(inputs, config, instance=None):
++    COUNTS["execute"] += 1
++    return BatchOutput(values=[value.upper() for value in inputs.values])
++
++
++@ToolRegistry.register(key="cohesive-fixture-failure", label="CPU failure", category="fixture", description="Local CPU lifecycle regression fixture", input_class=Inputs, config_class=Config, output_class=Output)
++def failing_tool(inputs, config, instance=None):
++    COUNTS["execute"] += 1
++    raise ValueError("known CPU failure")
++
++
++@ToolRegistry.register(key="cohesive-fixture-retry", label="CPU retry", category="fixture", description="Local CPU lifecycle regression fixture", input_class=Inputs, config_class=Config, output_class=Output)
++def retry_tool(inputs, config, instance=None):
++    COUNTS["execute"] += 1
++    if COUNTS["execute"] == 1:
++        raise ConnectionError("first CPU attempt")
++    return Output(value="retry-success")
++
++
++class Requests(RequestObserver):
++    def __init__(self, control=None, reject=False):
++        self.records = []
++        self.control = control
++        self.reject = reject
++
++    def before_request(self, event):
++        if self.reject:
++            raise ExecutionCancelled("before-request rejection")
++        token = object()
++        self.records.append(("start", event, token))
++        return token
++
++    def request_completed(self, event, token):
++        self.records.append(("completed", event, token))
++
++    def request_failed(self, event, token, error):
++        self.records.append(("failed", event, token, error))
++
++
++class Samples(SamplingObserver):
++    def __init__(self, reject=False):
++        self.records = []
++        self.reject = reject
++
++    def before_sample(self, event):
++        if self.reject:
++            raise ExecutionCancelled("before-sample rejection")
++        token = object()
++        self.records.append(("start", event, token))
++        return token
++
++    def sample_completed(self, event, token):
++        self.records.append(("completed", event, token))
++
++    def sample_failed(self, event, token, error):
++        self.records.append(("failed", event, token, error))
++
++
++def make_program(seed=17):
++    segment = Segment(sequence="ATGCATGCATGC", sequence_type="dna", label="design")
++    construct = Construct([segment], label="construct")
++    generator = RandomNucleotideGenerator(RandomNucleotideGeneratorConfig())
++    generator.assign(segment)
++    constraint = ConstraintRegistry.create(key="gc-content", segments=[segment], config_dict={"min_gc": 0, "max_gc": 100})
++    optimizer = RejectionSamplingOptimizer(constructs=[construct], generators=[generator], constraints=[constraint], config=RejectionSamplingOptimizerConfig(num_samples=3, num_results=2))
++    return Program([optimizer], num_results=2, seed=seed, compute=nullcontext())
++
++
++def program_output(program):
++    return {"sequences": [sequence.sequence for construct in program.constructs for sequence in construct.joined_sequences], "scores": program.energy_scores}
++
++
++class LifecycleTests(unittest.TestCase):
++    def setUp(self):
++        COUNTS.update(preprocess=0, execute=0)
++        self.cache_token = _program_tool_cache.set(None)
++        self.assertFalse(ToolRegistry.dispatch_backend_configured())
++
++    def tearDown(self):
++        ToolRegistry.clear_dispatch_backend()
++        _program_tool_cache.reset(self.cache_token)
++
++    def test_managed_thread_escape_and_expired_context_fail_closed(self):
++        observer = Requests()
++        failures = []
++        def escaped():
++            try:
++                value_tool(Inputs(text="escaped"))
++            except BaseException as error:
++                failures.append(error)
++        with request_observation_scope(observer, require_scoped_calls=True):
++            thread = threading.Thread(target=escaped)
++            thread.start(); thread.join(5)
++            self.assertFalse(thread.is_alive())
++            self.assertIsInstance(failures[0], ExecutionCancelled)
++            self.assertEqual(COUNTS["execute"], 0)
++            saved = contextvars.copy_context()
++            saved.run(value_tool, Inputs(text="copied"))
++        with self.assertRaises(ExecutionCancelled):
++            saved.run(value_tool, Inputs(text="expired"))
++        self.assertEqual(COUNTS["execute"], 1)
++        value_tool(Inputs(text="ordinary"))
++        self.assertEqual(COUNTS["execute"], 2)
++
++    def test_concurrent_requests_pair_tokens_and_origins(self):
++        from concurrent.futures import ThreadPoolExecutor
++        observer, barrier = Requests(), threading.Barrier(2)
++        def backend(key, inputs, config):
++            barrier.wait(5)
++            return Output(value=inputs.text)
++        ToolRegistry.configure_dispatch_backend(backend)
++        with request_observation_scope(observer, require_scoped_calls=True), ThreadPoolExecutor(max_workers=2) as executor:
++            contexts = [contextvars.copy_context(), contextvars.copy_context()]
++            futures = [executor.submit(context.run, value_tool, Inputs(text=str(index))) for index, context in enumerate(contexts)]
++            self.assertEqual([future.result(5).value for future in futures], ["0", "1"])
++        starts = {record[1].request_id: record for record in observer.records if record[0] == "start"}
++        ends = {record[1].request_id: record for record in observer.records if record[0] == "completed"}
++        self.assertEqual(set(starts), set(ends))
++        self.assertEqual(len(starts), 2)
++        for identity, start in starts.items():
++            self.assertIs(start[2], ends[identity][2])
++            self.assertEqual(ends[identity][1].cache_origin, "external_dispatch_backend")
++            self.assertEqual(ends[identity][1].result.value, start[1].inputs.text)
++
++    def test_concurrent_sampling_and_escaped_scope(self):
++        from concurrent.futures import ThreadPoolExecutor
++        generators = [make_program(seed).optimizers[0].generators[0] for seed in (17, 19)]
++        observer, barrier = Samples(), threading.Barrier(2)
++        failures = []
++        def escaped():
++            try:
++                generators[0].sample()
++            except BaseException as error:
++                failures.append(error)
++        with sampling_observation_scope(observer, require_scoped_calls=True):
++            thread = threading.Thread(target=escaped)
++            thread.start(); thread.join(5)
++            self.assertIsInstance(failures[0], ExecutionCancelled)
++            with patch.object(generators[0], "_sample", side_effect=lambda: barrier.wait(5)), patch.object(generators[1], "_sample", side_effect=lambda: barrier.wait(5)), ThreadPoolExecutor(max_workers=2) as executor:
++                contexts = [contextvars.copy_context(), contextvars.copy_context()]
++                futures = [executor.submit(context.run, generator.sample) for context, generator in zip(contexts, generators)]
++                for future in futures:
++                    future.result(5)
++            saved = contextvars.copy_context()
++        starts = {record[1].sample_id: record for record in observer.records if record[0] == "start"}
++        ends = {record[1].sample_id: record for record in observer.records if record[0] == "completed"}
++        self.assertEqual(set(starts), set(ends))
++        self.assertEqual({id(record[1].generator) for record in starts.values()}, {id(generator) for generator in generators})
++        for identity, start in starts.items():
++            self.assertIs(start[2], ends[identity][2])
++        with self.assertRaises(ExecutionCancelled):
++            saved.run(generators[0].sample)
++        with patch.object(generators[0], "_sample") as sample:
++            generators[0].sample()
++            sample.assert_called_once()
++
++    def test_actual_native_toolpool_threads_propagate_authority(self):
++        from proto_tools.utils.tool_pool import ToolPool
++        class FanoutConfig(Config):
++            device: str = ConfigField(default="cpu", title="Device", description="CPU device")
++            @property
++            def cpus_per_instance(self):
++                return 1
++        # Exercise the real native thread partition path; raw partition work is
++        # included in the parent registered request, and nested requests inherit.
++        pool = ToolPool(gpus=0, cpus=2)
++        pool._gpu_devices = []
++        observer, thread_ids = Requests(), []
++        def raw(inputs, config, instance=None):
++            thread_ids.append(threading.get_ident())
++            return BatchOutput(values=[value_tool(Inputs(text=value)).value for value in inputs.values])
++        with request_observation_scope(observer, require_scoped_calls=True), patch("proto_tools.utils.tool_pool.ToolInstance.get"):
++            result = pool._parallel_dispatch("cohesive-fixture-batch", raw, BatchInputs(values=["a", "b", "c", "d"]), FanoutConfig())
++        self.assertEqual(result.values, ["acpu", "bcpu", "ccpu", "dcpu"])
++        self.assertTrue(all(identity != threading.get_ident() for identity in thread_ids))
++        self.assertEqual(sum(record[0] == "start" for record in observer.records), 4)
++        self.assertEqual(sum(record[0] == "completed" for record in observer.records), 4)
++
++    def test_actual_native_mmseqs_threads_propagate_authority_without_network(self):
++        from pathlib import Path
++        from proto_tools.tools.sequence_alignment.mmseqs2 import homology_search
++        observer = Requests()
++        def offline_dispatch(*args):
++            value_tool(Inputs(text="native-thread"))
++            return {"success": False, "errors": ["intentional CPU fixture stop"]}
++        with request_observation_scope(observer, require_scoped_calls=True), patch.object(homology_search, "_dispatch_remote", offline_dispatch):
++            with self.assertRaisesRegex(RuntimeError, "intentional CPU fixture stop"):
++                homology_search._remote_paired_group([], Path("unused-fixture-path"), None)
++        self.assertEqual(sum(record[0] == "start" for record in observer.records), 2)
++        self.assertEqual(sum(record[0] == "completed" for record in observer.records), 2)
++
++    def test_cancel_before_retry_avoids_second_execution(self):
++        control, observer = ExecutionControl(), Requests()
++        def cancel_during_delay(_seconds):
++            control.cancel()
++        with request_observation_scope(observer, control), patch.object(registry_module.time, "sleep", cancel_during_delay), patch.dict(os.environ, {"PROTO_CAPTURE_ERRORS": "1"}):
++            with self.assertRaises(ExecutionCancelled):
++                retry_tool(Inputs(text="a"))
++        self.assertEqual(COUNTS, {"preprocess": 1, "execute": 1})
++        self.assertEqual([record[0] for record in observer.records], ["start", "failed"])
++
++    def test_request_failure_callback_preserves_exact_native_error_and_scope(self):
++        class BrokenFailureObserver(Requests):
++            def request_failed(self, event, token, error):
++                self.original = error
++                raise RuntimeError("receipt publication failed")
++        for original in (ValueError("native request failure"), ExecutionCancelled("native request cancellation")):
++            cause = LookupError("original request cause")
++            original.__cause__ = cause
++            observer, control = BrokenFailureObserver(), ExecutionControl()
++            def backend(*args):
++                raise original
++            ToolRegistry.configure_dispatch_backend(backend)
++            with request_observation_scope(observer, control, require_scoped_calls=True):
++                with self.assertRaises(type(original)) as raised:
++                    value_tool(Inputs(text="a"))
++            self.assertIs(raised.exception, original)
++            self.assertIs(observer.original, original)
++            self.assertIs(original.__cause__, cause)
++            self.assertTrue(any("receipt publication failed" in note for note in original.__notes__))
++            self.assertTrue(control.cancelled)
++            ToolRegistry.clear_dispatch_backend()
++            value_tool(Inputs(text="after-scope"))
++
++    def test_sampling_failure_callback_preserves_exact_native_error_and_scope(self):
++        class BrokenFailureObserver(Samples):
++            def sample_failed(self, event, token, error):
++                self.original = error
++                raise RuntimeError("sample publication failed")
++        generator = make_program().optimizers[0].generators[0]
++        for original in (ValueError("native sample failure"), ExecutionCancelled("native sample cancellation")):
++            cause = LookupError("original sample cause")
++            original.__cause__ = cause
++            observer, control = BrokenFailureObserver(), ExecutionControl()
++            with patch.object(generator, "_sample", side_effect=original), sampling_observation_scope(observer, control, require_scoped_calls=True):
++                with self.assertRaises(type(original)) as raised:
++                    generator.sample()
++            self.assertIs(raised.exception, original)
++            self.assertIs(observer.original, original)
++            self.assertIs(original.__cause__, cause)
++            self.assertTrue(any("sample publication failed" in note for note in original.__notes__))
++            self.assertTrue(control.cancelled)
++            with patch.object(generator, "_sample") as work:
++                generator.sample()
++                work.assert_called_once()
++
++    def test_managed_completed_request_publication_stops_sibling_lane(self):
++        class BrokenCompletionObserver(Requests):
++            def request_completed(self, event, token):
++                self.output = event.result
++                raise RuntimeError("completed receipt publication failed")
++        first, second = make_program(), make_program(19)
++        portfolio = PortfolioProgram([first, second])
++        requests, control = BrokenCompletionObserver(), ExecutionControl()
++        with sampling_observation_scope(Samples(), control, require_scoped_calls=True), request_observation_scope(requests, control, require_scoped_calls=True), patch.object(first, "run", side_effect=lambda: value_tool(Inputs(text="first"))), patch.object(second, "run") as sibling:
++            with self.assertRaises(ObservationPublicationError) as raised:
++                portfolio.run()
++            sibling.assert_not_called()
++        self.assertEqual(COUNTS["execute"], 1)
++        self.assertEqual(requests.output.value, "firstcpu")
++        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
++        self.assertTrue(control.cancelled)
++        self.assertEqual(portfolio.lane_failures, [])
++
++    def test_managed_completed_sample_publication_stops_sibling_lane(self):
++        class BrokenCompletionObserver(Samples):
++            def sample_completed(self, event, token):
++                raise RuntimeError("completed sample publication failed")
++        first, second = make_program(), make_program(19)
++        portfolio = PortfolioProgram([first, second])
++        generator = first.optimizers[0].generators[0]
++        control = ExecutionControl()
++        with sampling_observation_scope(BrokenCompletionObserver(), control, require_scoped_calls=True), request_observation_scope(Requests(), control, require_scoped_calls=True), patch.object(generator, "_sample") as work, patch.object(first, "run", side_effect=generator.sample), patch.object(second, "run") as sibling:
++            with self.assertRaises(ObservationPublicationError) as raised:
++                portfolio.run()
++            work.assert_called_once()
++            sibling.assert_not_called()
++        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
++        self.assertTrue(control.cancelled)
++        self.assertEqual(portfolio.lane_failures, [])
++
++    def test_managed_failed_request_publication_prevents_sibling_lane_start(self):
++        class BrokenFailureObserver(Requests):
++            def request_failed(self, event, token, error):
++                self.original = error
++                raise RuntimeError("failed request receipt publication failed")
++        first, second = make_program(), make_program(19)
++        portfolio, observer, control = PortfolioProgram([first, second]), BrokenFailureObserver(), ExecutionControl()
++        with sampling_observation_scope(Samples(), control, require_scoped_calls=True), request_observation_scope(observer, control, require_scoped_calls=True), patch.object(first, "run", side_effect=lambda: failing_tool(Inputs(text="first"))), patch.object(second, "run") as sibling:
++            with self.assertRaises(ObservationPublicationError):
++                portfolio.run()
++            sibling.assert_not_called()
++        self.assertEqual(COUNTS["execute"], 1)
++        self.assertEqual(portfolio.lane_failures[0]["errorType"], "ValueError")
++        self.assertEqual(str(observer.original), "known CPU failure")
++        self.assertTrue(control.cancelled)
++
++    def test_managed_failed_sample_publication_prevents_sibling_lane_start(self):
++        class BrokenFailureObserver(Samples):
++            def sample_failed(self, event, token, error):
++                self.original = error
++                raise RuntimeError("failed sample receipt publication failed")
++        first, second = make_program(), make_program(19)
++        portfolio, observer, control = PortfolioProgram([first, second]), BrokenFailureObserver(), ExecutionControl()
++        generator = first.optimizers[0].generators[0]
++        with sampling_observation_scope(observer, control, require_scoped_calls=True), request_observation_scope(Requests(), control, require_scoped_calls=True), patch.object(generator, "_sample", side_effect=ValueError("known sample failure")), patch.object(first, "run", side_effect=generator.sample), patch.object(second, "run") as sibling:
++            with self.assertRaises(ExecutionCancelled):
++                portfolio.run()
++            sibling.assert_not_called()
++        self.assertEqual(portfolio.lane_failures[0]["errorType"], "ValueError")
++        self.assertTrue(control.cancelled)
++
++    def test_recorded_scientific_failure_still_advances_managed_portfolio(self):
++        first, second = make_program(), make_program(19)
++        portfolio, observer, control = PortfolioProgram([first, second]), Requests(), ExecutionControl()
++        with sampling_observation_scope(Samples(), control, require_scoped_calls=True), request_observation_scope(observer, control, require_scoped_calls=True), patch.object(first, "run", side_effect=lambda: failing_tool(Inputs(text="first"))), patch.object(second, "run", side_effect=lambda: value_tool(Inputs(text="second"))) as sibling:
++            portfolio.run()
++            sibling.assert_called_once()
++        self.assertEqual(COUNTS["execute"], 2)
++        self.assertFalse(control.cancelled)
++        self.assertEqual([record[0] for record in observer.records], ["start", "failed", "start", "completed"])
++        self.assertEqual(portfolio.lane_failures[0]["errorType"], "ValueError")
++
++    def test_cancelled_managed_portfolio_never_starts_first_fixed_lane(self):
++        first, second = make_program(), make_program(19)
++        portfolio, control = PortfolioProgram([first, second]), ExecutionControl()
++        with sampling_observation_scope(Samples(), control, require_scoped_calls=True), request_observation_scope(Requests(), control, require_scoped_calls=True), patch.object(first, "run") as initial, patch.object(second, "run") as sibling:
++            control.cancel()
++            with self.assertRaises(ExecutionCancelled):
++                portfolio.run()
++            initial.assert_not_called()
++            sibling.assert_not_called()
++
++    def test_malformed_native_notes_cannot_mask_request_error(self):
++        original, publication = ValueError("native"), RuntimeError("publication")
++        original.__notes__ = "malformed native notes"
++        class BrokenObserver(Requests):
++            def request_failed(self, event, token, error):
++                raise publication
++        def backend(*args):
++            raise original
++        ToolRegistry.configure_dispatch_backend(backend)
++        with request_observation_scope(BrokenObserver()):
++            with self.assertRaises(ValueError) as raised:
++                value_tool(Inputs(text="a"))
++        self.assertIs(raised.exception, original)
++        self.assertIs(original.proto_observation_callback_failure, publication)
++
++    def test_malformed_native_notes_cannot_mask_sampling_error(self):
++        original, publication = ValueError("native"), RuntimeError("publication")
++        original.__notes__ = "malformed native notes"
++        class BrokenObserver(Samples):
++            def sample_failed(self, event, token, error):
++                raise publication
++        generator = make_program().optimizers[0].generators[0]
++        with sampling_observation_scope(BrokenObserver()), patch.object(generator, "_sample", side_effect=original):
++            with self.assertRaises(ValueError) as raised:
++                generator.sample()
++        self.assertIs(raised.exception, original)
++        self.assertIs(original.proto_observation_callback_failure, publication)
++
++    def test_registry_preprocess_dispatch_and_whole_cache_once(self):
++        observer = Requests()
++        cache_token = _program_tool_cache.set(ToolCache())
++        try:
++            with request_observation_scope(observer):
++                first = value_tool(Inputs(text="a"))
++                second = value_tool(Inputs(text="a"))
++            self.assertIs(first, second)
++            self.assertEqual(COUNTS, {"preprocess": 1, "execute": 1})
++            ends = [record[1] for record in observer.records if record[0] == "completed"]
++            self.assertEqual([event.cache_origin for event in ends], ["cache_miss", "cache_hit"])
++            self.assertIs(ends[0].result, first)
++            self.assertEqual(len({event.request_id for event in ends}), 2)
++            self.assertIs(observer.records[0][2], observer.records[1][2])
++        finally:
++            _program_tool_cache.reset(cache_token)
++
++    def test_iterable_dedup_partial_and_full_cache(self):
++        observer = Requests()
++        cache_token = _program_tool_cache.set(ToolCache())
++        try:
++            with request_observation_scope(observer):
++                self.assertEqual(batch_tool(BatchInputs(values=["a", "a"])).values, ["A", "A"])
++                self.assertEqual(batch_tool(BatchInputs(values=["a", "b"])).values, ["A", "B"])
++                self.assertEqual(batch_tool(BatchInputs(values=["b", "a"])).values, ["B", "A"])
++            self.assertEqual(COUNTS, {"preprocess": 2, "execute": 2})
++            self.assertEqual([record[1].cache_origin for record in observer.records if record[0] == "completed"], ["cache_miss", "cache_partial", "cache_hit"])
++        finally:
++            _program_tool_cache.reset(cache_token)
++
++    def test_existing_backend_override_and_fallthrough_preserved(self):
++        observer = Requests()
++        calls = []
++        ToolRegistry.configure_dispatch_backend(lambda key, inputs, config: calls.append(key) or Output(value="external-fixture"))
++        with request_observation_scope(observer):
++            self.assertEqual(value_tool(Inputs(text="a")).value, "external-fixture")
++        self.assertEqual(COUNTS, {"preprocess": 0, "execute": 0})
++        self.assertEqual(calls, ["cohesive-fixture-value"])
++        self.assertTrue(ToolRegistry.dispatch_backend_configured())
++        self.assertEqual(observer.records[-1][1].cache_origin, "external_dispatch_backend")
++        ToolRegistry.configure_dispatch_backend(lambda key, inputs, config: None)
++        observer = Requests()
++        with request_observation_scope(observer):
++            self.assertEqual(value_tool(Inputs(text="b")).value, "bcpu")
++        self.assertEqual(COUNTS, {"preprocess": 1, "execute": 1})
++        self.assertEqual(observer.records[-1][1].cache_origin, "cache_disabled")
++
++    def test_failure_raise_and_capture_keep_terminal_identity(self):
++        for capture in ("0", "1"):
++            observer = Requests()
++            with patch.dict(os.environ, {"PROTO_CAPTURE_ERRORS": capture}), request_observation_scope(observer):
++                if capture == "0":
++                    with self.assertRaisesRegex(ValueError, "known CPU failure"):
++                        failing_tool(Inputs(text="a"))
++                    self.assertEqual(observer.records[-1][0], "failed")
++                else:
++                    result = failing_tool(Inputs(text="a"))
++                    self.assertFalse(result.success)
++                    self.assertEqual(observer.records[-1][0], "completed")
++                    self.assertIs(observer.records[-1][1].result, result)
++            self.assertEqual(observer.records[0][1].request_id, observer.records[-1][1].request_id)
++            self.assertIs(observer.records[0][2], observer.records[-1][2])
++
++    def test_retries_one_public_lifecycle(self):
++        observer = Requests()
++        with patch.object(registry_module, "RETRY_DELAY", 0), request_observation_scope(observer):
++            self.assertEqual(retry_tool(Inputs(text="a")).value, "retry-success")
++        self.assertEqual(COUNTS, {"preprocess": 1, "execute": 2})
++        self.assertEqual([record[0] for record in observer.records], ["start", "completed"])
++
++    def test_cancel_rejects_effect_and_capture_cannot_absorb_it(self):
++        observer = Requests(reject=True)
++        with patch.dict(os.environ, {"PROTO_CAPTURE_ERRORS": "1"}), request_observation_scope(observer):
++            with self.assertRaises(ExecutionCancelled):
++                value_tool(Inputs(text="a"))
++        self.assertEqual(COUNTS, {"preprocess": 0, "execute": 0})
++        self.assertEqual(observer.records, [])
++        # Scope was restored, not leaked to the next ordinary request.
++        self.assertEqual(value_tool(Inputs(text="a")).value, "acpu")
++
++    def test_cancel_between_preprocess_and_dispatch(self):
++        observer, control = Requests(), ExecutionControl()
++        original = Config.preprocess
++        def cancel_after_preprocess(config, inputs):
++            result = original(config, inputs)
++            control.cancel()
++            return result
++        with patch.object(Config, "preprocess", cancel_after_preprocess), request_observation_scope(observer, control):
++            with self.assertRaises(ExecutionCancelled):
++                value_tool(Inputs(text="a"))
++        self.assertEqual(COUNTS, {"preprocess": 1, "execute": 0})
++        self.assertEqual([record[0] for record in observer.records], ["start", "failed"])
++
++    def test_expired_deadline_prevents_scope_admission(self):
++        with self.assertRaises(ExecutionCancelled), request_observation_scope(Requests(), ExecutionControl(time.monotonic() - 1)):
++            value_tool(Inputs(text="a"))
++        self.assertEqual(COUNTS["execute"], 0)
++
++    def test_nested_requests_link_distinct_identities(self):
++        observer = Requests()
++        def backend(key, inputs, config):
++            if key == "cohesive-fixture-value":
++                return Output(value=batch_tool(BatchInputs(values=[inputs.text])).values[0])
++            return None
++        ToolRegistry.configure_dispatch_backend(backend)
++        with request_observation_scope(observer):
++            self.assertEqual(value_tool(Inputs(text="a")).value, "A")
++        starts = [record[1] for record in observer.records if record[0] == "start"]
++        self.assertEqual(len(starts), 2)
++        self.assertEqual(starts[1].parent_request_id, starts[0].request_id)
++        self.assertNotEqual(starts[1].request_id, starts[0].request_id)
++
++    def test_context_isolation_and_scope_collision_fail_closed(self):
++        first, second = Requests(), Requests()
++        with request_observation_scope(first):
++            with self.assertRaises(RuntimeError), request_observation_scope(second):
++                pass
++            contextvars.Context().run(value_tool, Inputs(text="separate"))
++            value_tool(Inputs(text="owned"))
++        self.assertEqual(len(first.records), 2)
++        self.assertEqual(first.records[0][1].inputs.text, "owned")
++        self.assertEqual(second.records, [])
++
++    def test_sampling_tied_segments_and_cleanup_parity(self):
++        program = make_program()
++        generator = program.optimizers[0].generators[0]
++        first = generator.segment
++        tied = Segment(sequence=first.original_sequence.sequence, sequence_type="dna", label="tied")
++        generator.assign([first, tied])
++        samples = Samples()
++        def sample():
++            first.proposal_sequences = [Sequence("AAAA", sequence_type="dna", logits=np.ones((4, 4)))]
++        with patch.object(generator, "_sample", sample), sampling_observation_scope(samples):
++            generator.sample()
++        self.assertEqual([record[0] for record in samples.records], ["start", "completed"])
++        self.assertIs(samples.records[0][1].generator, generator)
++        self.assertIs(samples.records[0][2], samples.records[1][2])
++        self.assertEqual(first.proposal_sequences[0].sequence, tied.proposal_sequences[0].sequence)
++        self.assertIsNot(first.proposal_sequences[0], tied.proposal_sequences[0])
++        self.assertIsNone(first.proposal_sequences[0].logits)
++        self.assertIsNone(tied.proposal_sequences[0].logits)
++
++    def test_sampling_rejection_failure_and_restore(self):
++        generator = make_program().optimizers[0].generators[0]
++        observer = Samples(reject=True)
++        with patch.object(generator, "_sample") as sample, sampling_observation_scope(observer):
++            with self.assertRaises(ExecutionCancelled):
++                generator.sample()
++            sample.assert_not_called()
++        observer = Samples()
++        with patch.object(generator, "_sample", side_effect=ValueError("sample failure")), sampling_observation_scope(observer):
++            with self.assertRaisesRegex(ValueError, "sample failure"):
++                generator.sample()
++        self.assertEqual([record[0] for record in observer.records], ["start", "failed"])
++        with patch.object(generator, "_sample") as sample:
++            generator.sample()
++            sample.assert_called_once()
++        self.assertEqual(len(observer.records), 2)
++
++    def test_real_optimizer_settings_seed_and_results_unchanged(self):
++        baseline, observed = make_program(), make_program()
++        settings = observed.optimizers[0].config.model_dump()
++        baseline.run()
++        samples, requests = Samples(), Requests()
++        control = ExecutionControl(time.monotonic() + 60)
++        with sampling_observation_scope(samples, control), request_observation_scope(requests, control):
++            observed.run()
++        self.assertEqual(program_output(baseline), program_output(observed))
++        self.assertEqual(observed.optimizers[0].config.model_dump(), settings)
++        self.assertTrue(samples.records)
++        self.assertEqual(sum(record[0] == "start" for record in samples.records), sum(record[0] == "completed" for record in samples.records))
++
++    def test_portfolio_native_parity_serial_failures_and_independence(self):
++        first, second = make_program(17), make_program(19)
++        baseline_first, baseline_second = make_program(17), make_program(19)
++        baseline_first.run(); baseline_second.run()
++        portfolio = PortfolioProgram([PortfolioLane(first, "first"), second])
++        portfolio.run()
++        self.assertEqual(program_output(first), program_output(baseline_first))
++        self.assertEqual(program_output(second), program_output(baseline_second))
++        self.assertEqual(portfolio.constructs, first.constructs + second.constructs)
++        self.assertEqual(portfolio.lane_failures, [])
++        with self.assertRaisesRegex(ValueError, "share scientific state"):
++            PortfolioProgram([first, first])
++        with patch.object(first, "run", side_effect=ValueError("bad lane")):
++            portfolio.run()
++        self.assertEqual(portfolio.lane_failures[0]["errorType"], "ValueError")
++        with patch.object(first, "run", side_effect=ValueError("bad1")), patch.object(second, "run", side_effect=ValueError("bad2")):
++            with self.assertRaisesRegex(RuntimeError, "Every portfolio lane failed"):
++                portfolio.run()
++
++    def test_portfolio_cancellation_does_not_run_next_lane(self):
++        first, second = make_program(), make_program(19)
++        portfolio = PortfolioProgram([first, second])
++        with patch.object(first, "run", side_effect=ExecutionCancelled("cancel")), patch.object(second, "run") as next_lane:
++            with self.assertRaises(ExecutionCancelled):
++                portfolio.run()
++            next_lane.assert_not_called()
++        self.assertEqual(portfolio.lane_failures, [])
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)

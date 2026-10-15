@@ -1,0 +1,44 @@
+{
+  "schema": "autofold.proto-lifecycle-fork.v1",
+  "bases": {
+    "language": "d3b7822f74ea64747cc751a3b2ab1aa6b799ac47",
+    "tools": "47e34afa5ea240a3b406e323dc38aa5dc85f223e"
+  },
+  "patchedCommits": {
+    "language": "c11ba929677bf6feedc598dfd1e3992c30673a80",
+    "tools": "c0fa510bce39044a9c66a2f2524976a4a2c49b18"
+  },
+  "packageDigests": {
+    "proto_language": "sha256:729aa2bea3e5a1927de01f9b5d4374b3abf8e56938f545056d7b97ad787b6044",
+    "proto_tools": "sha256:f314e20def90c594a65b725ea385b913c884c079fddb0b32c2672dab85196ef3"
+  },
+  "patches": {
+    "proto-language.patch": "sha256:4cb35afbe1206fc8182feba330b898fe5ca10d832b8df0ab754c584ef879dc07",
+    "proto-tools.patch": "sha256:9e62401c9ddfc11e9244a6f0ca8f27aad6244417ea78b5ec998a99fd2f294887"
+  },
+  "commitIdentity": {
+    "name": "Codex",
+    "email": "codex@local",
+    "date": "2026-10-12T00:00:00Z"
+  },
+  "capabilities": {
+    "sampling": "scoped_sampling_lifecycle_v1",
+    "requests": "scoped_registered_request_lifecycle_v1",
+    "registryOrigin": "registered_api_request_not_physical_inference",
+    "managedThreadFence": "explicit_require_scoped_calls",
+    "portfolio": "independent_native_program_lanes_v1",
+    "cancellation": "cooperative_boundaries_plus_host_process_deadline",
+    "publicationFailure": "managed_BaseException_and_shared_cancel_with_original_native_error_preservation"
+  },
+  "integrationStatus": "standalone_verified_not_adopted_by_engine_or_worker",
+  "commitMessages": {
+    "tools": "Add scoped request lifecycle and fail-closed publication controls",
+    "language": "Add native sampling lifecycle, publication-safe portfolios and parity tests"
+  },
+  "revision": "v2-publication-hardening",
+  "supersedesCommits": {
+    "language": "011ba25268cc480196664281838eff1d8aa2c4d6",
+    "tools": "e67ab037bcaff9dc60abc60f5f581847350b8728"
+  },
+  "conformanceFixtureHash": "sha256:9a5a1d827ad499b0dc9d87770a772409a4924c3ed3528c1123047285fea0bf97"
+}

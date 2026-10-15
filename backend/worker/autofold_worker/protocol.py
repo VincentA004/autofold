@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import re
 import ast
 from pathlib import Path
@@ -17,6 +18,53 @@ FORMATS = {
 
 class ProtocolError(ValueError):
     pass
+
+
+def _same_json(left: Any, right: Any) -> bool:
+    # JSON numbers have one category; booleans must never compare equal to 0/1.
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        if any(isinstance(v, float) and not math.isfinite(v) for v in (left, right)):
+            return False
+        return left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_same_json(left[k], right[k]) for k in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_same_json(a, b) for a, b in zip(left, right))
+    return left == right
+
+
+def pipeline_policy_hash(pipeline: dict[str, Any], canonical_json: str | None = None) -> str:
+    """Hash exact host JSON bytes after proving their full semantic correspondence.
+
+    Old bundles keep their original Python-rendered verification path. New native
+    bundles carry the existing host canonical bytes, avoiding number, Unicode and
+    numeric-object-key ordering differences without changing the host policy hash.
+    """
+    if canonical_json is None:
+        canonical_json = json.dumps(pipeline, sort_keys=True, separators=(",", ":"))
+    else:
+        if not isinstance(canonical_json, str) or len(canonical_json.encode("utf-8")) > 1024 * 1024:
+            raise ProtocolError("Canonical pipeline bytes exceed 1 MiB or are not a string")
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("Duplicate canonical pipeline key")
+                result[key] = value
+            return result
+        def finite(token):
+            raise ValueError("Nonfinite canonical pipeline number")
+        try:
+            parsed = json.loads(canonical_json, object_pairs_hook=unique, parse_constant=finite)
+        except (ValueError, TypeError) as error:
+            raise ProtocolError(f"Invalid canonical pipeline JSON: {error}") from error
+        if not _same_json(parsed, pipeline):
+            raise ProtocolError("Canonical pipeline bytes do not match the frozen policy")
+    return "sha256:" + hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -70,6 +118,11 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
         if "scoringPipelineHash" in adapter:
             require_string(adapter, "scoringPipelineHash", "sha256:")
     if value["format"] == "autofold.trial-bundle.v4":
+        worker = value.get("worker")
+        if worker is not None:
+            if not isinstance(worker, dict) or worker.get("format") != "autofold.worker-tree.v1":
+                raise ProtocolError("Worker tree identity is invalid")
+            require_string(worker, "sourceHash", "sha256:")
         pipeline = value.get("pipeline")
         if not isinstance(pipeline, dict) or not isinstance(pipeline.get("stages"), list) or not pipeline["stages"]:
             raise ProtocolError("Scientific bundle v4 requires a pipeline policy")
@@ -79,6 +132,14 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
         if "protoToolsCommit" in pipeline:
             if require_string(pipeline, "protoToolsCommit") != value["proto"]["toolsCommit"]:
                 raise ProtocolError("Pipeline policy uses another proto-tools commit")
+        if pipeline.get("executionBackend", "legacy_dag_v1") not in {"legacy_dag_v1", "native_tool_sequence_v1"}:
+            raise ProtocolError("Unsupported evidence execution backend")
+        if pipeline.get("executionBackend") == "native_tool_sequence_v1":
+            from .evidence_execution import validate_native_sequence
+            try:
+                validate_native_sequence(pipeline["stages"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ProtocolError(str(error)) from error
         authored_diagnostics = pipeline.get("authoredDiagnostics", [])
         if not isinstance(authored_diagnostics, list) or not all(
             isinstance(stage, dict) for stage in authored_diagnostics
@@ -86,7 +147,80 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
             raise ProtocolError("Pipeline authoredDiagnostics must be an array of stage objects")
         if any(stage.get("role") != "diagnostic" for stage in authored_diagnostics):
             raise ProtocolError("Pipeline authoredDiagnostics may contain only diagnostic stages")
+        execution_budget = pipeline.get("executionBudget")
+        if execution_budget is not None:
+            if not isinstance(execution_budget, dict) or execution_budget.get("semantics") != "aggregate_worker_gpu_wall_v1":
+                raise ProtocolError("Pipeline aggregate execution budget is invalid")
+            maximum = execution_budget.get("maximumGpuSeconds")
+            if not isinstance(maximum, (int, float)) or isinstance(maximum, bool) or maximum <= 0:
+                raise ProtocolError("Pipeline aggregate GPU budget must be positive")
+        native_search = pipeline.get("nativeSearch")
+        if native_search is not None:
+            from .native_search import NativeSearch, NativeOutput
+            try:
+                if native_search.get("format") != "autofold.native-search.v1":
+                    raise ValueError("Unsupported native search format")
+                budget = native_search["budget"]
+                search = NativeSearch(maximum_candidates=budget["maximumCandidates"], maximum_proposals=budget["maximumProposals"],
+                    maximum_sampling_calls=budget["maximumSamplingCalls"], maximum_tool_calls=budget["maximumToolCalls"],
+                    maximum_wall_seconds=budget["maximumWallSeconds"], allowed_tools=tuple(budget["allowedTools"]),
+                    outputs=tuple(NativeOutput(**o) for o in budget["outputs"]))
+                if not native_search["projection"] or search.maximum_candidates > value["candidateBudget"]:
+                    raise ValueError("Native search exceeds final candidate budget or has no projection")
+                reserved = sum(stage.get("budget", {}).get("maximumGpuSeconds", 0) for stage in pipeline["stages"])
+                if execution_budget and execution_budget.get("reservationSemantics") is not None:
+                    if execution_budget.get("reservationSemantics") != "per_model_candidate_seed_timeout_upper_bound_v1" or execution_budget.get("unit") != "wall_seconds":
+                        raise ValueError("Unsupported native invocation reservation units")
+                    expected = []
+                    for stage in pipeline["stages"]:
+                        requests = search.maximum_candidates * len(value["seeds"]) * len(stage["models"])
+                        seconds = stage.get("budget", {}).get("maximumGpuSeconds")
+                        if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or not math.isfinite(seconds) or seconds <= 0:
+                            raise ValueError("Fresh native model stage requires an explicit positive wall-time deadline")
+                        expected.append({"stageId": stage["id"], "maximumCandidates": search.maximum_candidates,
+                            "seedCount": len(value["seeds"]), "modelCount": len(stage["models"]), "maximumRequests": requests,
+                            "perRequestTimeoutSeconds": seconds, "reservedWallSeconds": requests * seconds})
+                    reserved = sum(item["reservedWallSeconds"] for item in expected)
+                    if not _same_json(execution_budget.get("invocationReservations"), expected) or not _same_json(execution_budget.get("reservedEvidenceWallSeconds"), reserved):
+                        raise ValueError("Native invocation reservations do not bind actual model/candidate/seed cardinality")
+                if value.get("nativeExecution") is None and (not execution_budget or search.maximum_wall_seconds + reserved > execution_budget["maximumGpuSeconds"]):
+                    raise ValueError("Native search and final evaluation exceed aggregate execution budget")
+                if pipeline.get("staticConstruction") is not None:
+                    raise ValueError("Native search cannot mutate a fixed construction")
+            except (KeyError, TypeError, ValueError, AttributeError) as error:
+                raise ProtocolError(f"Invalid native search policy: {error}") from error
+        static_construction = pipeline.get("staticConstruction")
         generation = pipeline.get("generation")
+        if generation is not None and static_construction is not None:
+            raise ProtocolError("Generated and fixed construction policies are mutually exclusive")
+        if static_construction is not None:
+            if not isinstance(static_construction, dict) or static_construction.get("format") != "autofold.static-construction.v1":
+                raise ProtocolError("Pipeline fixed construction receipt is invalid")
+            if static_construction.get("kind") != "native" or static_construction.get("optimizerCount") != 1:
+                raise ProtocolError("Fixed construction must use one native Proto optimizer")
+            if static_construction.get("generatorCount") != 0 or static_construction.get("proposalSources") != ["existing_results"]:
+                raise ProtocolError("Fixed construction must use existing results without generators")
+            fixed = static_construction.get("fixedSequences")
+            if (
+                not isinstance(fixed, list)
+                or len(fixed) != value.get("submissionSize")
+                or len(set(fixed)) != len(fixed)
+                or not all(isinstance(sequence, str) and re.fullmatch(r"[ACDEFGHIKLMNPQRSTVWY]+", sequence) for sequence in fixed)
+            ):
+                raise ProtocolError("Fixed construction sequences must exactly match the frozen submission size")
+            if not isinstance(static_construction.get("constructCount"), int) or isinstance(static_construction["constructCount"], bool) or static_construction["constructCount"] <= 0:
+                raise ProtocolError("Fixed construction must contain Proto constructs")
+            if not isinstance(static_construction.get("programResultCount"), int) or isinstance(static_construction["programResultCount"], bool) or static_construction["programResultCount"] <= 0:
+                raise ProtocolError("Fixed construction result count must be positive")
+            if static_construction["programResultCount"] > value.get("candidateBudget", 0):
+                raise ProtocolError("Fixed construction result count exceeds the candidate budget")
+            samples = static_construction.get("optimizerSamples")
+            if not isinstance(samples, list) or len(samples) != 1 or not isinstance(samples[0], dict):
+                raise ProtocolError("Fixed construction must freeze one optimizer sampling receipt")
+            if any(not isinstance(samples[0].get(key), int) or isinstance(samples[0][key], bool) or samples[0][key] <= 0 for key in ("numSamples", "numResults", "proposalBatchSize")):
+                raise ProtocolError("Fixed construction optimizer sampling must be positive")
+            if any(samples[0][key] > value.get("candidateBudget", 0) for key in ("numSamples", "numResults", "proposalBatchSize")):
+                raise ProtocolError("Fixed construction optimizer sampling exceeds the candidate budget")
         if generation is not None:
             if not isinstance(generation, dict) or generation.get("mode") != "proto_program":
                 raise ProtocolError("Pipeline generation policy is invalid")
@@ -255,8 +389,9 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
             if observed_scoring_hash != scoring_hash:
                 raise ProtocolError("Scoring pipeline hash does not match the frozen experiment")
         require_string(value, "pipelineHash", "sha256:")
-        canonical = json.dumps(pipeline, sort_keys=True, separators=(",", ":"))
-        pipeline_hash = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        if "pipelineCanonicalJson" in value and not isinstance(value["pipelineCanonicalJson"], str):
+            raise ProtocolError("Canonical pipeline bytes must be a string")
+        pipeline_hash = pipeline_policy_hash(pipeline, value.get("pipelineCanonicalJson"))
         if pipeline_hash != value["pipelineHash"]:
             raise ProtocolError("Pipeline policy hash does not match its canonical content")
     if value.get("designAdapter") not in {"mock", "proto"}:
@@ -293,37 +428,93 @@ def validate_bundle(value: dict[str, Any]) -> dict[str, Any]:
     for key in ("candidateBudget", "submissionSize"):
         if not isinstance(value.get(key), int) or value[key] <= 0:
             raise ProtocolError(f"{key} must be a positive integer")
+    if value.get("nativeExecution") is not None:
+        validate_native_execution(value)
     return value
 
 
-def validate_workflow_source(path: Path, bundle: dict[str, Any]) -> None:
-    """Bind a compiled v4 policy to the literal manifest in immutable trial.py."""
-    pipeline = bundle.get("pipeline", {})
-    expected = pipeline.get("sourceHash")
-    if bundle.get("format") != "autofold.trial-bundle.v4" or not expected:
-        return
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    assignments = []
-    for node in tree.body:
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AnnAssign) else []
-        if any(isinstance(target, ast.Name) and target.id == "AUTOFOLD_WORKFLOW" for target in targets):
-            assignments.append(node)
-    if len(assignments) != 1:
-        raise ProtocolError("Compiled workflow requires exactly one literal AUTOFOLD_WORKFLOW")
+def validate_native_execution(bundle: dict[str, Any]) -> None:
+    """Validate fresh authority independently of a scoring pipeline or format."""
+    from .native_search import NativeOutput, NativeSearch
+    execution = bundle.get("nativeExecution")
+    if not isinstance(execution, dict) or execution.get("protocol") not in {"native_search_v1", "native_fixed_control_v1"} or execution.get("observation") != "scoped_native_lifecycle_v1":
+        raise ProtocolError("Fresh native execution protocol or observation is invalid")
+    if bundle.get("designAdapter") != "proto":
+        raise ProtocolError("Native execution requires Proto")
+    worker = bundle.get("worker")
+    if not isinstance(worker, dict) or worker.get("format") != "autofold.worker-tree.v1":
+        raise ProtocolError("Fresh native execution requires an executing worker identity")
+    require_string(worker, "sourceHash", "sha256:")
+    outputs = execution.get("outputs")
     try:
-        workflow = ast.literal_eval(assignments[0].value)
-    except (ValueError, TypeError) as error:
-        raise ProtocolError("AUTOFOLD_WORKFLOW must be a literal") from error
-    if not isinstance(workflow, dict) or not isinstance(workflow.get("stages"), list):
-        raise ProtocolError("AUTOFOLD_WORKFLOW must be an object with stages")
-    for stage in workflow["stages"]:
-        if not isinstance(stage, dict):
-            raise ProtocolError("AUTOFOLD_WORKFLOW stages must be objects")
-        stage.setdefault("selection", "all")
-        stage.setdefault("configs", {})
-        stage.setdefault("dependsOn", [])
-        stage.setdefault("optional", False)
-    canonical = json.dumps(workflow, sort_keys=True, separators=(",", ":"))
-    actual = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    if actual != expected:
-        raise ProtocolError("Compiled pipeline does not match AUTOFOLD_WORKFLOW")
+        if not isinstance(outputs, list) or not outputs:
+            raise ValueError("Explicit native outputs required")
+        selected = tuple(NativeOutput(**row) for row in outputs)
+        if len(set(selected)) != len(selected):
+            raise ValueError("Repeated native outputs")
+    except (TypeError, ValueError) as error:
+        raise ProtocolError(f"Invalid native output selectors: {error}") from error
+    resources = execution.get("resources")
+    if not isinstance(resources, dict):
+        raise ProtocolError("Native resources are required")
+    for key in ("maximumSearchWallSeconds", "maximumWorkerWallSeconds", "reservedEvaluationWallSeconds", "maximumComputeReservationSeconds", "reservedSearchComputeSeconds", "reservedEvaluationComputeSeconds"):
+        number = resources.get(key)
+        if type(number) not in {int, float} or not math.isfinite(number) or number < (0 if key.startswith("reserved") or key == "maximumComputeReservationSeconds" else 1):
+            raise ProtocolError(f"Invalid native resource {key}")
+    if resources["maximumSearchWallSeconds"] + resources["reservedEvaluationWallSeconds"] > resources["maximumWorkerWallSeconds"]:
+        raise ProtocolError("Native search and evaluation reservations exceed worker wall authority")
+    if resources["reservedSearchComputeSeconds"] > resources["maximumSearchWallSeconds"] or resources["reservedEvaluationComputeSeconds"] > resources["reservedEvaluationWallSeconds"] or resources["reservedSearchComputeSeconds"] + resources["reservedEvaluationComputeSeconds"] > resources["maximumComputeReservationSeconds"]:
+        raise ProtocolError("Native compute reservations exceed their actual wall or compute authority")
+    descriptor = execution.get("descriptor")
+    pipeline = bundle.get("pipeline", {})
+    if not isinstance(pipeline, dict):
+        raise ProtocolError("Native evaluation pipeline must be an object")
+    if not isinstance(descriptor, dict):
+        raise ProtocolError("Native construction descriptor is required")
+    if execution["protocol"] == "native_search_v1":
+        try:
+            budget = descriptor["budget"]
+            search = NativeSearch(budget["maximumCandidates"], budget["maximumProposals"], budget["maximumSamplingCalls"], budget["maximumToolCalls"], budget["maximumWallSeconds"], tuple(NativeOutput(**o) for o in budget["outputs"]), tuple(budget["allowedTools"]))
+            if descriptor.get("format") != "autofold.native-search.v1" or not descriptor.get("projection") or not _same_json(outputs, budget["outputs"]) or search.maximum_wall_seconds != resources["maximumSearchWallSeconds"] or search.maximum_candidates > bundle["candidateBudget"]:
+                raise ValueError("Search descriptor, selectors or wall authority differ")
+        except (KeyError, TypeError, ValueError) as error:
+            raise ProtocolError(f"Invalid fresh native search descriptor: {error}") from error
+        if pipeline.get("nativeSearch") is not None and not _same_json(pipeline["nativeSearch"], descriptor):
+            raise ProtocolError("Pipeline and native search descriptors differ")
+        candidates = search.maximum_candidates
+    else:
+        if bundle.get("intent") not in {"calibrate", "negative_control"} or descriptor.get("format") != "autofold.static-construction.v1" or descriptor.get("semantics") != "native_object_v2" or descriptor.get("generatorCount") != 0 or descriptor.get("optimizerCount") != len(descriptor.get("nativeProjection", {}).get("projection", [])) or descriptor.get("proposalSources") != ["existing_results"] * descriptor.get("optimizerCount", 0):
+            raise ProtocolError("Invalid fresh native fixed control descriptor")
+        fixed = descriptor.get("fixedSequences")
+        if not isinstance(fixed, list) or not bundle.get("submissionSize", 0) <= len(fixed) <= bundle.get("candidateBudget", 0) or len(set(fixed)) != len(fixed) or any(not isinstance(s, str) or not re.fullmatch(r"[ACDEFGHIKLMNPQRSTVWY]+", s) for s in fixed):
+            raise ProtocolError("Native fixed control must bind the exact canonical panel")
+        projection = descriptor.get("nativeProjection")
+        if not isinstance(projection, dict) or not _same_json(projection.get("budget", {}).get("outputs"), outputs) or projection.get("budget", {}).get("maximumWallSeconds") != resources["maximumSearchWallSeconds"]:
+            raise ProtocolError("Native fixed construction projection and selectors differ")
+        if pipeline.get("staticConstruction") is not None and not _same_json(pipeline["staticConstruction"], descriptor):
+            raise ProtocolError("Pipeline and fixed control descriptors differ")
+        candidates = len(fixed)
+    expected = []
+    if pipeline:
+        if any(key in pipeline for key in ("sourceHash", "generation", "nativeSearch", "staticConstruction", "executionBudget")):
+            raise ProtocolError("Fresh nativeExecution is the sole construction and resource authority")
+        if pipeline.get("executionBackend") != "native_tool_sequence_v1" or pipeline.get("authoredDiagnostics"):
+            raise ProtocolError("Fresh native execution cannot use routed legacy diagnostics")
+        for stage in pipeline.get("stages", []):
+            seconds = stage.get("budget", {}).get("maximumGpuSeconds")
+            if type(seconds) not in {int, float} or not math.isfinite(seconds) or seconds <= 0:
+                raise ProtocolError("Native scorer request reservation must be finite and positive")
+            models = len(stage.get("models", []))
+            requests = candidates * len(bundle["seeds"]) * models
+            expected.append({"stageId": stage["id"], "maximumCandidates": candidates, "seedCount": len(bundle["seeds"]), "modelCount": models, "maximumRequests": requests, "perRequestTimeoutSeconds": seconds, "reservedWallSeconds": requests * seconds})
+        if any(g.get("allocation") is not None for g in pipeline.get("generation", {}).get("generators", [])):
+            raise ProtocolError("Fresh native execution cannot clamp legacy generator allocations")
+    if not _same_json(resources.get("invocationReservations"), expected) or not _same_json(resources["reservedEvaluationWallSeconds"], sum(r["reservedWallSeconds"] for r in expected)):
+        raise ProtocolError("Native invocation reservations do not match actual candidate/model/seed counts")
+
+
+def validate_workflow_source(path: Path, bundle: dict[str, Any]) -> None:
+    if bundle.get("nativeExecution") is not None:
+        return
+    from .compatibility.workflow_v1 import validate_workflow_source as historical_source
+    historical_source(path, bundle)

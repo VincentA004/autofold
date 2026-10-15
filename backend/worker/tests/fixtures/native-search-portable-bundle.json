@@ -1,0 +1,419 @@
+{
+  "format": "autofold.trial-bundle.v4",
+  "runId": "run_a36fdea6428c2063572f92fb6dbd79c0f721873571158fb72d216c9a429216b7",
+  "trialId": "trl_91c884c2186c4b18985adfb5b45dfeda",
+  "intent": "optimize",
+  "contractHash": "sha256:823a9a5cc4e9fd9e620674c1998bd1042fc630ed7c98ddaeaee3b591c2966d64",
+  "designAdapter": "proto",
+  "programPath": "trial.py",
+  "programHash": "sha256:7967980d296a9e08dde02193f50ab65645998176d2219d9a90b6d0aa28d8266a",
+  "modality": "short_peptide",
+  "evaluator": {
+    "id": "peptide-panel",
+    "version": "1",
+    "sourceHash": "sha256:98778d74180d4b4c83d8efc6e84db93ddfa9992d99418c3b5cfc5cfa42e4c647",
+    "direction": "minimize"
+  },
+  "proto": {
+    "root": "/Users/vincentallam/Developer/repo_store/github.com-evo-design-proto-language",
+    "languageCommit": "d3b7822f74ea64747cc751a3b2ab1aa6b799ac47",
+    "toolsCommit": "47e34afa5ea240a3b406e323dc38aa5dc85f223e"
+  },
+  "seeds": [
+    20260809
+  ],
+  "candidateBudget": 1,
+  "submissionSize": 1,
+  "generationReplicateId": "grep_a36fdea6428c2063572f92fb6dbd79c0f721873571158fb72d216c9a429216b7",
+  "targetArtifactHash": "sha256:050a1caffd2415d5b408c3670b3c41b372615d7622e36ab01a7b75b11eb0e388",
+  "targetArtifactPath": "target.json",
+  "targetStructurePath": "structure.pdb",
+  "evidenceAdapter": {
+    "id": "proto-structure-pipeline",
+    "version": "3",
+    "sourceHash": "sha256:8c3d4119274fdb893b73dbdce7c427ae2a8c00f862a0ea99050696c01b4a43f6",
+    "scoringPipelineHash": "sha256:adf856a3304b2fa844f716a36a25e882de203eae5fbeca6e4e500223ba80a660"
+  },
+  "pipeline": {
+    "id": "native-proto-search",
+    "protoToolsCommit": "47e34afa5ea240a3b406e323dc38aa5dc85f223e",
+    "generation": {
+      "mode": "proto_program",
+      "generators": [
+        {
+          "id": "random-protein",
+          "version": "d3b7822f74ea64747cc751a3b2ab1aa6b799ac47",
+          "toolsCalled": [
+            "random-protein-sample"
+          ]
+        }
+      ],
+      "budget": {
+        "maximumCandidates": 1,
+        "maximumGpuSeconds": 300
+      }
+    },
+    "nativeSearch": {
+      "format": "autofold.native-search.v1",
+      "budget": {
+        "maximumCandidates": 1,
+        "maximumProposals": 8,
+        "maximumSamplingCalls": 8,
+        "maximumToolCalls": 12,
+        "maximumWallSeconds": 300,
+        "allowedTools": [
+          "random-protein-sample",
+          "boltz2-prediction"
+        ],
+        "outputs": [
+          {
+            "construct": "design_with_fixed_partner",
+            "segment": "binder",
+            "lane": 0
+          }
+        ]
+      },
+      "projection": [
+        {
+          "lane": 0,
+          "externalInputs": [],
+          "numResults": 1,
+          "stages": [
+            {
+              "instanceId": "lane0.stage0",
+              "optimizer": "MCMCOptimizer",
+              "config": {
+                "seed": 2340553142,
+                "tracking_interval": 1,
+                "track_proposals": true,
+                "verbose": false,
+                "num_steps": 1,
+                "num_results": 1,
+                "proposals_per_result": 1,
+                "max_temperature": 0.0001,
+                "min_temperature": 0.00001,
+                "temperature_schedule": "exponential"
+              },
+              "settings": {
+                "num_steps": 1,
+                "num_proposals": 1,
+                "seed": 2340553142
+              },
+              "targetSegment": null,
+              "customLogging": null,
+              "numResults": 1,
+              "conditioning": null,
+              "generators": [
+                {
+                  "instanceId": "lane0.stage0.generator0",
+                  "key": "random-protein",
+                  "segments": [
+                    "lane0.construct0.segment0"
+                  ],
+                  "config": {
+                    "masking_strategy": {
+                      "method": "random",
+                      "num_mutations": 1,
+                      "mask_fraction": null,
+                      "fixed_positions": null,
+                      "temperature": 1
+                    },
+                    "codon_scheme": "UNIFORM",
+                    "excluded_amino_acids": null
+                  },
+                  "toolsCalled": [
+                    "random-protein-sample"
+                  ]
+                }
+              ],
+              "constraints": [
+                {
+                  "instanceId": "lane0.stage0.constraint0",
+                  "function": {
+                    "name": "protein_length_constraint",
+                    "sourceHash": "sha256:d024be92233b06ea8ec668ecb51c0869fd986f8433df7d519e0f21f40c520e57",
+                    "captured": {}
+                  },
+                  "backward": null,
+                  "inputs": [
+                    "lane0.construct0.segment0"
+                  ],
+                  "config": {
+                    "min_length": 12,
+                    "max_length": 12
+                  },
+                  "backwardConfig": null,
+                  "weight": 1,
+                  "threshold": 0,
+                  "label": "length_gate"
+                },
+                {
+                  "instanceId": "lane0.stage0.constraint1",
+                  "function": {
+                    "name": "protein_repetitiveness_constraint",
+                    "sourceHash": "sha256:9f631fb500941df107022286b6bfab050d75fd0c7dde1cf253e9926fb0f36805",
+                    "captured": {}
+                  },
+                  "backward": null,
+                  "inputs": [
+                    "lane0.construct0.segment0"
+                  ],
+                  "config": {
+                    "max_repetitiveness": 0.1,
+                    "min_repeat_length": 1
+                  },
+                  "backwardConfig": null,
+                  "weight": 1,
+                  "threshold": null,
+                  "label": "cpu_repeat_penalty"
+                }
+              ]
+            },
+            {
+              "instanceId": "lane0.stage1",
+              "optimizer": "MCMCOptimizer",
+              "config": {
+                "seed": 852377907,
+                "tracking_interval": 1,
+                "track_proposals": true,
+                "verbose": false,
+                "num_steps": 1,
+                "num_results": 1,
+                "proposals_per_result": 1,
+                "max_temperature": 0.0001,
+                "min_temperature": 0.00001,
+                "temperature_schedule": "exponential"
+              },
+              "settings": {
+                "num_steps": 1,
+                "num_proposals": 1,
+                "seed": 852377907
+              },
+              "targetSegment": null,
+              "customLogging": null,
+              "numResults": 1,
+              "conditioning": null,
+              "generators": [
+                {
+                  "instanceId": "lane0.stage1.generator0",
+                  "key": "random-protein",
+                  "segments": [
+                    "lane0.construct0.segment0"
+                  ],
+                  "config": {
+                    "masking_strategy": {
+                      "method": "random",
+                      "num_mutations": 1,
+                      "mask_fraction": null,
+                      "fixed_positions": null,
+                      "temperature": 1
+                    },
+                    "codon_scheme": "UNIFORM",
+                    "excluded_amino_acids": null
+                  },
+                  "toolsCalled": [
+                    "random-protein-sample"
+                  ]
+                }
+              ],
+              "constraints": [
+                {
+                  "instanceId": "lane0.stage1.constraint0",
+                  "function": {
+                    "name": "protein_length_constraint",
+                    "sourceHash": "sha256:d024be92233b06ea8ec668ecb51c0869fd986f8433df7d519e0f21f40c520e57",
+                    "captured": {}
+                  },
+                  "backward": null,
+                  "inputs": [
+                    "lane0.construct0.segment0"
+                  ],
+                  "config": {
+                    "min_length": 12,
+                    "max_length": 12
+                  },
+                  "backwardConfig": null,
+                  "weight": 1,
+                  "threshold": 0,
+                  "label": "length_gate"
+                },
+                {
+                  "instanceId": "lane0.stage1.constraint1",
+                  "function": {
+                    "name": "boltz_binding_strength_constraint",
+                    "sourceHash": "sha256:e8fd1fcfbcd5dbec898bb04537b9c5a96d353099f660fe5528380882a1542562",
+                    "captured": {}
+                  },
+                  "backward": null,
+                  "inputs": [
+                    "lane0.construct0.segment0",
+                    "lane0.construct0.segment1"
+                  ],
+                  "config": {
+                    "desired_higher": {
+                      "iptm": 1,
+                      "ligand_iptm": 0.8,
+                      "protein_iptm": 0.85,
+                      "complex_iplddt": 0.85,
+                      "complex_plddt": 0.8,
+                      "ptm": 0.7,
+                      "confidence_score": 0.85
+                    },
+                    "desired_lower": {
+                      "complex_ipde": 2,
+                      "complex_pde": 2
+                    },
+                    "tol_higher": {
+                      "iptm": 1,
+                      "ligand_iptm": 0.1,
+                      "protein_iptm": 0.07,
+                      "complex_iplddt": 0.1,
+                      "complex_plddt": 0.15,
+                      "ptm": 0.15,
+                      "confidence_score": 0.1
+                    },
+                    "tol_lower": {
+                      "complex_ipde": 2,
+                      "complex_pde": 3
+                    },
+                    "weights": null,
+                    "include_confidence_score": false,
+                    "return_component": "iptm",
+                    "boltz2_config": {
+                      "verbose": 0,
+                      "device": "cuda",
+                      "timeout": 1200,
+                      "seed": 20260809,
+                      "include_pae_matrix": false,
+                      "use_msa": false,
+                      "msa_search_config": null,
+                      "pair_heterocomplex_msas": true,
+                      "recycling_steps": 1,
+                      "sampling_steps": 20,
+                      "diffusion_samples": 1,
+                      "step_scale": 1.5,
+                      "max_msa_seqs": 8192,
+                      "subsample_msa": false,
+                      "num_workers": 4
+                    }
+                  },
+                  "backwardConfig": null,
+                  "weight": 1,
+                  "threshold": null,
+                  "label": "gpu_interface_confidence_penalty"
+                }
+              ]
+            }
+          ],
+          "constructs": [
+            {
+              "id": "lane0.construct0",
+              "label": "design_with_fixed_partner",
+              "segments": [
+                {
+                  "id": "lane0.construct0.segment0",
+                  "label": "binder",
+                  "type": "protein",
+                  "length": 12,
+                  "initial": {
+                    "sequence": "SVYNPIFNKYFG",
+                    "sequenceType": "protein",
+                    "metadata": {
+                      "sequence": "SVYNPIFNKYFG",
+                      "sequence_length": 12,
+                      "constraints": {},
+                      "generators": {}
+                    },
+                    "logits": null,
+                    "structure": null
+                  }
+                },
+                {
+                  "id": "lane0.construct0.segment1",
+                  "label": "fixed_target",
+                  "type": "protein",
+                  "length": 115,
+                  "initial": {
+                    "sequence": "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNA",
+                    "sequenceType": "protein",
+                    "metadata": {
+                      "sequence": "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNA",
+                      "sequence_length": 115,
+                      "constraints": {},
+                      "generators": {}
+                    },
+                    "logits": null,
+                    "structure": null
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "executionBudget": {
+      "semantics": "aggregate_worker_gpu_wall_v1",
+      "maximumGpuSeconds": 600
+    },
+    "authoredDiagnostics": [],
+    "executionBackend": "native_tool_sequence_v1",
+    "stages": [
+      {
+        "id": "boltz2-score",
+        "role": "scoring",
+        "models": [
+          {
+            "id": "boltz2-prediction",
+            "version": "47e34afa5ea240a3b406e323dc38aa5dc85f223e",
+            "toolKey": "boltz2-prediction",
+            "config": {
+              "use_msa": false,
+              "recycling_steps": 3,
+              "sampling_steps": 200,
+              "diffusion_samples": 1
+            }
+          }
+        ],
+        "dependsOn": [],
+        "budget": {
+          "maximumGpuSeconds": 120
+        },
+        "required": true,
+        "allowSkip": false,
+        "allowedSkips": []
+      },
+      {
+        "id": "chai1-score",
+        "role": "scoring",
+        "models": [
+          {
+            "id": "chai1-prediction",
+            "version": "47e34afa5ea240a3b406e323dc38aa5dc85f223e",
+            "toolKey": "chai1-prediction",
+            "config": {
+              "use_msa": false,
+              "num_trunk_recycles": 3,
+              "num_diffn_timesteps": 200,
+              "num_diffn_samples": 5
+            }
+          }
+        ],
+        "dependsOn": [
+          "boltz2-score"
+        ],
+        "budget": {
+          "maximumGpuSeconds": 180
+        },
+        "required": true,
+        "allowSkip": false,
+        "allowedSkips": []
+      }
+    ]
+  },
+  "pipelineHash": "sha256:30ae178966e8f990cbf50d3daa991f04c1e1198cf06c44a0870b3d48e854ea7d",
+  "worker": {
+    "format": "autofold.worker-tree.v1",
+    "sourceHash": "sha256:85db20b6f3fdc3ee9f492874c5da47ffad022a4c530ad2bbffb0c7423653adcf"
+  }
+}

@@ -14,9 +14,14 @@ import os
 import sys
 from pathlib import Path
 
+from .runtime import configure_headless
+
+configure_headless()
+
 from .adapters import ProtoDesignAdapter
 from .cli import load_evidence_adapter
 from .protocol import ProtocolError, read_json, write_json
+from .native_search import NativeExecutionStopped
 
 
 def parser() -> argparse.ArgumentParser:
@@ -32,6 +37,14 @@ def parser() -> argparse.ArgumentParser:
 
 def run(args: argparse.Namespace) -> None:
     bundle = read_json(args.runtime_bundle)
+    if bundle.get("nativeExecution") is not None:
+        from .adapters.proto import _prepare_runtime
+        from .cli import _validate_worker_tree
+        from .protocol import validate_native_execution
+        from .native_lifecycle import native_api
+        validate_native_execution(bundle)
+        _validate_worker_tree(bundle)
+        native_api(_prepare_runtime(bundle))
     if args.stage == "generation":
         result = ProtoDesignAdapter().generate(bundle, args.output)
     else:
@@ -60,7 +73,15 @@ def main(argv: list[str] | None = None) -> int:
     # and so on).  Preserve every non-control-flow exception so the parent
     # process, knowledge closeout, and next scientist iteration receive the
     # actual diagnostic instead of an opaque exit code.
-    except Exception as error:
+    except BaseException as error:
+        native_control = ()
+        try:
+            from proto_tools.utils.execution_observer import ExecutionCancelled, ObservationPublicationError
+            native_control = (ExecutionCancelled, ObservationPublicationError)
+        except ImportError:
+            pass
+        if not isinstance(error, (Exception, NativeExecutionStopped, *native_control)):
+            raise
         write_json(
             args.result.with_suffix(".error.json"),
             {"errorType": type(error).__name__, "error": str(error)},

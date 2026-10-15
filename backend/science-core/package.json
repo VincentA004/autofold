@@ -1,0 +1,53 @@
+{
+  "name": "@autofold/science-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./research/*": "./src/research/*.ts",
+    "./domain": "./src/research/domain.ts",
+    "./execution-protocol": "./src/research/execution-protocol.ts",
+    "./research-questions": "./src/research/research-questions.ts",
+    "./trial-reasoning": "./src/research/trial-reasoning.ts",
+    "./research-skills": "./src/research/research-skills.ts",
+    "./search-policy": "./src/research/search-policy.ts",
+    "./scientist-review": "./src/research/scientist-review.ts",
+    "./experiment-branches": "./src/research/experiment-branches.ts",
+    "./campaign-evidence": "./src/research/campaign-evidence.ts",
+    "./campaign-resources": "./src/research/campaign-resources.ts",
+    "./evidence-view": "./src/research/evidence-view.ts",
+    "./store": "./src/research/store.ts",
+    "./service": "./src/research/service.ts",
+    "./operations": "./src/research/operations.ts",
+    "./operation-service": "./src/research/operation-service.ts",
+    "./job-service": "./src/research/job-service.ts",
+    "./knowledge": "./src/research/knowledge.ts",
+    "./decision-evidence": "./src/research/decision-evidence.ts",
+    "./scientific-inquiry": "./src/research/scientific-inquiry.ts",
+    "./search-distributions": "./src/research/search-distributions.ts",
+    "./evaluator-calibration": "./src/research/evaluator-calibration.ts",
+    "./artifacts": "./src/research/artifacts.ts",
+    "./programs": "./src/research/programs.ts",
+    "./workflow": "./src/research/workflow.ts",
+    "./scientist-memory": "./src/research/scientist-memory.ts",
+    "./filesystem": "./src/util/confinement.ts",
+    "./trajectory-closeout": "./src/research/trajectory-closeout.ts",
+    "./prospective-measurement": "./src/research/prospective-measurement.ts",
+    "./scientist-kernel": "./src/research/scientist-kernel.ts",
+    "./decision-memory": "./src/research/decision-memory.ts"
+  },
+  "scripts": {
+    "test": "bun test src/research",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "4.1.8",
+    "gray-matter": "4.0.3"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "@types/node": "22.13.9",
+    "typescript": "5.8.2"
+  }
+}

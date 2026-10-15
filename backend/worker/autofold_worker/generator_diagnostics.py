@@ -12,6 +12,7 @@ import csv
 import os
 import shutil
 import threading
+import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -52,13 +53,19 @@ class GeneratorDiagnosticsCapture:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._previous_tmpdir: str | None = None
+        self._previous_tempfile_dir: str | bytes | None = None
 
     def __enter__(self) -> GeneratorDiagnosticsCapture:
         if not self.enabled:
             return self
-        self.root.mkdir(parents=True, exist_ok=True)
+        # Multiprocessing creates Unix sockets below TMPDIR. Run paths can
+        # already exceed AF_UNIX's ~108-byte limit before the socket suffix.
+        # Use a private short root; only summarized evidence belongs in output.
+        self.root = Path(tempfile.mkdtemp(prefix="afdiag-", dir="/tmp"))
         self._previous_tmpdir = os.environ.get("TMPDIR")
+        self._previous_tempfile_dir = tempfile.tempdir
         os.environ["TMPDIR"] = str(self.root)
+        tempfile.tempdir = str(self.root)
         self._thread = threading.Thread(target=self._watch, name="autofold-generator-diagnostics", daemon=True)
         self._thread.start()
         return self
@@ -74,6 +81,7 @@ class GeneratorDiagnosticsCapture:
             os.environ.pop("TMPDIR", None)
         else:
             os.environ["TMPDIR"] = self._previous_tmpdir
+        tempfile.tempdir = self._previous_tempfile_dir
         shutil.rmtree(self.root, ignore_errors=True)
 
     def _watch(self) -> None:
