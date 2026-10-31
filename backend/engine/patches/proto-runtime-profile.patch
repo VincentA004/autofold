@@ -1,0 +1,44 @@
+--- a/proto-tools/proto_tools/tools/structure_prediction/boltz2/boltz2.py
++++ b/proto-tools/proto_tools/tools/structure_prediction/boltz2/boltz2.py
+@@ -420,7 +420,20 @@
+     return Boltz2Output(structures=results)
+ 
+ 
+-def run_boltz2_on_complex(
++def run_boltz2_on_complex(config, sp_complex, complex_msas=None, instance=None, seed=None):
++    """Resolve an infrastructure-owned runtime without changing scientific calls."""
++    hook = os.environ.get("AUTOFOLD_BOLTZ2_RUNTIME_HOOK")
++    if hook:
++        import importlib.util
++        spec = importlib.util.spec_from_file_location("_autofold_boltz_runtime", hook)
++        module = importlib.util.module_from_spec(spec)
++        spec.loader.exec_module(module)
++        return module.predict(config, sp_complex, complex_msas, instance, seed,
++                              _run_boltz2_native_on_complex)
++    return _run_boltz2_native_on_complex(config, sp_complex, complex_msas, instance, seed)
++
++
++def _run_boltz2_native_on_complex(
+     config: Boltz2Config,
+     sp_complex: Any,
+     complex_msas: Any = None,
+--- a/proto-tools/proto_tools/utils/tool_cache.py
++++ b/proto-tools/proto_tools/utils/tool_cache.py
+@@ -22,6 +22,7 @@
+ """
+ 
+ import hashlib
++import os
+ import json
+ import logging
+ import sys
+@@ -244,6 +245,9 @@
+     """
+     # Create a list of all parameters in a deterministic order
+     key_parts = [tool_key]
++    runtime = os.environ.get("AUTOFOLD_RUNTIME_FINGERPRINT")
++    if runtime:
++        key_parts.append(f"execution-profile={runtime}")
+ 
+     # Add positional arguments
+     key_parts.extend(_serialize_for_cache_key(arg) for arg in args)

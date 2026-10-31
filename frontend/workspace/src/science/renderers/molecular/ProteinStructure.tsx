@@ -1,5 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import type { JSX } from "solid-js"
+import { createStore } from "solid-js/store"
 import type { PluginContext } from "molstar/lib/mol-plugin/context"
 import type { BuiltInTrajectoryFormat } from "molstar/lib/mol-plugin-state/formats/trajectory"
 import type { ArtifactRenderProps } from "../registry"
@@ -30,6 +31,7 @@ type Status = "idle" | "loading" | "ready" | "empty" | "error"
 type Preset = "auto" | "polymer-cartoon" | "atomic-detail" | "illustrative" | "molecular-surface"
 type Granularity = "element" | "residue" | "chain"
 type Theme = "dark" | "light"
+type ViewMode = "backbone" | "molstar"
 
 export function ProteinStructure(props: ArtifactRenderProps): JSX.Element {
   let host!: HTMLDivElement
@@ -41,10 +43,18 @@ export function ProteinStructure(props: ArtifactRenderProps): JSX.Element {
   const [theme, setTheme] = createSignal<Theme>("dark")
   const [selection, setSelection] = createSignal({ label: "", count: 0, history: 0 })
   const [measurements, setMeasurements] = createSignal(0)
+  const [view, setView] = createStore({
+    mode: (props.kind === "protein-structure" ? "backbone" : "molstar") as ViewMode,
+    controls: !props.compact,
+    hasBackbone: false,
+    switching: false,
+    legend: [] as Array<[string, string]>,
+  })
   const summary = createMemo(() => analyzeMolecularSource(props.data, props.kind))
   const subscriptions: Array<{ unsubscribe(): void }> = []
   let disposed = false
   let token = 0
+  let resizeObserver: ResizeObserver | undefined
 
   onMount(async () => {
     setStatus("loading")
@@ -71,6 +81,11 @@ export function ProteinStructure(props: ArtifactRenderProps): JSX.Element {
         p.dispose()
         return
       }
+      const { Color } = await import("molstar/lib/mol-util/color")
+      if (disposed) { p.dispose(); return }
+      if (p.canvas3d) p.canvas3d.setProps({ renderer: { ...p.canvas3d.props.renderer, backgroundColor: Color(0x171717) } })
+      resizeObserver = new ResizeObserver(() => p.handleResize())
+      resizeObserver.observe(host)
       p.selectionMode = true
       p.managers.interactivity.setProps({ granularity: granularity() })
       const syncSelection = () => {
@@ -128,7 +143,8 @@ export function ProteinStructure(props: ArtifactRenderProps): JSX.Element {
     props.onInspect({
       facts,
       capabilities: [
-        "5 representation presets",
+        "Backbone and full Mol* views",
+        "5 molecular representation presets",
         "Atom, residue, and chain selection",
         "Distance measurements",
         "Camera reset",
@@ -167,10 +183,15 @@ export function ProteinStructure(props: ArtifactRenderProps): JSX.Element {
       const trajectory = await p.builders.structure.parseTrajectory(raw, src.format as BuiltInTrajectoryFormat)
       if (my !== token || disposed) return
       await p.builders.structure.hierarchy.applyPreset(trajectory, "default", {
-        representationPreset: preset(),
+        representationPreset: "empty",
       })
       if (my !== token || disposed) return
+      setView("hasBackbone", p.managers.structure.hierarchy.current.structures.some(s => (s.cell.obj?.data.polymerResidueCount ?? 0) > 0))
+      if (!view.hasBackbone) setView("mode", "molstar")
+      await applyRepresentation(p)
+      if (my !== token || disposed) return
       p.handleResize()
+      await resetCamera(p)
       setStatus("ready")
     } catch (e) {
       if (my === token && !disposed) {
@@ -182,9 +203,59 @@ export function ProteinStructure(props: ArtifactRenderProps): JSX.Element {
 
   async function changePreset(value: Preset) {
     setPreset(value)
+    await changeView("molstar")
+  }
+
+  async function resetCamera(p = plugin()) {
+    if (!p) return
+    if (view.mode !== "backbone" || !p.canvas3d) { p.managers.camera.reset(); return }
+    const { backboneCamera } = await import("./backbone-camera")
+    if (disposed || !p.canvas3d) return
+    const snapshot = backboneCamera(p.managers.structure.hierarchy.current.structures.flatMap(s => s.cell.obj ? [s.cell.obj.data] : []), host.clientWidth, host.clientHeight, p.canvas3d.camera.state.fov)
+    p.managers.camera.reset(snapshot, 0)
+  }
+
+  async function applyRepresentation(p: PluginContext) {
+    const { PresetStructureRepresentations } = await import("molstar/lib/mol-plugin-state/builder/structure/representation-preset")
+    const provider = view.mode === "backbone"
+      ? (await import("./backbone-preset")).BackbonePreset
+      : PresetStructureRepresentations[preset()]
+    if (disposed) return
+    // Swap representations on the existing structure: keep camera, selections,
+    // and measurement state rather than clearing/reparsing the source file.
+    await p.managers.structure.component.applyPreset(p.managers.structure.hierarchy.current.structures, provider)
+    if (disposed) return
+    const [{ CameraHelperParams }, { ParamDefinition }] = await Promise.all([
+      import("molstar/lib/mol-canvas3d/helper/camera-helper"),
+      import("molstar/lib/mol-util/param-definition"),
+    ])
+    if (disposed) return
+    p.canvas3d?.setProps({ transparentBackground: view.mode === "backbone", camera: { helper: view.mode === "backbone"
+      ? { axes: { name: "off", params: {} } }
+      : ParamDefinition.getDefaultValues(CameraHelperParams) } })
+    const legend = p.managers.structure.hierarchy.current.structures
+      .flatMap(s => s.components.flatMap(c => c.representations))
+      .map(r => r.cell.obj?.data.repr.theme.color.legend)
+      .find(l => l?.kind === "table-legend")
+    setView("legend", view.mode === "backbone" && legend?.kind === "table-legend"
+      ? legend.table.map(([label, color]) => [label, `#${color.toString(16).padStart(6, "0")}`] as [string, string])
+      : [])
+  }
+
+  async function changeView(mode: ViewMode) {
     const p = plugin()
-    if (!p || status() !== "ready") return
-    await load(p, props.data, props.kind)
+    if (!p || status() !== "ready" || view.switching) return
+    setView({ mode, switching: true })
+    try {
+      await applyRepresentation(p)
+    } catch (e) {
+      if (!disposed) {
+        setError(e instanceof Error ? e.message : String(e))
+        setStatus("error")
+      }
+    } finally {
+      if (!disposed) setView("switching", false)
+    }
   }
 
   function changeGranularity(value: Granularity) {
@@ -201,7 +272,7 @@ export function ProteinStructure(props: ArtifactRenderProps): JSX.Element {
     p.canvas3d.setProps({
       renderer: {
         ...p.canvas3d.props.renderer,
-        backgroundColor: Color(next === "light" ? 0xf5f6f8 : 0x0b0d12),
+        backgroundColor: Color(next === "light" ? 0xf5f6f8 : 0x171717),
       },
     })
   }
@@ -258,6 +329,7 @@ export function ProteinStructure(props: ArtifactRenderProps): JSX.Element {
 
   onCleanup(() => {
     disposed = true
+    resizeObserver?.disconnect()
     token++
     subscriptions.forEach((subscription) => subscription.unsubscribe())
     const p = plugin()
@@ -276,37 +348,53 @@ export function ProteinStructure(props: ArtifactRenderProps): JSX.Element {
       data-component="mol-structure"
       data-kind={props.kind}
       data-status={status()}
+      data-view={view.mode}
+      aria-busy={status() === "loading" || view.switching}
       style={{
         position: "relative",
         width: "100%",
         height: `${height()}px`,
         overflow: "hidden",
         "border-radius": "4px",
-        background: "#0b0d12",
+        background: view.mode === "backbone" ? "transparent" : "var(--color-bg, #171717)",
       }}
     >
       <div ref={host} style={{ position: "absolute", inset: "0" }} />
-      <div
+      <Show when={status() === "ready"}>
+        <div data-component="molecular-view-switch" style={{ position: "absolute", top: "12px", right: "12px", display: "flex", gap: "6px", "z-index": 4 }}>
+          <Show when={view.hasBackbone}>
+            <div role="group" aria-label="Structure view" style={{ display: "flex", gap: "2px" }}>
+              <For each={[["backbone", "Backbone"], ["molstar", "Mol*"]] as const}>{([mode, label]) =>
+                <button type="button" aria-pressed={view.mode === mode} disabled={view.switching} style={{ ...buttonStyle(), color: view.mode === mode ? "#5fc2b6" : "#a3a29e", "border-color": view.mode === mode ? "#5fc2b660" : "#f5f5f224" }} onClick={() => void changeView(mode)}>{label}</button>
+              }</For>
+            </div>
+          </Show>
+          <button type="button" aria-expanded={view.controls} style={buttonStyle()} onClick={() => setView("controls", !view.controls)}>Controls</button>
+        </div>
+      </Show>
+      <Show when={view.controls}><div
         data-component="molecular-controls"
         data-preset={preset()}
         data-granularity={granularity()}
         data-background={theme()}
         style={{
           position: "absolute",
-          top: "12px",
+          top: "52px",
           left: "12px",
           right: "12px",
           display: "flex",
           "align-items": "center",
           gap: "6px",
           "flex-wrap": "wrap",
+          "max-height": "calc(100% - 104px)",
+          "overflow-y": "auto",
           "z-index": 3,
-          "pointer-events": status() === "ready" ? "auto" : "none",
+          "pointer-events": status() === "ready" && !view.switching ? "auto" : "none",
           opacity: status() === "ready" ? 1 : 0,
           transition: "opacity 160ms ease",
         }}
       >
-        <select
+        <Show when={view.mode === "molstar"}><select
           aria-label="Representation"
           value={preset()}
           onChange={(event) => void changePreset(event.currentTarget.value as Preset)}
@@ -317,7 +405,7 @@ export function ProteinStructure(props: ArtifactRenderProps): JSX.Element {
           <option value="atomic-detail">Atomic detail</option>
           <option value="illustrative">Illustrative</option>
           <option value="molecular-surface">Molecular surface</option>
-        </select>
+        </select></Show>
         <select
           aria-label="Selection granularity"
           value={granularity()}
@@ -328,7 +416,7 @@ export function ProteinStructure(props: ArtifactRenderProps): JSX.Element {
           <option value="residue">Residue selection</option>
           <option value="chain">Chain selection</option>
         </select>
-        <button type="button" style={buttonStyle()} onClick={() => plugin()?.managers.camera.reset()}>
+        <button type="button" style={buttonStyle()} onClick={() => void resetCamera()}>
           Reset camera
         </button>
         <button type="button" style={buttonStyle()} onClick={() => void toggleTheme()}>
@@ -355,14 +443,15 @@ export function ProteinStructure(props: ArtifactRenderProps): JSX.Element {
             Clear measurements
           </button>
         </Show>
-      </div>
+      </div></Show>
       <Show when={selection().count > 0 || measurements() > 0}>
         <div
           data-component="molecular-selection"
           style={{
             position: "absolute",
-            top: "58px",
-            left: "12px",
+            bottom: "12px",
+            right: "12px",
+            "max-width": "55%",
             padding: "7px 9px",
             "border-radius": "6px",
             border: "1px solid rgba(255,255,255,0.14)",
@@ -384,7 +473,12 @@ export function ProteinStructure(props: ArtifactRenderProps): JSX.Element {
           </Show>
         </div>
       </Show>
-      <Show when={summary()}>
+      <Show when={view.mode === "backbone" && view.legend.length}>
+        <div data-component="molecular-chain-legend" style={{ position: "absolute", bottom: "12px", left: "12px", display: "flex", gap: "12px", "flex-wrap": "wrap", "max-width": "calc(100% - 24px)", color: theme() === "dark" ? "#a3a29e" : "#434746", font: "11px/1.4 ui-sans-serif, system-ui, sans-serif", "pointer-events": "none" }}>
+          <For each={view.legend}>{([label, color]) => <span style={{ display: "flex", "align-items": "center", gap: "6px" }}><span style={{ width: "7px", height: "7px", "border-radius": "50%", background: color }} />{props.chainLabels?.[label] || `Chain ${label}`}</span>}</For>
+        </div>
+      </Show>
+      <Show when={!props.compact && view.mode === "molstar" && summary()}>
         {(value) => (
           <div
             data-component="molecular-summary"
@@ -485,9 +579,9 @@ function selectStyle(): JSX.CSSProperties {
     height: "30px",
     padding: "0 27px 0 9px",
     border: "1px solid rgba(255,255,255,0.17)",
-    "border-radius": "6px",
-    background: "rgba(9, 12, 18, 0.88)",
-    color: "#eef1f6",
+    "border-radius": "4px",
+    background: "rgba(23, 23, 23, 0.92)",
+    color: "#e6e5e2",
     font: "11px/1 ui-sans-serif, system-ui, sans-serif",
     "backdrop-filter": "blur(12px)",
     cursor: "pointer",
@@ -499,9 +593,9 @@ function buttonStyle(): JSX.CSSProperties {
     height: "30px",
     padding: "0 9px",
     border: "1px solid rgba(255,255,255,0.17)",
-    "border-radius": "6px",
-    background: "rgba(9, 12, 18, 0.88)",
-    color: "#eef1f6",
+    "border-radius": "4px",
+    background: "rgba(23, 23, 23, 0.92)",
+    color: "#e6e5e2",
     font: "11px/1 ui-sans-serif, system-ui, sans-serif",
     "backdrop-filter": "blur(12px)",
     cursor: "pointer",

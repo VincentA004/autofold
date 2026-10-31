@@ -49,33 +49,26 @@ function exportHasRuntimeBindings(node: ts.ExportDeclaration) {
   return node.exportClause.elements.some((item) => !item.isTypeOnly)
 }
 
-test("workspace source has no static runtime import that pulls Molstar into an entry chunk", async () => {
-  const root = new URL("../", import.meta.url)
-  const offenders: string[] = []
-  for await (const relative of new Bun.Glob("src/**/*.{ts,tsx}").scan({
-    cwd: fileURLToPath(root),
-    onlyFiles: true,
-  })) {
-    const source = await Bun.file(new URL(relative, root)).text()
-    const file = ts.createSourceFile(relative, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
-
-    for (const statement of file.statements) {
-      if (
-        ts.isImportDeclaration(statement) &&
-        isMolstar(packageName(statement.moduleSpecifier)) &&
-        importHasRuntimeBindings(statement)
-      ) {
-        offenders.push(relative)
-      }
-      if (
-        ts.isExportDeclaration(statement) &&
-        isMolstar(packageName(statement.moduleSpecifier)) &&
-        exportHasRuntimeBindings(statement)
-      ) {
-        offenders.push(relative)
-      }
+test("the app entry keeps Molstar behind a dynamic import boundary", async () => {
+  const root = fileURLToPath(new URL("../", import.meta.url))
+  const seen = new Set<string>(), offenders: string[] = []
+  const options: ts.CompilerOptions = { moduleResolution: ts.ModuleResolutionKind.Bundler, baseUrl: root, paths: { "@/*": ["src/*"] }, allowJs: true }
+  const visit = async (path: string) => {
+    const { realpathSync } = await import("node:fs")
+    path = realpathSync(path)
+    if (seen.has(path) || path.includes("/node_modules/") || !/\.[cm]?[jt]sx?$/.test(path)) return
+    seen.add(path)
+    const source = ts.createSourceFile(path, await Bun.file(path).text(), ts.ScriptTarget.Latest, true)
+    for (const statement of source.statements) {
+      let spec: string | undefined
+      if (ts.isImportDeclaration(statement) && importHasRuntimeBindings(statement)) spec = packageName(statement.moduleSpecifier)
+      if (ts.isExportDeclaration(statement) && exportHasRuntimeBindings(statement)) spec = packageName(statement.moduleSpecifier)
+      if (!spec) continue
+      if (isMolstar(spec)) { offenders.push(path); continue }
+      const resolved = ts.resolveModuleName(spec, path, options, ts.sys).resolvedModule?.resolvedFileName
+      if (resolved && /\.[cm]?[jt]sx?$/.test(resolved)) await visit(resolved)
     }
   }
-
+  await visit(fileURLToPath(new URL("../src/entry.tsx", import.meta.url)))
   expect(offenders).toEqual([])
 })

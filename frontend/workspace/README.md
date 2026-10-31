@@ -1,64 +1,33 @@
-## Usage
+# Autofold workspace
 
-Dependencies for these templates are managed with [pnpm](https://pnpm.io) using `pnpm up -Lri`.
+The campaign chooser, chat, trial atlas and linked Markdown notebook share the
+native discovery engine in `backend/engine`. The UI retains the OpenScience-derived
+visual theme and scientific viewers; the old session server and generated SDK are
+not required.
 
-This is the reason you see a `pnpm-lock.yaml`. That said, any package manager will work. This file can safely be removed once you clone a template.
+From the repository root:
 
-```bash
-$ npm install # or pnpm install or yarn install
+```sh
+npm ci --ignore-scripts
+npm run build
+npm start
 ```
 
-### Learn more on the [Solid Website](https://solidjs.com) and come chat with us on our [Discord](https://discord.com/invite/solidjs)
+Open [http://127.0.0.1:4450](http://127.0.0.1:4450). Root opens the campaign chooser;
+`?campaign=<run>` opens the selected campaign. The workspace back arrow returns to
+the chooser, and the campaign title opens the compact switcher.
 
-## Available Scripts
+The notebook defaults to the selected document and its direct links. Its full
+campaign view adds filters, document search, zoom and pan. Clicking graph nodes
+or Markdown links opens the saved document beside the graph.
 
-In the project directory, you can run:
+See [workspace setup](../../docs/workspace.md) for archive/live mode and
+[the repository README](../../README.md) for prerequisites, checks and provider
+configuration. The service binds to loopback; omitting `--live` serves archives
+read only.
 
-### `npm run dev` or `npm start`
-
-Runs the app in the development mode.<br>
-Open [http://localhost:3000](http://localhost:3000) to view it in the browser.
-
-The page will reload if you make edits.<br>
-
-### `npm run build`
-
-Builds the app for production to the `dist` folder.<br>
-It correctly bundles Solid in production mode and optimizes the build for the best performance.
-
-The build is minified and the filenames include the hashes.<br>
-Your app is ready to be deployed!
-
-## E2E Testing
-
-`bun run test:e2e` is the safe default: it allocates fresh backend, Vite, and
-model ports, creates a temp sandbox, seeds data, and never reuses an existing
-port-3000 listener. `test:e2e:local` is an equivalent compatibility alias.
-It also starts a loopback-only deterministic model so prompt/reply coverage never
-uses developer credentials or an external inference service. Raw
-`playwright test` is intentionally rejected because it cannot establish which
-backend or checkout owns an existing listener.
-
-```bash
-bunx playwright install
-bun run test:e2e
-bun run test:e2e -- --grep "settings"
+```sh
+npm run typecheck --workspace @synsci/workspace
+npm run test --workspace @synsci/workspace
+npm run build
 ```
-
-To test an already-running or packaged OpenScience server, opt in explicitly.
-The external command requires `PLAYWRIGHT_BASE_URL`, does not start Vite, and
-derives the SDK backend host/port from that URL unless separately overridden:
-
-```bash
-PLAYWRIGHT_BASE_URL=http://127.0.0.1:4112 bun run test:e2e:external
-PLAYWRIGHT_BASE_URL=http://127.0.0.1:4112 bun run test:e2e:packaged
-```
-
-Environment options for explicit external runs:
-
-- `PLAYWRIGHT_BASE_URL` (required server URL)
-- `PLAYWRIGHT_SERVER_HOST` / `PLAYWRIGHT_SERVER_PORT` (optional SDK backend override)
-
-## Deployment
-
-You can deploy the `dist` folder to any static host provider (netlify, surge, now, etc.)

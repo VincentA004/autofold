@@ -44,6 +44,10 @@ export interface ArtifactRenderProps {
   data: unknown
   /** Optional display height hint in px. */
   height?: number
+  /** Quiet inline preview; molecular controls can be opened from the corner. */
+  compact?: boolean
+  /** Optional chain names for a curated structure card. IDs remain in the source. */
+  chainLabels?: Record<string, string>
   /** Publish live renderer facts and selection state to the artifact inspector. */
   onInspect?: (inspection: ArtifactInspection) => void
 }

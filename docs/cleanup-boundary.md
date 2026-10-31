@@ -1,62 +1,35 @@
-# Autofold donor-code boundary
+# Product and historical-code boundary
 
-Autofold selectively retains the OpenScience runtime and interface. Cleanup must
-follow runtime reachability and product value rather than folder names.
+The current application has three npm workspaces:
 
-## Preserve
+- `backend/engine`: embedded Pi scientist, campaign/archive API, native sessions,
+  notebook initialization, assessment protection and bounded read-only helpers.
+- `frontend/workspace`: campaign chooser, chat, trial atlas, linked Markdown
+  notebook and scientific artifact viewers.
+- `frontend/ui`: shared theme, styling and sanitization support retained from
+  the OpenScience-derived interface.
 
-- The frontend entry chain, home and session routes, Atlas visual shell, styles,
-  public assets, shared UI package, and persisted-layout compatibility keys.
-- Session rendering, prompt input, skills browser, file explorer, artifact
-  inspector, compute jobs, terminal, evidence graph, and project selection.
-- Scientific file dispatch, molecular and chemical renderers, notebooks,
-  manuscripts, tables, and provenance views. These are part of peptide research.
-- The backend project/session/agent/provider/tool runtime required by the current
-  interface.
-- The research control plane, worker, compute authority, project context,
-  storage, and server routes.
-- `NOTICE.openscience`, `LICENSES/`, and `docs/upstream-provenance.md`.
+Root commands and current backend imports use these workspaces. Scientific
+execution also depends on files reached through skills and shell commands:
+`backend/engine/scripts`, `runtime`, `patches`, `skills`, notebook templates and
+offline tests are part of the current engine even when absent from a TypeScript
+import graph. Python/model environments and weights are installed separately.
 
-## Compatibility identifiers to defer
+The retired `backend/science-core`, `backend/worker`, generated SDK/plugin code,
+old acceptance tooling and obsolete experiment launchers have been removed from
+the product source tree. They are not needed to browse saved current-engine
+campaigns or run the embedded scientist. Historical architecture, acceptance and
+operator documents for that implementation were removed with them. Git history
+preserves the earlier implementation; checkpoint `ebf2f49` predates this cleanup.
 
-The following remain intentionally even when users see the Autofold name:
+Campaign workspaces, native session histories, scientific outputs and local
+environments are user data. Cleanup must not delete or rewrite them. Keep them
+outside the product repository, or in its ignored campaign directories. Old job
+databases and receipts are not automatically migrated into native Pi sessions.
 
-- `@synsci/*` package imports and the internal `OpenScience` backend namespace.
-- The `openscience` executable until an Autofold wrapper and packaging path ship.
-- `OPENSCIENCE_*` environment aliases, `openscience.json`, XDG storage, and
-  `.openscience` project data until a three-generation Autofold/OpenScience/synsc
-  migration is tested.
-- Serialized format names, HTTP headers, DOM events, theme identifiers, generated
-  SDK names, and local-storage keys. Renaming these without dual-read support can
-  orphan existing state or break clients.
-
-## Research-kernel extraction order
-
-1. Split project bootstrap into base research, chat, and optional developer-tool
-   bootstraps.
-2. Consolidate the three artifact systems only after UI consumers move to the
-   campaign/trial/run model.
-
-Completed in the first backend extraction:
-
-- Legacy session migration now loads behind a compatibility-only dynamic import;
-  core project identity no longer imports the session-agent runtime.
-- Compute execution now depends on a narrow runtime security policy; the broad
-  OpenScience namespace remains only as a compatibility facade for older callers.
-- Local Autofold development starts from a dedicated server entrypoint without
-  statically registering every donor CLI command. The legacy CLI remains intact.
-
-## Verified cleanup candidates
-
-Generated build/test directories and Python caches may be discarded and rebuilt.
-The following frontend source batch has no inbound import from the browser entry
-graph and can be quarantined together after typecheck and production-build checks:
-
-- `atlas/Composer.tsx`, `atlas/OpenScienceFileTree.tsx`
-- `atlas/model-tier.ts`, `utils/model-cost.ts`
-- `atlas/store/files.ts`, `atlas/store/projects.ts`
-- `components/status-popover.tsx`
-- `utils/dom.ts`, `utils/index.ts`, `utils/prompt.ts`, `utils/solid-dnd.tsx`
-
-Do not infer that workers, CSS, declaration files, tests, or package exports are
-dead from ordinary static imports alone.
+Retained OpenScience-derived code still requires its attribution and license
+notices: preserve `NOTICE.openscience`, `LICENSE`, `LICENSES/` and
+[upstream provenance](upstream-provenance.md). Internal `@synsci/ui` package and
+theme identifiers are compatibility names, not evidence that the retired backend
+is still required. Evaluate future cleanup through runtime reachability, package
+exports, CSS/assets, skill references and validation, rather than names alone.

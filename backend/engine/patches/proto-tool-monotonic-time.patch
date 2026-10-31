@@ -1,0 +1,47 @@
+--- a/proto-tools/proto_tools/tools/tool_registry.py
++++ b/proto-tools/proto_tools/tools/tool_registry.py
+@@ -984,7 +984,7 @@
+                 else:
+                     config = _coerce_model(config, config_class, key, "config")  # type: ignore[assignment]
+ 
+-                start_time = time.time()
++                start_time = time.monotonic()
+                 last_exception: Exception | None = None
+                 last_traceback = ""
+                 warning_list = []
+@@ -1008,7 +1008,7 @@
+                     dispatched.tool_id = key
+                     if dispatched.success is None:
+                         dispatched.success = True
+-                    dispatched.execution_time = time.time() - start_time
++                    dispatched.execution_time = time.monotonic() - start_time
+                     return _post_dispatch_cache_and_expand(
+                         key,
+                         spec,
+@@ -1326,7 +1326,7 @@
+ 
+                                 # Populate metadata fields
+                                 result.tool_id = key
+-                                result.execution_time = time.time() - start_time
++                                result.execution_time = time.monotonic() - start_time
+                                 if result.success is None:
+                                     result.success = True
+ 
+@@ -2019,7 +2019,7 @@
+     """Construct a structured error output for a failed tool execution."""
+     return output_class.model_construct(
+         tool_id=key,
+-        execution_time=time.time() - start_time,
++        execution_time=time.monotonic() - start_time,
+         success=False,
+         timestamp=datetime.now(),
+         warnings=warning_strings or [],
+@@ -2043,7 +2043,7 @@
+     Args:
+         output_class (type[BaseToolOutput]): Output model class for the failed tool.
+         key (str): Tool registry key.
+-        start_time (float): Execution start timestamp from ``time.time()``.
++        start_time (float): Execution start timestamp from ``time.monotonic()``.
+         exception (Exception): The exception raised by the tool.
+         traceback_str (str): Formatted traceback string.
+         warning_strings (list[str] | None): Warnings captured during execution.

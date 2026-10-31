@@ -7,3 +7,13 @@ output/
 __pycache__/
 *.py[cod]
 .autofold/
+
+# Local campaign state. Prefer --workspace outside this product checkout.
+# No trailing slash: campaigns may be a compatibility symlink.
+/campaigns
+/notebook/
+/programs/
+/inputs/
+/sources/
+/campaign.md
+/compute.md

@@ -1,0 +1,253 @@
+{
+  "version": 1,
+  "trials": [
+    {
+      "path": "output/trials/t-5d410af4742b",
+      "title": "Propose N8 substitutions",
+      "metrics": [],
+      "artifacts": []
+    },
+    {
+      "path": "output/trials/t-c9bc2c567363",
+      "title": "Predict the complexes",
+      "metrics": [
+        {
+          "label": "N8S model iPTM",
+          "path": "output/trials/t-c9bc2c567363/output/N8S_metrics.json",
+          "pointer": "/boltz2_metrics/iptm",
+          "meaning": "Predicted interface confidence, not affinity."
+        },
+        {
+          "label": "N8S mean PAE",
+          "path": "output/trials/t-c9bc2c567363/output/N8S_metrics.json",
+          "pointer": "/boltz2_metrics/avg_pae",
+          "unit": "\u00c5",
+          "meaning": "Mean model-predicted aligned error."
+        },
+        {
+          "label": "N8S binding affinity",
+          "path": "output/trials/t-c9bc2c567363/output/N8S_metrics.json",
+          "pointer": "/affinity",
+          "meaning": "No measured affinity for this proposal."
+        }
+      ],
+      "artifacts": [
+        {
+          "path": "output/trials/t-c9bc2c567363/output/captures/397b87138d9645048c4032286bbf451b/structure_5.cif",
+          "label": "MDM2 / N8S \u00b7 predicted complex",
+          "kind": "protein-structure"
+        }
+      ]
+    },
+    {
+      "path": "output/trials/t-bcc6f3060f15",
+      "title": "Refine the comparison",
+      "metrics": [
+        {
+          "label": "N8S shared-backbone RMSD",
+          "path": "output/trials/t-bcc6f3060f15/output/refined_analysis.json",
+          "pointer": "/records/5/shared_position_peptide_ca_rmsd_A",
+          "unit": "\u00c5",
+          "meaning": "Sequence-aware shared-position comparison to 3EQS, computed after prediction."
+        },
+        {
+          "label": "N8S contact-count correlation",
+          "path": "output/trials/t-bcc6f3060f15/output/refined_analysis.json",
+          "pointer": "/records/5/contact_count_pearson_r"
+        },
+        {
+          "label": "N8S L10\u2013Y100 distance",
+          "path": "output/trials/t-bcc6f3060f15/output/refined_analysis.json",
+          "pointer": "/records/5/predicted_hbonds_A/Leu10 O - Tyr100 OH",
+          "unit": "\u00c5",
+          "meaning": "Predicted local contact geometry; see later notebook qualifications."
+        }
+      ],
+      "artifacts": []
+    }
+  ],
+  "workspace": {
+    "title": "MDM2 peptide discovery",
+    "topic": "MDM2",
+    "conversation": "Evidence & next test",
+    "conversationDetail": "MDM2 \u00b7 five peptide hypotheses",
+    "direction": "Characterize five N8 substitutions with PMI and PMI-N8A as controls.",
+    "handoff": "3 trials \u00b7 7 predicted complexes",
+    "shortlist": "analysis/final-shortlist.json",
+    "overview": {
+      "question": "What did we learn about these peptides, and what should we test next?",
+      "paragraphs": [
+        "We have **five new hypotheses at PMI position 8**, with their predicted binding modes preserved. We haven\u2019t measured whether any of them bind more tightly.",
+        "**N8S** has the closest shared backbone to the reference among the new proposals. Here is its predicted complex with MDM2."
+      ],
+      "caution": "**The local geometry still needs caution.** N8S changes a reference contact. Three other proposals show severe local clashes, and so does the known PMI positive control.",
+      "next": "The next useful step is experimental binding and functional characterization of the shortlist, with the published peptides as controls."
+    },
+    "documents": {
+      "campaign": "campaign.md",
+      "index": "notebook/index.md",
+      "design": "notebook/investigations/design.md",
+      "review": "notebook/investigations/record-review.md",
+      "paper": "sources/pmi/article.txt",
+      "assessment1": "output/trials/t-5d410af4742b/assessment.md",
+      "assessment2": "output/trials/t-c9bc2c567363/assessment.md",
+      "assessment3": "output/trials/t-bcc6f3060f15/assessment.md"
+    },
+    "graph": [
+      {
+        "path": "notebook/index.md",
+        "label": "Current understanding",
+        "x": 47,
+        "y": 44
+      },
+      {
+        "path": "notebook/investigations/design.md",
+        "label": "Design investigation",
+        "x": 26,
+        "y": 23
+      },
+      {
+        "path": "notebook/investigations/record-review.md",
+        "label": "Later review",
+        "x": 75,
+        "y": 67
+      },
+      {
+        "path": "sources/pmi/article.txt",
+        "label": "PMI primary source",
+        "x": 72,
+        "y": 17
+      },
+      {
+        "path": "output/trials/t-5d410af4742b/assessment.md",
+        "label": "Proposal assessment",
+        "x": 22,
+        "y": 66
+      },
+      {
+        "path": "output/trials/t-c9bc2c567363/assessment.md",
+        "label": "Prediction assessment",
+        "x": 46,
+        "y": 83
+      },
+      {
+        "path": "output/trials/t-bcc6f3060f15/assessment.md",
+        "label": "Analysis assessment",
+        "x": 79,
+        "y": 44
+      }
+    ],
+    "trials": {
+      "t-5d410af4742b": {
+        "kind": "Native Proto \u00b7 CPU",
+        "question": "Can a native single-position search propose chemically distinct N8 substitutions while preserving the PMI contact scaffold?",
+        "result": "300 proposals; 239 passed the authored filter, giving 16 distinct substitutions. The pool is unranked. PMI-N8A remains a published control.",
+        "note": "The cysteine exclusion was an authored conservative choice, not an established chemistry limitation. See the later review.",
+        "caption": "16 distinct substitutions \u00b7 native Proto",
+        "files": [
+          "plan.md",
+          "program/main.py",
+          "output/pool.json",
+          "output/optimizer_history.json",
+          "assessment.md"
+        ],
+        "metrics": [
+          {
+            "label": "CPU proposals",
+            "path": "output/trials/t-5d410af4742b/output/optimizer_history.json",
+            "pointer": "",
+            "count": true
+          },
+          {
+            "label": "Admitted",
+            "path": "output/trials/t-5d410af4742b/output/optimizer_history.json",
+            "pointer": "",
+            "count": true,
+            "filter": {
+              "pointer": "/optimizer/filter_status",
+              "equals": "passed"
+            }
+          },
+          {
+            "label": "Distinct substitutions",
+            "path": "output/trials/t-5d410af4742b/output/summary.json",
+            "pointer": "/num_unique_admissible_substitutions"
+          }
+        ]
+      },
+      "t-c9bc2c567363": {
+        "kind": "Boltz2 \u00b7 7 predictions",
+        "question": "Do the five new proposals preserve the published PMI binding mode against the exact MDM2 domain?",
+        "result": "Seven complexes were saved with exact chain mapping, native CIFs, and complete 97 \u00d7 97 PAE matrices. Structural diagnostics support further investigation; they do not establish affinity.",
+        "note": "One predictor, one seed, use_msa=False. Local geometry errors also occur in the PMI positive control.",
+        "caption": "5 proposals + 2 controls \u00b7 Boltz2",
+        "files": [
+          "plan.md",
+          "program/main.py",
+          "output/predictions.json",
+          "output/summary.csv",
+          "output/captures/397b87138d9645048c4032286bbf451b/structure_5.cif",
+          "assessment.md"
+        ],
+        "metrics": [
+          {
+            "label": "N8S model iPTM",
+            "path": "output/trials/t-c9bc2c567363/output/N8S_metrics.json",
+            "pointer": "/boltz2_metrics/iptm"
+          },
+          {
+            "label": "N8S mean PAE",
+            "path": "output/trials/t-c9bc2c567363/output/N8S_metrics.json",
+            "pointer": "/boltz2_metrics/avg_pae",
+            "unit": "\u00c5"
+          },
+          {
+            "label": "Structures saved",
+            "path": "output/trials/t-c9bc2c567363/output/predictions.json",
+            "pointer": "/returned_structures",
+            "denominator": "/requested_complexes"
+          }
+        ]
+      },
+      "t-bcc6f3060f15": {
+        "kind": "Captured analysis \u00b7 CPU",
+        "question": "Can shared-position structural comparison recover valid RMSD measurements for the mutated sequences?",
+        "result": "The captured analysis fixed the original sequence-matching limitation using the previously saved structures. N8S has the lowest shared-position RMSD among the new proposals. No new prediction was run.",
+        "note": "The 2 \u00c5 cutoff was chosen after exploratory analysis of these structures. The later operator note qualifies it as post-hoc.",
+        "caption": "Sequence-aware analysis \u00b7 CPU",
+        "files": [
+          "plan.md",
+          "program/main.py",
+          "inputs/predictions.json",
+          "output/refined_table.csv",
+          "output/refined_analysis.json",
+          "assessment.md"
+        ],
+        "metrics": [
+          {
+            "label": "N8S shared RMSD",
+            "path": "output/trials/t-bcc6f3060f15/output/refined_analysis.json",
+            "pointer": "/records/5/shared_position_peptide_ca_rmsd_A",
+            "unit": "\u00c5",
+            "meaning": "Sequence-aware shared-position comparison to 3EQS, computed after prediction."
+          },
+          {
+            "label": "Contact correlation",
+            "path": "output/trials/t-bcc6f3060f15/output/refined_analysis.json",
+            "pointer": "/records/5/contact_count_pearson_r"
+          },
+          {
+            "label": "L10\u2013Y100 distance",
+            "path": "output/trials/t-bcc6f3060f15/output/refined_analysis.json",
+            "pointer": "/records/5/predicted_hbonds_A/Leu10 O - Tyr100 OH",
+            "unit": "\u00c5",
+            "meaning": "Predicted local contact geometry; see later notebook qualifications."
+          }
+        ]
+      }
+    },
+    "atlasSubtitle": "One proposal round \u00b7 screening and subsequent analysis",
+    "atlasNote": "Trial 2 investigates selected hypotheses from Trial 1. Trial 3 consumes Trial 2\u2019s saved predictions and structures. No further biological improvement is implied.",
+    "campaignSummary": "Produce a defensible shortlist of newly proposed linear 12-mer hypotheses against the supplied MDM2 domain."
+  }
+}

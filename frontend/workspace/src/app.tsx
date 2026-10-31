@@ -1,26 +1,11 @@
 import '@/index.css'
-import {ErrorBoundary, type ParentProps} from 'solid-js'
-import {MetaProvider} from '@solidjs/meta'
-import {I18nProvider} from '@synsci/ui/context'
-import {ThemeProvider} from '@synsci/ui/theme'
-import {DialogProvider} from '@synsci/ui/context/dialog'
-import {LanguageProvider, useLanguage} from '@/context/language'
-import {ErrorPage} from './pages/error'
-import ResearchWorkspace from './research/workspace'
-function UiI18nBridge(props: ParentProps) {
-  const language = useLanguage()
-  return <I18nProvider value={{locale: language.locale, t: language.t}}>{props.children}</I18nProvider>
-}
-declare global {
-  interface Window {
-    __OPENSCIENCE__?: {updaterEnabled?: boolean; deepLinks?: string[]}
-    __OPENSCIENCE_BASE_URL__?: string
-  }
-}
+import { ErrorBoundary, type ParentProps } from 'solid-js'
+import { ThemeProvider } from '@synsci/ui/theme/context'
+import CampaignWorkspace from './campaign/Workspace'
+import CampaignChooser from './campaign/CampaignChooser'
+import { archiveClient } from './campaign/client'
+
 export function AppBaseProviders(props: ParentProps) {
-  return <MetaProvider><ThemeProvider><LanguageProvider><UiI18nBridge><ErrorBoundary fallback={error => <ErrorPage error={error} />}><DialogProvider>{props.children}</DialogProvider></ErrorBoundary></UiI18nBridge></LanguageProvider></ThemeProvider></MetaProvider>
+  return <ThemeProvider><ErrorBoundary fallback={(error, reset) => <main style={{ padding: '32px', color: '#e6e5e2', background: '#171717', height: '100vh' }}><h1>Workspace unavailable</h1><p>{error instanceof Error ? error.message : String(error)}</p><button onClick={reset}>Try again</button></main>}>{props.children}</ErrorBoundary></ThemeProvider>
 }
-/** The research product talks directly to the Pi API. Scientific visualizers remain reusable modules. */
-export function AppInterface(props: {defaultUrl?: string}) {
-  return <ResearchWorkspace defaultUrl={props.defaultUrl} />
-}
+export function AppInterface() { return archiveClient.campaign ? <CampaignWorkspace /> : <CampaignChooser /> }

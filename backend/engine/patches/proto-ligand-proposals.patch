@@ -1,0 +1,20 @@
+--- a/proto_language/core/generator.py
++++ b/proto_language/core/generator.py
+@@ -83,6 +83,8 @@
+ 
+     input_type: ClassVar[GeneratorInputType]
+     allows_empty_starting_sequence: ClassVar[bool] = False
++    # Explicit opt-in for chemistry-aware proposals; existing generators remain protected.
++    allows_ligand_proposals: ClassVar[bool] = False
+ 
+     @abstractmethod
+     def __init__(self) -> None:
+@@ -144,7 +146,7 @@
+             )
+ 
+         for segment in normalized:
+-            if segment.is_ligand:
++            if segment.is_ligand and not self.allows_ligand_proposals:
+                 raise ValueError(
+                     f"Cannot assign generator to ligand segment '{segment.label}'. Ligand segments cannot be mutated."
+                 )

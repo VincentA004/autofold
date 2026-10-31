@@ -1,0 +1,21 @@
+--- a/proto-tools/proto_tools/tools/structure_prediction/alphafold2/alphafold2.py
++++ b/proto-tools/proto_tools/tools/structure_prediction/alphafold2/alphafold2.py
+@@ -304,6 +304,18 @@
+         >>> result = run_alphafold2(inputs, config)
+         >>> print(f"Average pLDDT: {result.structures[0].metrics.avg_plddt:.2f}")
+     """
++    import os
++    hook = os.environ.get("AUTOFOLD_BOLTZ2_RUNTIME_HOOK")
++    if hook:
++        import importlib.util
++        spec = importlib.util.spec_from_file_location("_autofold_model_runtime", hook)
++        module = importlib.util.module_from_spec(spec)
++        spec.loader.exec_module(module)
++        return module.predict_alphafold2(inputs, config, instance, _run_alphafold2_native)
++    return _run_alphafold2_native(inputs, config, instance)
++
++
++def _run_alphafold2_native(inputs, config, instance=None):
+     prepared_complexes = inputs.prepare_complexes()
+ 
+     structure_outputs = []

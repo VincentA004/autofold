@@ -1,0 +1,35 @@
+# Native RFD4 configuration, not a calibrated binding objective.
+# Adapt reward terms to the hypothesis. This bridge supports local structural
+# providers and interior checkpoints in a fixed 60-step schedule.
+metrics:
+  inline_metrics:
+    interchain_interactions:
+      _target_: rfproteina.metrics.interaction_metrics.InterchainInteractionMetric
+search:
+  beam_width: 2
+  n_branch: 2
+  save_rollouts: true
+  save_states: true
+  checkpoints:
+    "20":
+      metrics: [interchain_interactions]
+      rewards:
+        interchain_interactions.hbond_atom_pair_count_coi:
+          weight: 1.0
+          clip: {max: 6.0}
+          normalize_by: 6.0
+        interchain_interactions.hydrophobic_atom_pair_count_coi:
+          weight: 0.25
+          clip: {max: 20.0}
+          normalize_by: 20.0
+    "40":
+      metrics: [interchain_interactions]
+      rewards:
+        interchain_interactions.hbond_atom_pair_count_coi:
+          weight: 1.0
+          clip: {max: 6.0}
+          normalize_by: 6.0
+        interchain_interactions.hydrophobic_atom_pair_count_coi:
+          weight: 0.25
+          clip: {max: 20.0}
+          normalize_by: 20.0

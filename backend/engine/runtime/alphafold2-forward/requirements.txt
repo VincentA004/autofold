@@ -1,0 +1,5 @@
+# Native Proto forward prediction only. No gradient/hallucination backend.
+jax[cuda12]==0.5.3
+colabdesign @ git+https://github.com/sokrypton/ColabDesign.git@5ab4efaba2321a6c3c314b82d2fff8e0241f5c2d
+biopython
+ipython

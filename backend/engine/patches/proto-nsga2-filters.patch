@@ -1,0 +1,280 @@
+diff --git a/.claude/skills/implement-optimizer/SKILL.md b/.claude/skills/implement-optimizer/SKILL.md
+index 9cfef60..a295025 100644
+--- a/.claude/skills/implement-optimizer/SKILL.md
++++ b/.claude/skills/implement-optimizer/SKILL.md
+@@ -166,3 +166,11 @@ Copy this and check off as you go:
+ - [ ] Type check passes: `mypy proto_language/optimizer/`
+ 
+ If any check fails, fix before proceeding.
++
++## NSGA-II eligibility
++
++Carry current filter outcomes through parent/child selection. Filter-rejected
++proposals have empty objective vectors, rank after eligible proposals and are
++excluded from final results; do not reconstruct eligibility from scalar penalties
++or stale metadata. Test rejected initial proposals, rejected offspring and an
++all-rejected population. See `notes/error-handling.md`.
+diff --git a/notes/error-handling.md b/notes/error-handling.md
+index aa69b27..fb5a09c 100644
+--- a/notes/error-handling.md
++++ b/notes/error-handling.md
+@@ -90,3 +90,13 @@ See `proto-tools/notes/error-handling.md` for the full tool-side contract.
+ | `proto_language/core/generator.py` | Generator assignment and proposal validation |
+ | `proto_language/utils/serialization.py` | `format_pydantic_error()` |
+ | `proto_language/utils/scoring.py` | `MAX_ENERGY`, `MIN_ENERGY` constants (re-exported from `proto_language.utils`) |
++
++## Genetic Algorithm NSGA-II Filters
++
++NSGA-II carries filter outcomes separately from scalar energy. Rejected proposals
++skip scoring and have no objective vector; they rank after every eligible proposal,
++even if their penalty is finite or inherited metadata contains older scores. They
++may fill unused working-population slots so mutation can recover feasibility, but
++are excluded from accepted results. Fewer than `num_results` (including zero) can
++be returned if too few pass. Missing, nonfinite or flagged fallback objectives on
++eligible proposals remain errors.
+diff --git a/proto_language/optimizer/genetic_algorithm_optimizer.py b/proto_language/optimizer/genetic_algorithm_optimizer.py
+index 65c8513..e658de0 100644
+--- a/proto_language/optimizer/genetic_algorithm_optimizer.py
++++ b/proto_language/optimizer/genetic_algorithm_optimizer.py
+@@ -144,7 +144,7 @@ class GeneticAlgorithmOptimizerConfig(BaseOptimizerConfig):
+     survivor_selection: Literal["energy", "nsga2"] = ConfigField(
+         default="energy",
+         title="Survivor Selection",
+-        description="Select survivors by scalar energy or NSGA-II Pareto rank over scoring constraints.",
++        description="Select survivors by scalar energy or NSGA-II Pareto rank over scoring constraints. NSGA-II ranks filter-rejected proposals last and excludes them from results.",
+     )
+     crossover_positions: dict[str, list[int]] | None = ConfigField(
+         default=None,
+@@ -230,6 +230,7 @@ class GeneticAlgorithmOptimizer(Optimizer):
+         self.num_steps = config.num_generations
+         self._population_energies: list[float] = []
+         self._population_objectives: list[list[float]] = []
++        self._population_outcomes: list[str] = []
+         self._population_nsga2_ranks: list[float] = []
+         self._population_nsga2_crowding: list[float] = []
+ 
+@@ -328,7 +329,10 @@ class GeneticAlgorithmOptimizer(Optimizer):
+         self._score_current_proposals()
+         self._population_energies = list(self.energy_scores)
+         if self.config.survivor_selection == "nsga2":
+-            self._population_objectives = self._extract_objective_vectors(self._copy_current_population())
++            self._population_outcomes = list(self._proposal_outcomes)
++            self._population_objectives = self._extract_objective_vectors(
++                self._copy_current_population(), self._population_outcomes
++            )
+             self._update_nsga2_population_state()
+ 
+     def _score_current_proposals(self) -> None:
+@@ -728,7 +732,8 @@ class GeneticAlgorithmOptimizer(Optimizer):
+             for parent_segment, child_segment in zip(parent_sequences, child_sequences, strict=True)
+         ]
+         combined_energies = [float(energy) for energy in parent_energies + child_energies]
+-        objective_vectors = self._extract_objective_vectors(combined_by_segment)
++        combined_outcomes = self._population_outcomes + self._proposal_outcomes
++        objective_vectors = self._extract_objective_vectors(combined_by_segment, combined_outcomes)
+         selected_indices = _nsga2_select_survivors(objective_vectors, self.population_size)
+ 
+         next_by_segment: list[list[Sequence]] = [[] for _ in self.segments]
+@@ -743,20 +748,32 @@ class GeneticAlgorithmOptimizer(Optimizer):
+         self._set_proposal_population(next_by_segment)
+         self._population_energies = next_energies
+         self._population_objectives = next_objectives
++        self._population_outcomes = [combined_outcomes[idx] for idx in selected_indices]
+         self._update_nsga2_population_state()
+-        self._proposal_outcomes = ["accepted"] * len(next_energies)
++        self._proposal_outcomes = list(self._population_outcomes)
+         self._proposal_energy_scores = list(next_energies)
+ 
+-    def _extract_objective_vectors(self, population: list[list[Sequence]]) -> list[list[float]]:
+-        """Extract lower-is-better per-constraint objective vectors from sequence metadata."""
++    def _extract_objective_vectors(
++        self, population: list[list[Sequence]], outcomes: list[str] | None = None
++    ) -> list[list[float]]:
++        """Extract objective vectors, using an empty vector for filter-rejected proposals.
++
++        Eligibility comes from the current filter evaluation, never from scalar
++        penalties or possibly stale scoring metadata inherited from a parent.
++        """
+         scoring_constraints = [constraint for constraint in self.constraints if constraint.threshold is None]
+         if not scoring_constraints:
+             raise ValueError("GeneticAlgorithmOptimizer survivor_selection='nsga2' requires scoring constraints.")
+         if not population:
+             return []
++        if outcomes is not None and len(outcomes) != len(population[0]):
++            raise RuntimeError("NSGA-II outcomes must match the proposal population size.")
+ 
+         objective_vectors: list[list[float]] = []
+         for proposal_idx in range(len(population[0])):
++            if outcomes is not None and outcomes[proposal_idx] != "accepted":
++                objective_vectors.append([])
++                continue
+             objective_vector: list[float] = []
+             for constraint in scoring_constraints:
+                 sequence = self._metadata_sequence_for_constraint(population, constraint, proposal_idx)
+@@ -821,6 +838,7 @@ class GeneticAlgorithmOptimizer(Optimizer):
+             raise RuntimeError("num_results must be resolved before writing GA results.")
+         if self.config.survivor_selection == "nsga2" and self._population_objectives:
+             ranked = _nsga2_ranked_indices(self._population_objectives, self._population_energies)
++            ranked = [idx for idx in ranked if self._population_objectives[idx]]
+         else:
+             ranked = sorted(
+                 range(len(self._population_energies)), key=lambda idx: _energy_sort_key(self._population_energies[idx])
+@@ -873,10 +891,15 @@ def _dominates(objective_a: list[float], objective_b: list[float]) -> bool:
+ 
+ 
+ def _non_dominated_sort(objective_vectors: list[list[float]]) -> list[list[int]]:
+-    """Partition objective vectors into Pareto fronts with lower values preferred."""
++    """Partition objectives into fronts, with unscored rejected proposals last."""
+     n = len(objective_vectors)
+     if n == 0:
+         return []
++    rejected = [idx for idx, vector in enumerate(objective_vectors) if not vector]
++    if rejected:
++        eligible = [idx for idx, vector in enumerate(objective_vectors) if vector]
++        eligible_fronts = _non_dominated_sort([objective_vectors[idx] for idx in eligible])
++        return [[eligible[idx] for idx in front] for front in eligible_fronts] + [rejected]
+ 
+     domination_counts = [0] * n
+     dominated_by: list[list[int]] = [[] for _ in range(n)]
+@@ -905,11 +928,13 @@ def _non_dominated_sort(objective_vectors: list[list[float]]) -> list[list[int]]
+ 
+ def _crowding_distance(objective_vectors: list[list[float]], front: list[int]) -> dict[int, float]:
+     """Compute NSGA-II crowding distance for one Pareto front."""
++    if not front or not objective_vectors[front[0]]:
++        return dict.fromkeys(front, 0.0)
+     if len(front) <= 2:
+         return {idx: float("inf") for idx in front}
+ 
+     distances = dict.fromkeys(front, 0.0)
+-    num_objectives = len(objective_vectors[0]) if objective_vectors else 0
++    num_objectives = len(objective_vectors[front[0]])
+     for objective_idx in range(num_objectives):
+         sorted_front = sorted(front, key=lambda idx: objective_vectors[idx][objective_idx])
+         distances[sorted_front[0]] = float("inf")
+diff --git a/tests/language_tests/optimizer_tests/test_genetic_algorithm_optimizer.py b/tests/language_tests/optimizer_tests/test_genetic_algorithm_optimizer.py
+index 327bfa4..a0a87bb 100644
+--- a/tests/language_tests/optimizer_tests/test_genetic_algorithm_optimizer.py
++++ b/tests/language_tests/optimizer_tests/test_genetic_algorithm_optimizer.py
+@@ -1,5 +1,6 @@
+ """Tests for the generic genetic algorithm optimizer."""
+ 
++import copy
+ from contextlib import nullcontext
+ 
+ import pytest
+@@ -25,6 +26,115 @@ from proto_language.optimizer.genetic_algorithm_optimizer import (
+ )
+ 
+ 
++def _filtered_nsga2(seeds, rejected):
++    """Build a CPU-only native program with strict filter-before-score checks."""
++    segment = Segment(sequence=seeds[0], sequence_type="dna", label="candidate")
++    segment.result_sequences = [Sequence(sequence=s, sequence_type="dna") for s in seeds]
++    scored = []
++
++    def admissible(rows, config):
++        return [ConstraintOutput(score=float(seq.sequence in rejected)) for (seq,) in rows]
++
++    def loss(rows, config):
++        values = []
++        for (seq,) in rows:
++            assert seq.sequence not in rejected
++            scored.append(seq.sequence)
++            values.append(ConstraintOutput(score=0.8))
++        return values
++
++    optimizer = GeneticAlgorithmOptimizer(
++        constructs=[Construct([segment])],
++        generators=[],
++        constraints=[
++            Constraint(inputs=[segment], function=admissible, threshold=0, label="admissible"),
++            Constraint(inputs=[segment], function=loss, label="loss"),
++        ],
++        config=GeneticAlgorithmOptimizerConfig(
++            num_generations=2,
++            population_size=len(seeds),
++            num_results=len(seeds),
++            offspring_per_generation=1,
++            crossover_rate=0,
++            survivor_selection="nsga2",
++            track_proposals=True,
++        ),
++    )
++    return segment, optimizer, scored
++
++
++def test_nsga2_filters_skip_objectives_and_preserve_rejection_outcomes() -> None:
++    segment, optimizer, scored = _filtered_nsga2(["TTTT", "AAAA", "CCCC", "GGGG"], {"TTTT", "CCCC", "GGGG"})
++    Program([optimizer], num_results=4, seed=7, compute=nullcontext()).run()
++    assert scored and set(scored) == {"AAAA"}
++    assert segment.result_sequences
++    assert all(seq.sequence == "AAAA" for seq in segment.result_sequences)
++    assert "admissible" in optimizer._population_outcomes
++    assert all(
++        vector == []
++        for vector, outcome in zip(optimizer._population_objectives, optimizer._population_outcomes, strict=True)
++        if outcome != "accepted"
++    )
++    assert len(segment.result_sequences) < 4
++    assert len(optimizer.energy_scores) == len(segment.result_sequences)
++    assert len(optimizer.history) == 3
++
++
++def test_nsga2_rejected_child_cannot_reuse_parent_scores(monkeypatch) -> None:
++    segment, optimizer, scored = _filtered_nsga2(["AAAA", "AAAA"], {"TTTT"})
++
++    def rejected_offspring(parents, energies, generation):
++        child = copy.deepcopy(parents[0][0])
++        assert "loss" in child._constraints_metadata
++        child.sequence = "TTTT"
++        return [[child]]
++
++    monkeypatch.setattr(optimizer, "_make_offspring", rejected_offspring)
++    Program([optimizer], num_results=2, seed=7, compute=nullcontext()).run()
++    assert set(scored) == {"AAAA"}
++    assert [seq.sequence for seq in segment.result_sequences] == ["AAAA", "AAAA"]
++    assert optimizer._population_outcomes == ["accepted", "accepted"]
++
++
++def test_nsga2_all_rejected_returns_no_accepted_results() -> None:
++    segment, optimizer, scored = _filtered_nsga2(["TTTT", "CCCC"], {"TTTT", "CCCC"})
++    Program([optimizer], num_results=2, seed=7, compute=nullcontext()).run()
++    assert not scored
++    assert segment.result_sequences == []
++    assert optimizer.energy_scores == []
++    assert optimizer._population_outcomes == ["admissible", "admissible"]
++
++
++def test_nsga2_can_recover_from_an_all_rejected_population(monkeypatch) -> None:
++    segment, optimizer, _scored = _filtered_nsga2(["TTTT", "CCCC"], {"TTTT", "CCCC"})
++    monkeypatch.setattr(optimizer, "_make_offspring", lambda *_: [[Sequence(sequence="AAAA", sequence_type="dna")]])
++    Program([optimizer], num_results=2, seed=7, compute=nullcontext()).run()
++    assert [seq.sequence for seq in segment.result_sequences] == ["AAAA", "AAAA"]
++
++
++def test_nsga2_filter_eligibility_does_not_depend_on_scalar_penalty(monkeypatch) -> None:
++    segment, optimizer, _scored = _filtered_nsga2(["AAAA", "TTTT"], {"TTTT"})
++    score = optimizer.score_energy
++    monkeypatch.setattr(optimizer, "score_energy", lambda: score(filter_penalty=-100.0))
++    Program([optimizer], num_results=2, seed=7, compute=nullcontext()).run()
++    assert all(seq.sequence == "AAAA" for seq in segment.result_sequences)
++
++
++def test_nsga2_still_rejects_missing_objectives_on_eligible_candidates() -> None:
++    segment, optimizer, _scored = _filtered_nsga2(["AAAA", "CCCC"], set())
++    with pytest.raises(ValueError, match="missing metadata"):
++        optimizer._extract_objective_vectors([[segment.original_sequence]], ["accepted"])
++
++
++def test_nsga2_crowding_ignores_rejected_first_vector() -> None:
++    objectives = [[], [0.1, 0.8], [0.8, 0.1], [0.5, 0.5], []]
++    assert _non_dominated_sort(objectives) == [[1, 2, 3], [0, 4]]
++    distances = _crowding_distance(objectives, [1, 2, 3])
++    assert distances[3] == pytest.approx(2.0)
++    assert _crowding_distance(objectives, [0, 4]) == {0: 0.0, 4: 0.0}
++    assert set(_nsga2_select_survivors(objectives, 2)) == {1, 2}
++
++
+ class TargetAConfig(BaseModel):
+     """Dummy config for a deterministic test constraint."""
+ 
