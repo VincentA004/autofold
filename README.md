@@ -77,16 +77,9 @@ The system separates agent execution, scientific computation and record
 inspection. Pi manages the agent loop; Autofold integrates it with scientific
 skills, native Proto programs, captured experiments and a campaign-scoped API.
 
-```mermaid
-flowchart TD
-    UI[SolidJS browser workspace] -->|HTTP commands / SSE events| API[Bun campaign service]
-    API --> PI[Embedded Pi scientist]
-    CLI[Terminal scientist] --> PI
-    PI -->|Native tools| PROTO[Proto programs / Python trial runner]
-    PI -->|Read and write| FILES[Campaign files and native sessions]
-    PROTO -->|Captured programs, receipts and outputs| FILES
-    API -->|Archive projection| FILES
-```
+![Autofold system architecture showing the browser frontend, Bun orchestration service, Python scientific execution and shared campaign filesystem](docs/images/architecture.svg)
+
+[View diagram full size](docs/images/architecture.svg) · [Editable Excalidraw JSON](docs/diagrams/architecture.excalidraw)
 
 ### Runtime and interface
 
